@@ -7,6 +7,7 @@ extends Resource
 @export var basal_autonomy_floor: float = 0.15
 @export var basal_autonomy_gain: float = 0.35
 @export var temperature: float = 273.0
+@export_range(0.0, 1.0, 0.01) var oxygen_fraction: float = 0.0
 
 func get_basal_autonomy() -> float:
 	return clampf(basal_autonomy_floor + basal_autonomy_gain * nutrient_density, 0.0, 1.0)
@@ -17,5 +18,6 @@ func to_snapshot() -> Dictionary:
 		"basal_autonomy_floor": basal_autonomy_floor,
 		"basal_autonomy_gain": basal_autonomy_gain,
 		"temperature": temperature,
+		"oxygen_fraction": oxygen_fraction,
 		"basal_autonomy": get_basal_autonomy(),
 	}

@@ -19,6 +19,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/CellPhysics.gd",
 	"res://scripts/system/CellMetabolism.gd",
 	"res://scripts/system/CellBehavior.gd",
+	"res://scripts/system/RespirationRules.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
@@ -70,6 +71,8 @@ func _initialize() -> void:
 	if not _check_genome_codec():
 		failures += 1
 	if not _check_cell_behavior():
+		failures += 1
+	if not _check_respiration_rules():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -603,6 +606,40 @@ func _check_cell_behavior() -> bool:
 		push_error("SmokeTest: behavior intent application failed")
 		return false
 	print("SmokeTest: OK deterministic 8-4-6 cell behavior / bounded outputs / division inheritance")
+	return true
+
+func _check_respiration_rules() -> bool:
+	var rules: Script = load("res://scripts/system/RespirationRules.gd") as Script
+	var anaerobic_at_limit: Dictionary = rules.call("evaluate", 0, 0.08)
+	var anaerobic_above_limit: Dictionary = rules.call("evaluate", 0, 0.080001)
+	var aerobic_full: Dictionary = rules.call("evaluate", 1, 0.21)
+	var aerobic_hypoxic: Dictionary = rules.call("evaluate", 1, 0.08)
+	var facultative_oxygenated: Dictionary = rules.call("evaluate", 2, 0.21)
+	var facultative_anoxic: Dictionary = rules.call("evaluate", 2, 0.0)
+	if not anaerobic_at_limit.get("valid", false) or anaerobic_at_limit.get("toxic", true):
+		push_error("SmokeTest: anaerobic toxicity threshold must be strictly greater than 8 percent")
+		return false
+	if not anaerobic_above_limit.get("toxic", false) or not is_equal_approx(float(anaerobic_above_limit.get("efficiency", 0.0)), 1.0):
+		push_error("SmokeTest: anaerobic respiration must report toxicity above 8 percent")
+		return false
+	if not is_equal_approx(float(aerobic_full.get("efficiency", 0.0)), 3.0) or not is_equal_approx(float(aerobic_hypoxic.get("efficiency", 0.0)), 0.5):
+		push_error("SmokeTest: aerobic respiration efficiency mismatch")
+		return false
+	if not is_equal_approx(float(facultative_oxygenated.get("efficiency", 0.0)), 2.0) or int(facultative_oxygenated.get("budget_cost", 0)) != 2:
+		push_error("SmokeTest: facultative respiration efficiency or budget cost mismatch")
+		return false
+	if not is_equal_approx(float(facultative_anoxic.get("efficiency", 0.0)), 1.0) or int(facultative_anoxic.get("budget_cost", 0)) != 2:
+		push_error("SmokeTest: facultative respiration must remain viable without oxygen")
+		return false
+	if bool(rules.call("evaluate", 3, 0.5).get("valid", true)) or bool(rules.call("evaluate", 1, 1.1).get("valid", true)):
+		push_error("SmokeTest: invalid respiration type and oxygen fraction must be rejected")
+		return false
+	var preset: RefCounted = load("res://scripts/core/data/EnvironmentPreset.gd").new() as RefCounted
+	preset.set("oxygen_fraction", 0.21)
+	if not is_equal_approx(float(preset.call("to_snapshot").get("oxygen_fraction", -1.0)), 0.21):
+		push_error("SmokeTest: oxygen background must persist in environment snapshots")
+		return false
+	print("SmokeTest: OK respiration thresholds / efficiencies / facultative budget / oxygen snapshot")
 	return true
 
 func _check_genome_codec() -> bool:

@@ -7,6 +7,7 @@ const DEVELOPMENT_RULES_SCRIPT: Script = preload("res://scripts/core/data/Develo
 const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
 const CELL_METABOLISM_SCRIPT: Script = preload("res://scripts/system/CellMetabolism.gd")
 const CELL_BEHAVIOR_SCRIPT: Script = preload("res://scripts/system/CellBehavior.gd")
+const RESPIRATION_RULES_SCRIPT: Script = preload("res://scripts/system/RespirationRules.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
@@ -104,6 +105,11 @@ func remove_cell(cell_index: int) -> float:
 	if energy < 0.0 or not bool(organisms.call("remove_cell_from_organism", org_id)):
 		return -1.0
 	return energy
+
+func evaluate_organism_respiration(org_id: int, oxygen_fraction: float) -> Dictionary:
+	if org_id < 0 or org_id >= organisms.get("org_alive").size() or organisms.get("org_alive")[org_id] == 0 or not genomes.has(org_id):
+		return {"valid": false, "efficiency": 0.0, "toxic": false, "budget_cost": 0}
+	return RESPIRATION_RULES_SCRIPT.call("evaluate", int(genomes[org_id].get("respiration")), oxygen_fraction)
 
 func get_organism_count() -> int:
 	var count: int = 0
