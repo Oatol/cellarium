@@ -132,11 +132,8 @@ func _check_development_rules() -> bool:
 	if int(rules_script.call("execute_divide", genome, division_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": parent_cell, "instruction_index": 0})) >= 0:
 		push_error("SmokeTest: the same DIVIDE instruction must not execute twice")
 		return false
-	var invalid_cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
-	var invalid_parent: int = int(invalid_cells.call("append_cell", division_org, Vector2.ZERO, 0.8, 0))
-	invalid_cells.call("link_cells", invalid_parent, int(invalid_cells.call("append_cell", division_org, Vector2.RIGHT, 0.0, 0)), 1.0)
-	if int(rules_script.call("execute_divide", genome, invalid_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": invalid_parent, "instruction_index": 0})) >= 0:
-		push_error("SmokeTest: unsupported linked-cell division must be rejected")
+	if not bool(division_cells.call("is_symmetric_link", parent_cell)) or not bool(division_cells.call("is_symmetric_link", child_cell)):
+		push_error("SmokeTest: DIVIDE must add a symmetric mother-child link")
 		return false
 	var single: RefCounted = genome_script.new() as RefCounted
 	single.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
@@ -167,18 +164,33 @@ func _check_cell_arrays() -> bool:
 	var a: int = int(cells.call("append_cell", org_a, Vector2.ZERO, 0.4, 0))
 	var b: int = int(cells.call("append_cell", org_a, Vector2(10, 0), 0.2, 1))
 	var c: int = int(cells.call("append_cell", org_b, Vector2(20, 0), 0.1, 0))
+	var d: int = int(cells.call("append_cell", org_a, Vector2(0, 10), 0.1, 0))
 	if not bool(cells.call("link_cells", a, b, 10.0)) or not bool(cells.call("is_symmetric_link", a)):
 		push_error("SmokeTest: same-organism link must be symmetric")
+		return false
+	if not bool(cells.call("link_cells", a, d, 10.0)) or int(cells.get("cell_link_count")[a]) != 2:
+		push_error("SmokeTest: cells must support multiple links")
 		return false
 	if bool(cells.call("link_cells", b, c, 10.0)):
 		push_error("SmokeTest: cross-organism link must be rejected")
 		return false
-	if not is_equal_approx(float(cells.call("total_energy_for_org", org_a)), 0.6):
+	var crowded: RefCounted = cells_script.new() as RefCounted
+	var hub: int = int(crowded.call("append_cell", org_a, Vector2.ZERO, 0.0, 0))
+	for i in range(20):
+		var leaf: int = int(crowded.call("append_cell", org_a, Vector2(i + 1, 0), 0.0, 0))
+		if not bool(crowded.call("link_cells", hub, leaf, 1.0)):
+			push_error("SmokeTest: link capacity rejected before 20 links")
+			return false
+	var overflow_leaf: int = int(crowded.call("append_cell", org_a, Vector2(21, 0), 0.0, 0))
+	if bool(crowded.call("link_cells", hub, overflow_leaf, 1.0)) or int(crowded.get("cell_link_count")[hub]) != 20:
+		push_error("SmokeTest: link capacity must stop at 20")
+		return false
+	if not is_equal_approx(float(cells.call("total_energy_for_org", org_a)), 0.7):
 		push_error("SmokeTest: organism energy must equal sum of cell energy")
 		return false
-	store.call("set_cell_range", org_a, 0, 2)
-	store.call("set_cell_range", org_b, 2, 1)
-	if not bool(store.call("validate_cell_ranges", 3)):
+	store.call("set_cell_range", org_a, 0, 3)
+	store.call("set_cell_range", org_b, 3, 1)
+	if not bool(store.call("validate_cell_ranges", 4)):
 		push_error("SmokeTest: valid cell ranges rejected")
 		return false
 	print("SmokeTest: OK SoA ranges / symmetric links / same-organism constraint / energy sum")
