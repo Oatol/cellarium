@@ -19,6 +19,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/CellPhysics.gd",
 	"res://scripts/system/CellMetabolism.gd",
 	"res://scripts/rendering/CellariumView.gd",
+	"res://scripts/rendering/DishLayer.gd",
+	"res://scripts/rendering/LinkLayer.gd",
+	"res://scripts/rendering/CellLayer.gd",
 ]
 
 func _initialize() -> void:
@@ -252,10 +255,20 @@ func _check_scene_visualization() -> bool:
 	root.add_child(instance)
 	await process_frame
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
-	var view: Node2D = instance.get_node("DishView") as Node2D
+	var dish_layer: Node = instance.get_node("DishView/DishFill")
+	var link_layer: Node = instance.get_node("DishView/LinkLayer")
+	var cell_layer: Node = instance.get_node("DishView/CellLayer")
 	var cells: RefCounted = manager.get("cells") as RefCounted
-	if int(manager.call("get_organism_count")) != 1 or int(cells.call("size")) != 1 or view.get_script() == null:
-		push_error("SmokeTest: main scene must create and render a demonstration organism")
+	if int(manager.call("get_organism_count")) != 1 or int(cells.call("size")) != 1:
+		push_error("SmokeTest: main scene must create a demonstration organism")
+		instance.queue_free()
+		return false
+	if dish_layer.get_script() != load("res://scripts/rendering/DishLayer.gd") or link_layer.get_script() != load("res://scripts/rendering/LinkLayer.gd") or cell_layer.get_script() != load("res://scripts/rendering/CellLayer.gd"):
+		push_error("SmokeTest: each scene layer must use its dedicated renderer")
+		instance.queue_free()
+		return false
+	if link_layer.get("organism_manager") != manager or cell_layer.get("organism_manager") != manager:
+		push_error("SmokeTest: render layers must read the scene OrganismManager")
 		instance.queue_free()
 		return false
 	instance.queue_free()
