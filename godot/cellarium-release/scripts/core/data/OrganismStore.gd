@@ -14,6 +14,7 @@ var org_parent_id: PackedInt32Array = PackedInt32Array()
 var org_age: PackedFloat32Array = PackedFloat32Array()
 var org_health: PackedFloat32Array = PackedFloat32Array()
 var org_state: PackedByteArray = PackedByteArray()
+var org_divide_mask: PackedInt64Array = PackedInt64Array()
 var cell_offset: PackedInt32Array = PackedInt32Array()
 var cell_count: PackedInt32Array = PackedInt32Array()
 
@@ -28,6 +29,7 @@ func create_organism(genome_id: int, species_id: int, parent_id: int, initial_st
 	org_age.append(0.0)
 	org_health.append(1.0)
 	org_state.append(initial_state)
+	org_divide_mask.append(0)
 	cell_offset.append(0)
 	cell_count.append(0)
 	return org_id
@@ -51,3 +53,14 @@ func validate_cell_ranges(total_cells: int) -> bool:
 
 func is_mature_single_cell(org_id: int, division_count: int) -> bool:
 	return org_id >= 0 and org_id < cell_count.size() and cell_count[org_id] == 1 and division_count == 0
+
+func add_developed_cell(org_id: int, cell_index: int, expected_count: int) -> bool:
+	if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or cell_index < 0 or expected_count < 1:
+		return false
+	if cell_count[org_id] >= expected_count:
+		return false
+	if cell_count[org_id] == 0:
+		cell_offset[org_id] = cell_index
+	cell_count[org_id] += 1
+	org_state[org_id] = STATE_MATURE if cell_count[org_id] >= expected_count else STATE_DEVELOPING
+	return true

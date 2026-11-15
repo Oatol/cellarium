@@ -35,6 +35,21 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 func size() -> int:
 	return cell_org_id.size()
 
+func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
+	if index < 0 or index >= size() or separation <= 0.0:
+		return -1
+	if cell_link_a[index] >= 0 or cell_link_b[index] >= 0:
+		return -1
+	var org_id: int = cell_org_id[index]
+	var child_energy: float = cell_energy[index] * 0.5
+	var child_position: Vector2 = get_position(index) + Vector2.RIGHT.rotated(angle) * separation
+	cell_energy[index] -= child_energy
+	var child_index: int = append_cell(org_id, child_position, child_energy, int(cell_type[index]))
+	var expression_start: int = index * 8
+	for trait_index in range(8):
+		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]
+	return child_index
+
 func get_position(index: int) -> Vector2:
 	if index < 0 or index >= size():
 		return Vector2.ZERO

@@ -65,12 +65,39 @@ func _check_development_rules() -> bool:
 	var rules_script: Script = load("res://scripts/core/data/DevelopmentRules.gd") as Script
 	var genome: RefCounted = genome_script.new() as RefCounted
 	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 32, "c": 0}, {"opcode": 4, "a": 0, "b": 0, "c": 60}])
+	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 32, "c": 0}])
 	if not bool(genome.call("is_valid")) or int(genome.call("division_count")) != 1:
 		push_error("SmokeTest: genome DIVIDE count/validation failed")
 		return false
 	if int(rules_script.call("expected_cell_count", genome)) != 2:
 		push_error("SmokeTest: expected cell count must follow DIVIDE instructions")
+		return false
+	var division_cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var division_store: RefCounted = store_script.new() as RefCounted
+	var division_org: int = int(division_store.call("create_organism", 0, 0, -1, 1))
+	var parent_cell: int = int(division_cells.call("append_cell", division_org, Vector2.ZERO, 0.8, 0))
+	division_store.call("add_developed_cell", division_org, parent_cell, 2)
+	var child_cell: int = int(rules_script.call("execute_divide", genome, division_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": parent_cell, "instruction_index": 0}))
+	if child_cell != 1 or division_cells.call("size") != 2 or int(division_store.get("cell_count")[division_org]) != 2:
+		push_error("SmokeTest: DIVIDE must append a cell to the same organism")
+		return false
+	if not is_equal_approx(float(division_cells.get("cell_energy")[0] + division_cells.get("cell_energy")[child_cell]), 0.8):
+		push_error("SmokeTest: DIVIDE must preserve total cell energy")
+		return false
+	if int(division_store.get("org_parent_id")[division_org]) != -1 or int(division_store.get("org_alive").size()) != 1:
+		push_error("SmokeTest: DIVIDE must not create a lineage node")
+		return false
+	if int(division_store.get("org_state")[division_org]) != int(store_script.get_script_constant_map()["STATE_MATURE"]):
+		push_error("SmokeTest: completed development must enter mature state")
+		return false
+	if int(rules_script.call("execute_divide", genome, division_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": parent_cell, "instruction_index": 0})) >= 0:
+		push_error("SmokeTest: the same DIVIDE instruction must not execute twice")
+		return false
+	var invalid_cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var invalid_parent: int = int(invalid_cells.call("append_cell", division_org, Vector2.ZERO, 0.8, 0))
+	invalid_cells.call("link_cells", invalid_parent, int(invalid_cells.call("append_cell", division_org, Vector2.RIGHT, 0.0, 0)), 1.0)
+	if int(rules_script.call("execute_divide", genome, invalid_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": invalid_parent, "instruction_index": 0})) >= 0:
+		push_error("SmokeTest: unsupported linked-cell division must be rejected")
 		return false
 	var single: RefCounted = genome_script.new() as RefCounted
 	single.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
