@@ -61,7 +61,7 @@ func _check_tick_divide_route() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var genome: RefCounted = genome_script.new() as RefCounted
 	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 64, "c": 0}])
+	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 64, "c": 0}, {"opcode": 1, "a": 1, "b": 3, "c": 0}, {"opcode": 2, "a": 0, "b": 1, "c": 4}])
 	var org_id: int = int(manager.call("register_zygote", 0, 0, -1, genome, Vector2.ZERO, 0.8, 0))
 	if org_id < 0:
 		instance.queue_free()
@@ -80,7 +80,15 @@ func _check_tick_divide_route() -> bool:
 		push_error("SmokeTest: next-tick DIVIDE did not update the existing organism")
 		instance.queue_free()
 		return false
-	print("SmokeTest: OK CommandBus next-tick DIVIDE route")
+	bus.call("enqueue", {"type": "DEVELOPMENT_INSTRUCTION", "org_id": org_id, "instruction_index": 1})
+	bus.call("execute_tick_commands", 2)
+	bus.call("enqueue", {"type": "DEVELOPMENT_INSTRUCTION", "org_id": org_id, "instruction_index": 2})
+	bus.call("execute_tick_commands", 3)
+	if int(cells.get("cell_type")[1]) != 3 or not bool(cells.call("has_link", 0, 1)):
+		push_error("SmokeTest: queued DIFFERENTIATE/LINK instructions were not applied")
+		instance.queue_free()
+		return false
+	print("SmokeTest: OK CommandBus next-tick development instruction route")
 	instance.queue_free()
 	await process_frame
 	return true
@@ -142,9 +150,17 @@ func _check_development_rules() -> bool:
 	var rules_script: Script = load("res://scripts/core/data/DevelopmentRules.gd") as Script
 	var genome: RefCounted = genome_script.new() as RefCounted
 	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 32, "c": 0}])
+	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 32, "c": 0}, {"opcode": 1, "a": 1, "b": 3, "c": 0}, {"opcode": 2, "a": 0, "b": 1, "c": 4}])
 	if not bool(genome.call("is_valid")) or int(genome.call("division_count")) != 1:
 		push_error("SmokeTest: genome DIVIDE count/validation failed")
+		return false
+	if int(genome.call("hash")) != int(genome.call("duplicate_genome").call("hash")):
+		push_error("SmokeTest: equivalent genomes must hash identically")
+		return false
+	var mutated_hash_genome: RefCounted = genome.call("duplicate_genome") as RefCounted
+	mutated_hash_genome.set("mutation_rate_exp", 1)
+	if int(genome.call("hash")) == int(mutated_hash_genome.call("hash")):
+		push_error("SmokeTest: genome hash must include serialized fields")
 		return false
 	if int(rules_script.call("expected_cell_count", genome)) != 2:
 		push_error("SmokeTest: expected cell count must follow DIVIDE instructions")
@@ -154,7 +170,7 @@ func _check_development_rules() -> bool:
 	var division_org: int = int(division_store.call("create_organism", 0, 0, -1, 1))
 	var parent_cell: int = int(division_cells.call("append_cell", division_org, Vector2.ZERO, 0.8, 0))
 	division_store.call("add_developed_cell", division_org, parent_cell, 2)
-	var child_cell: int = int(rules_script.call("execute_divide", genome, division_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": parent_cell, "instruction_index": 0}))
+	var child_cell: int = int(rules_script.call("execute_instruction", genome, division_cells, division_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": division_org, "instruction_index": 0}))
 	if child_cell != 1 or division_cells.call("size") != 2 or int(division_store.get("cell_count")[division_org]) != 2:
 		push_error("SmokeTest: DIVIDE must append a cell to the same organism")
 		return false
@@ -164,14 +180,39 @@ func _check_development_rules() -> bool:
 	if int(division_store.get("org_parent_id")[division_org]) != -1 or int(division_store.get("org_alive").size()) != 1:
 		push_error("SmokeTest: DIVIDE must not create a lineage node")
 		return false
+	if int(division_store.get("org_state")[division_org]) != int(store_script.get_script_constant_map()["STATE_DEVELOPING"]):
+		push_error("SmokeTest: development must remain active while structural instructions remain")
+		return false
+	if int(rules_script.call("execute_instruction", genome, division_cells, division_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": division_org, "instruction_index": 0})) >= 0:
+		push_error("SmokeTest: the same DIVIDE instruction must not execute twice")
+		return false
+	if int(rules_script.call("execute_instruction", genome, division_cells, division_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": division_org, "instruction_index": 1})) != child_cell:
+		push_error("SmokeTest: DIFFERENTIATE must update the target cell")
+		return false
+	if int(division_cells.get("cell_type")[child_cell]) != 3:
+		push_error("SmokeTest: DIFFERENTIATE target type mismatch")
+		return false
+	if int(rules_script.call("execute_instruction", genome, division_cells, division_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": division_org, "instruction_index": 2})) != parent_cell:
+		push_error("SmokeTest: LINK instruction was not executed")
+		return false
 	if int(division_store.get("org_state")[division_org]) != int(store_script.get_script_constant_map()["STATE_MATURE"]):
 		push_error("SmokeTest: completed development must enter mature state")
 		return false
-	if int(rules_script.call("execute_divide", genome, division_cells, division_store, {"type": "DIVIDE", "org_id": division_org, "cell_index": parent_cell, "instruction_index": 0})) >= 0:
-		push_error("SmokeTest: the same DIVIDE instruction must not execute twice")
+	if int(rules_script.call("execute_instruction", genome, division_cells, division_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": division_org, "instruction_index": 2})) >= 0:
+		push_error("SmokeTest: consumed LINK instruction must not execute twice")
 		return false
-	if not bool(division_cells.call("is_symmetric_link", parent_cell)) or not bool(division_cells.call("is_symmetric_link", child_cell)):
-		push_error("SmokeTest: DIVIDE must add a symmetric mother-child link")
+	var foreign_cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var foreign_store: RefCounted = store_script.new() as RefCounted
+	var foreign_org: int = int(foreign_store.call("create_organism", 0, 0, -1, 1))
+	foreign_store.call("create_organism", 0, 0, -1, 1)
+	foreign_cells.call("append_cell", foreign_org, Vector2.ZERO, 0.4, 0)
+	foreign_cells.call("append_cell", foreign_org + 1, Vector2.RIGHT, 0.4, 0)
+	foreign_store.call("add_developed_cell", foreign_org, 0, 2)
+	if int(rules_script.call("execute_instruction", genome, foreign_cells, foreign_store, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": foreign_org, "instruction_index": 2})) >= 0:
+		push_error("SmokeTest: LINK must reject cross-organism endpoints")
+		return false
+	if not bool(division_cells.call("has_link", parent_cell, child_cell)) or not bool(division_cells.call("is_symmetric_link", parent_cell)) or not bool(division_cells.call("is_symmetric_link", child_cell)):
+		push_error("SmokeTest: LINK instruction must create a symmetric mother-child edge")
 		return false
 	var single: RefCounted = genome_script.new() as RefCounted
 	single.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))

@@ -7,6 +7,8 @@ const MAX_OPCODE: int = 63
 const MAX_OPERAND_8: int = 255
 const MAX_OPERAND_10: int = 1023
 const OP_DIVIDE: int = 0
+const OP_DIFFERENTIATE: int = 1
+const OP_LINK: int = 2
 
 var version: int = 1
 var flags: int = 0
@@ -57,6 +59,13 @@ func division_count() -> int:
 		if int(instruction.get("opcode", -1)) == OP_DIVIDE:
 			count += 1
 	return count
+
+func hash() -> int:
+	var encoded: PackedByteArray = load("res://scripts/core/data/GenomeCodec.gd").call("encode", self)
+	var value: int = 2166136261
+	for byte_value in encoded:
+		value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
+	return value
 
 func duplicate_genome() -> RefCounted:
 	var script: Script = load("res://scripts/core/data/Genome.gd") as Script

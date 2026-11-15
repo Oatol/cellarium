@@ -52,8 +52,6 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	var expression_start: int = index * 8
 	for trait_index in range(8):
 		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]
-	if not link_cells(index, child_index, separation):
-		return -1
 	return child_index
 
 func get_position(index: int) -> Vector2:

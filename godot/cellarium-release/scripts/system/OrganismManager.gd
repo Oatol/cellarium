@@ -23,12 +23,14 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	return org_id
 
 func apply_command(command: Dictionary) -> int:
-	if command.get("type", "") != "DIVIDE":
-		return -1
 	var org_id: int = int(command.get("org_id", -1))
 	if not genomes.has(org_id):
 		return -1
-	return int(DEVELOPMENT_RULES_SCRIPT.call("execute_divide", genomes[org_id], cells, organisms, command))
+	if command.get("type", "") == "DIVIDE":
+		return int(DEVELOPMENT_RULES_SCRIPT.call("execute_divide", genomes[org_id], cells, organisms, command))
+	if command.get("type", "") == "DEVELOPMENT_INSTRUCTION":
+		return int(DEVELOPMENT_RULES_SCRIPT.call("execute_instruction", genomes[org_id], cells, organisms, command))
+	return -1
 
 func remove_cell(cell_index: int) -> float:
 	if cell_index < 0 or cell_index >= int(cells.call("size")):
