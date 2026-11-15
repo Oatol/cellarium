@@ -4,6 +4,7 @@ extends SceneTree
 
 const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/Main.gd",
+	"res://scripts/system/OrganismManager.gd",
 	"res://scripts/core/data/EnvironmentPreset.gd",
 	"res://scripts/core/data/DevelopmentContext.gd",
 	"res://scripts/core/data/Genome.gd",
@@ -33,6 +34,8 @@ func _initialize() -> void:
 		failures += 1
 	else:
 		print("SmokeTest: OK res://scenes/main.tscn")
+	if not await _check_tick_divide_route():
+		failures += 1
 	if not _check_basal_autonomy():
 		failures += 1
 	if not _check_development_rules():
@@ -43,6 +46,42 @@ func _initialize() -> void:
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
+
+func _check_tick_divide_route() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		return false
+	var instance: Node = scene.instantiate()
+	root.add_child(instance)
+	await process_frame
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 64, "c": 0}])
+	var org_id: int = int(manager.call("register_zygote", 0, 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	if org_id < 0:
+		instance.queue_free()
+		return false
+	var cells: RefCounted = manager.get("cells")
+	if int(cells.call("size")) != 1:
+		instance.queue_free()
+		return false
+	bus.call("enqueue", {"type": "DIVIDE", "org_id": org_id, "cell_index": 0, "instruction_index": 0})
+	if int(cells.call("size")) != 1:
+		push_error("SmokeTest: queued DIVIDE changed state before next tick")
+		instance.queue_free()
+		return false
+	bus.call("execute_tick_commands", 1)
+	if int(cells.call("size")) != 2 or int(manager.call("get_organism_count")) != 1:
+		push_error("SmokeTest: next-tick DIVIDE did not update the existing organism")
+		instance.queue_free()
+		return false
+	print("SmokeTest: OK CommandBus next-tick DIVIDE route")
+	instance.queue_free()
+	await process_frame
+	return true
 
 func _check_basal_autonomy() -> bool:
 	var script: Script = ResourceLoader.load("res://scripts/core/data/EnvironmentPreset.gd", "Script", ResourceLoader.CACHE_MODE_IGNORE) as Script
