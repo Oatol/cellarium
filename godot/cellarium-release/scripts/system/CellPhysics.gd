@@ -6,6 +6,40 @@ const CONSTRAINT_ITERATIONS: int = 2
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
 
+static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, normal_damping: float) -> int:
+	if cells == null or radius <= 0.0 or normal_damping < 0.0 or normal_damping > 1.0:
+		return -1
+	var count: int = int(cells.call("size"))
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
+	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var projected: int = 0
+	for cell_index in range(count):
+		if alive[cell_index] == 0:
+			continue
+		var offset: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index]) - center
+		if offset.length_squared() <= radius * radius:
+			continue
+		var normal: Vector2 = offset.normalized()
+		var boundary: Vector2 = center + normal * radius
+		var current_position: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
+		var velocity: Vector2 = current_position - Vector2(prev_x[cell_index], prev_y[cell_index])
+		var tangent_velocity: Vector2 = velocity - normal * velocity.dot(normal)
+		var reflected_velocity: Vector2 = tangent_velocity - normal * velocity.dot(normal) * normal_damping
+		pos_x[cell_index] = boundary.x
+		pos_y[cell_index] = boundary.y
+		var adjusted_previous: Vector2 = boundary - reflected_velocity
+		prev_x[cell_index] = adjusted_previous.x
+		prev_y[cell_index] = adjusted_previous.y
+		projected += 1
+	cells.set("cell_pos_x", pos_x)
+	cells.set("cell_pos_y", pos_y)
+	cells.set("cell_prev_x", prev_x)
+	cells.set("cell_prev_y", prev_y)
+	return projected
+
 static func step(cells: RefCounted, dt: float) -> void:
 	if cells == null or dt <= 0.0:
 		return

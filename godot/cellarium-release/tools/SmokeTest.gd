@@ -40,6 +40,8 @@ func _initialize() -> void:
 		failures += 1
 	if not _check_cell_physics():
 		failures += 1
+	if not _check_dish_boundary():
+		failures += 1
 	if not _check_spatial_hash():
 		failures += 1
 	if not _check_link_energy_redistribution():
@@ -147,6 +149,35 @@ func _check_cell_physics() -> bool:
 		push_error("SmokeTest: Verlet integration must apply 0.98 damping")
 		return false
 	print("SmokeTest: OK deterministic Verlet / damped motion / spring constraints")
+	return true
+
+func _check_dish_boundary() -> bool:
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var physics: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	cells.call("append_cell", 0, Vector2(13, 4), 0.1, 0)
+	cells.get("cell_prev_x")[0] = 11.0
+	cells.get("cell_prev_y")[0] = 4.0
+	cells.call("append_cell", 0, Vector2(6, 0), 0.1, 0)
+	cells.call("append_cell", 0, Vector2(20, 0), 0.1, 0)
+	cells.get("cell_alive")[2] = 0
+	var projected: int = int(physics.call("project_to_dish", cells, Vector2.ZERO, 10.0, 0.5))
+	if projected != 1:
+		push_error("SmokeTest: dish projection count must ignore inside and dead cells")
+		return false
+	var position: Vector2 = cells.call("get_position", 0)
+	if not is_equal_approx(position.length(), 10.0) or not is_equal_approx(position.x, 10.0 * 13.0 / sqrt(185.0)):
+		push_error("SmokeTest: projected cell must lie on the circular boundary")
+		return false
+	var previous: Vector2 = Vector2(cells.get("cell_prev_x")[0], cells.get("cell_prev_y")[0])
+	var velocity: Vector2 = position - previous
+	var normal: Vector2 = position.normalized()
+	if velocity.dot(normal) >= 0.0 or not is_equal_approx(velocity.dot(normal), -1.0 * 13.0 / sqrt(185.0)):
+		push_error("SmokeTest: boundary projection must reverse and damp normal velocity")
+		return false
+	if physics.call("project_to_dish", cells, Vector2.ZERO, 10.0, 1.1) != -1:
+		push_error("SmokeTest: invalid boundary damping must be rejected")
+		return false
+	print("SmokeTest: OK circular dish projection / normal damping / dead-cell skip")
 	return true
 
 func _check_spatial_hash() -> bool:
