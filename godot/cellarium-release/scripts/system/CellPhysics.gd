@@ -40,6 +40,32 @@ static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, n
 	cells.set("cell_prev_y", prev_y)
 	return projected
 
+static func resolve_collisions(cells: RefCounted, cell_radius: float) -> int:
+	if cells == null or cell_radius <= 0.0:
+		return -1
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var pairs: Array[Vector2i] = build_collision_pairs(cells)
+	var resolved: int = 0
+	for pair in pairs:
+		var a: int = pair.x
+		var b: int = pair.y
+		var delta: Vector2 = Vector2(pos_x[b] - pos_x[a], pos_y[b] - pos_y[a])
+		var distance: float = delta.length()
+		if distance >= cell_radius * 2.0:
+			continue
+		var normal: Vector2 = Vector2.RIGHT if distance <= 0.000001 else delta / distance
+		var correction: float = (cell_radius * 2.0 - distance) * 0.5
+		pos_x[a] -= normal.x * correction
+		pos_y[a] -= normal.y * correction
+		pos_x[b] += normal.x * correction
+		pos_y[b] += normal.y * correction
+		resolved += 1
+	cells.set("cell_pos_x", pos_x)
+	cells.set("cell_pos_y", pos_y)
+	return resolved
+
 static func step(cells: RefCounted, dt: float) -> void:
 	if cells == null or dt <= 0.0:
 		return

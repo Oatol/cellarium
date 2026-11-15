@@ -5,13 +5,40 @@ const CELL_ARRAY_SCRIPT: Script = preload("res://scripts/core/data/CellArray.gd"
 const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismStore.gd")
 const DEVELOPMENT_RULES_SCRIPT: Script = preload("res://scripts/core/data/DevelopmentRules.gd")
 const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
+const CELL_METABOLISM_SCRIPT: Script = preload("res://scripts/system/CellMetabolism.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
 var genomes: Dictionary = {}
 
+@export var dish_center: Vector2 = Vector2.ZERO
+@export var dish_radius: float = 512.0
+@export_range(0.0, 1.0, 0.01) var boundary_normal_damping: float = 0.5
+@export var cell_radius: float = 1.0
+@export var base_metabolic_cost: float = 0.001
+@export var default_transfer_rate: float = 0.0
+
 func advance_physics_tick(dt: float) -> void:
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
+	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius)
+	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, dish_radius, boundary_normal_damping)
+	var rates: PackedFloat32Array = PackedFloat32Array()
+	rates.resize(int(cells.call("size")))
+	rates.fill(default_transfer_rate)
+	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt)
+	_apply_base_metabolism(dt)
+
+func _apply_base_metabolism(dt: float) -> void:
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	for cell_index in range(energies.size()):
+		if alive[cell_index] == 0:
+			continue
+		energies[cell_index] = maxf(0.0, energies[cell_index] - base_metabolic_cost * dt)
+	cells.set("cell_energy", energies)
+	for cell_index in range(energies.size() - 1, -1, -1):
+		if alive[cell_index] != 0 and energies[cell_index] <= 0.0:
+			remove_cell(cell_index)
 
 func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: RefCounted, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if genome == null or not bool(genome.call("is_valid")) or genome_id < 0:

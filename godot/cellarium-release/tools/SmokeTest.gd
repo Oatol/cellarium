@@ -42,6 +42,10 @@ func _initialize() -> void:
 		failures += 1
 	if not _check_dish_boundary():
 		failures += 1
+	if not _check_collision_resolution():
+		failures += 1
+	if not _check_phase_two_tick_integration():
+		failures += 1
 	if not _check_spatial_hash():
 		failures += 1
 	if not _check_link_energy_redistribution():
@@ -178,6 +182,58 @@ func _check_dish_boundary() -> bool:
 		push_error("SmokeTest: invalid boundary damping must be rejected")
 		return false
 	print("SmokeTest: OK circular dish projection / normal damping / dead-cell skip")
+	return true
+
+func _check_collision_resolution() -> bool:
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var physics: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	cells.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
+	cells.call("append_cell", 1, Vector2.ZERO, 0.1, 0)
+	if int(physics.call("resolve_collisions", cells, 2.0)) != 1:
+		push_error("SmokeTest: overlapping cross-organism cells must resolve")
+		return false
+	if cells.call("get_position", 0).distance_to(cells.call("get_position", 1)) < 3.999:
+		push_error("SmokeTest: collision resolution must separate cells to diameter")
+		return false
+	var same_org: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	same_org.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
+	same_org.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
+	physics.call("resolve_collisions", same_org, 2.0)
+	if not is_equal_approx(same_org.call("get_position", 0).distance_to(same_org.call("get_position", 1)), 0.0):
+		push_error("SmokeTest: same-organism cells must skip collision separation")
+		return false
+	print("SmokeTest: OK cross-organism collision resolution / same-organism skip")
+	return true
+
+func _check_phase_two_tick_integration() -> bool:
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.dish_center = Vector2.ZERO
+	manager.dish_radius = 10.0
+	manager.cell_radius = 1.0
+	manager.base_metabolic_cost = 1.0
+	var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	var first: int = int(manager.call("register_zygote", 0, 0, -1, genome, Vector2(9.5, 0), 1.0, 0))
+	var second: int = int(manager.call("register_zygote", 1, 0, -1, genome, Vector2(9.5, 0), 0.1, 0))
+	if first < 0 or second < 0:
+		manager.free()
+		return false
+	manager.call("advance_physics_tick", 1.0)
+	var cells: RefCounted = manager.get("cells")
+	var alive_count: int = 0
+	for alive in cells.get("cell_alive"):
+		alive_count += int(alive)
+	if alive_count != 0 or int(manager.call("get_organism_count")) != 0:
+		push_error("SmokeTest: phase-two tick must metabolize and reclaim exhausted cells")
+		manager.free()
+		return false
+	if cells.call("get_position", 0).length() > 10.0001:
+		push_error("SmokeTest: phase-two tick must project cells inside dish")
+		manager.free()
+		return false
+	manager.free()
+	print("SmokeTest: OK phase-two tick integration / physics / metabolism / reclamation")
 	return true
 
 func _check_spatial_hash() -> bool:
