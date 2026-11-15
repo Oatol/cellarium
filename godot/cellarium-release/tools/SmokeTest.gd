@@ -18,6 +18,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/OrganismManager.gd",
 	"res://scripts/system/CellPhysics.gd",
 	"res://scripts/system/CellMetabolism.gd",
+	"res://scripts/rendering/CellariumView.gd",
 ]
 
 func _initialize() -> void:
@@ -36,7 +37,8 @@ func _initialize() -> void:
 		failures += 1
 	else:
 		print("SmokeTest: OK res://scenes/main.tscn")
-	if not await _check_tick_divide_route():
+	var tick_route_ok: bool = await _check_tick_divide_route()
+	if not tick_route_ok:
 		failures += 1
 	if not _check_cell_physics():
 		failures += 1
@@ -45,6 +47,9 @@ func _initialize() -> void:
 	if not _check_collision_resolution():
 		failures += 1
 	if not _check_phase_two_tick_integration():
+		failures += 1
+	var scene_visualization_ok: bool = await _check_scene_visualization()
+	if not scene_visualization_ok:
 		failures += 1
 	if not _check_spatial_hash():
 		failures += 1
@@ -68,8 +73,11 @@ func _check_tick_divide_route() -> bool:
 	if scene == null:
 		return false
 	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
 	root.add_child(instance)
 	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
 	var bus: Node = instance.get_node("Simulation/CommandBus")
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -234,6 +242,25 @@ func _check_phase_two_tick_integration() -> bool:
 		return false
 	manager.free()
 	print("SmokeTest: OK phase-two tick integration / physics / metabolism / reclamation")
+	return true
+
+func _check_scene_visualization() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		return false
+	var instance: Node = scene.instantiate()
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var view: Node2D = instance.get_node("DishView") as Node2D
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	if int(manager.call("get_organism_count")) != 1 or int(cells.call("size")) != 1 or view.get_script() == null:
+		push_error("SmokeTest: main scene must create and render a demonstration organism")
+		instance.queue_free()
+		return false
+	instance.queue_free()
+	await process_frame
+	print("SmokeTest: OK main scene demo organism / renderer binding")
 	return true
 
 func _check_spatial_hash() -> bool:

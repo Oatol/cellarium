@@ -7,12 +7,15 @@ extends Node2D
 @export var environment_path: NodePath = ^"Simulation/EnvironmentManager"
 @export var organism_manager_path: NodePath = ^"Simulation/OrganismManager"
 @export var status_label_path: NodePath = ^"UI/HUD/StatusBar"
+@export var dish_view_path: NodePath = ^"DishView"
+@export var create_demo_organism: bool = true
 
 var tick_core: Node = null
 var command_bus: Node = null
 var environment_manager: Node = null
 var organism_manager: Node = null
 var status_label: Label = null
+var dish_view: Node2D = null
 var executed_commands: int = 0
 
 func _ready() -> void:
@@ -21,12 +24,20 @@ func _ready() -> void:
 	environment_manager = get_node_or_null(environment_path)
 	organism_manager = get_node_or_null(organism_manager_path)
 	status_label = get_node_or_null(status_label_path) as Label
+	dish_view = get_node_or_null(dish_view_path) as Node2D
 	var on_tick: Callable = Callable(self, "_on_tick_advanced")
 	if tick_core != null and tick_core.has_signal("tick_advanced") and not tick_core.is_connected("tick_advanced", on_tick):
 		tick_core.connect("tick_advanced", on_tick)
 	var on_cmd: Callable = Callable(self, "_on_command_executed")
 	if command_bus != null and command_bus.has_signal("command_executed") and not command_bus.is_connected("command_executed", on_cmd):
 		command_bus.connect("command_executed", on_cmd)
+	if create_demo_organism and organism_manager != null and int(organism_manager.call("get_organism_count")) == 0:
+		var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+		genome.call("set_development_program", [])
+		var org_id: int = int(organism_manager.call("register_zygote", 0, 0, -1, genome, Vector2(250, 250), 0.8, 0))
+		if org_id >= 0 and status_label != null:
+			status_label.text = "cellarium | tick 0 | demo organism"
 	print("[cellarium] boot ok basal_autonomy=", get_basal_autonomy())
 
 func get_basal_autonomy() -> float:

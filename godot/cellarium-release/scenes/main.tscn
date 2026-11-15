@@ -5,11 +5,16 @@
 [ext_resource type="Script" uid="uid://u46s1pn85gl4" path="res://scripts/core/command/CommandBus.gd" id="3_o6xl0"]
 [ext_resource type="Script" uid="uid://b5wv86xpn12a2" path="res://scripts/system/EnvironmentManager.gd" id="4_tipki"]
 [ext_resource type="Script" uid="uid://dclhvddlnxfbs" path="res://scripts/system/OrganismManager.gd" id="5_85g3d"]
+[ext_resource type="Script" path="res://scripts/rendering/CellariumView.gd" id="6_view"]
 
 [node name="Main" type="Node2D" unique_id=201441505]
 script = ExtResource("1_tbgi4")
 
 [node name="DishView" type="Node2D" parent="." unique_id=1634128869]
+script = ExtResource("6_view")
+dish_center = Vector2(250, 250)
+dish_radius = 240.0
+cell_radius = 5.0
 
 [node name="DishFill" type="Polygon2D" parent="DishView" unique_id=226365568]
 
@@ -43,7 +48,7 @@ script = ExtResource("5_85g3d")
 dish_center = Vector2(250, 250)
 dish_radius = 240.0
 boundary_normal_damping = 0.5
-cell_radius = 1.0
+cell_radius = 4.0
 base_metabolic_cost = 0.001
 default_transfer_rate = 0.0
 
