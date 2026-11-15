@@ -605,7 +605,20 @@ func _check_cell_behavior() -> bool:
 	if not bool(behavior.call("apply_outputs", second_cells, replay_a, 1.0 / 60.0)):
 		push_error("SmokeTest: behavior intent application failed")
 		return false
-	print("SmokeTest: OK deterministic 8-4-6 cell behavior / bounded outputs / division inheritance")
+	var stored_intents: PackedFloat32Array = behavior.call("get_intents", second_cells, 0)
+	var behavior_snapshot_a: PackedFloat32Array = behavior.call("snapshot_intents", second_cells)
+	var behavior_snapshot_b: PackedFloat32Array = behavior.call("snapshot_intents", second_cells)
+	if behavior_snapshot_a != behavior_snapshot_b:
+		push_error("SmokeTest: behavior intent state snapshot must be deterministic")
+		return false
+	if stored_intents != replay_a[0] or stored_intents.size() != 6:
+		push_error("SmokeTest: every neural output must persist as a queryable behavior intent")
+		return false
+	var child_intents: PackedFloat32Array = behavior.call("get_intents", first_cells, child_index)
+	if child_intents != behavior.call("get_intents", first_cells, 0):
+		push_error("SmokeTest: divided cells must inherit current behavior intents")
+		return false
+	print("SmokeTest: OK deterministic 8-4-6 cell behavior / bounded outputs / intent persistence / division inheritance")
 	return true
 
 func _check_respiration_rules() -> bool:

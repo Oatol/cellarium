@@ -4,6 +4,7 @@ extends RefCounted
 
 const MAX_LINKS_PER_CELL: int = 20
 const NEURAL_WEIGHT_COUNT: int = 56
+const BEHAVIOR_OUTPUT_COUNT: int = 6
 
 var cell_pos_x: PackedFloat32Array = PackedFloat32Array()
 var cell_pos_y: PackedFloat32Array = PackedFloat32Array()
@@ -19,6 +20,7 @@ var link_cell_b: PackedInt32Array = PackedInt32Array()
 var link_rest_length: PackedFloat32Array = PackedFloat32Array()
 var expression_weights: PackedFloat32Array = PackedFloat32Array()
 var neural_weights: PackedFloat32Array = PackedFloat32Array()
+var behavior_intents: PackedFloat32Array = PackedFloat32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -37,6 +39,8 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 		expression_weights.append(0.0)
 	for i in range(NEURAL_WEIGHT_COUNT):
 		neural_weights.append(0.0)
+	for i in range(BEHAVIOR_OUTPUT_COUNT):
+		behavior_intents.append(0.0)
 	return index
 
 func size() -> int:
@@ -56,6 +60,9 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	var neural_start: int = index * NEURAL_WEIGHT_COUNT
 	for weight_index in range(NEURAL_WEIGHT_COUNT):
 		neural_weights[child_index * NEURAL_WEIGHT_COUNT + weight_index] = neural_weights[neural_start + weight_index]
+	var behavior_start: int = index * BEHAVIOR_OUTPUT_COUNT
+	for output_index in range(BEHAVIOR_OUTPUT_COUNT):
+		behavior_intents[child_index * BEHAVIOR_OUTPUT_COUNT + output_index] = behavior_intents[behavior_start + output_index]
 	var expression_start: int = index * 8
 	for trait_index in range(8):
 		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]
