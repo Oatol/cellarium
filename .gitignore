@@ -1,0 +1,24 @@
+# WorkBuddy project data: keep locally, never publish
+.workbuddy-ai/
+
+# Local-only / not in the first docs-only backup
+preview/
+*.docx
+*.apk
+*.dex
+*.substrate
+analysis/cell_lab_apk_extract/*/assets/
+analysis/cell_lab_apk_extract/*/classes.dex
+analysis/cell_lab_apk_extract/*/AndroidManifest.xml
+analysis/cell_lab_apk_extract/*/levels.xml
+
+# Godot generated files (when the engine tree is added later)
+.godot/
+*.import
+export_presets.cfg
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
+*.swp
+*~
