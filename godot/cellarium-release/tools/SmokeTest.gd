@@ -163,7 +163,14 @@ func _check_spatial_hash() -> bool:
 	if pairs[0] != Vector2i(0, 3) or pairs[1] != Vector2i(0, 1):
 		push_error("SmokeTest: 3x3 spatial hash neighbor enumeration mismatch")
 		return false
-	print("SmokeTest: OK deterministic 64-unit spatial hash / 3x3 neighbor pairs")
+	var dense_cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	for i in range(20):
+		dense_cells.call("append_cell", i, Vector2(10 + float(i) * 0.01, 10), 0.1, 0)
+	var dense_pairs: Array = physics.call("build_collision_pairs", dense_cells)
+	if dense_pairs.size() != 190 or dense_pairs[0] != Vector2i(0, 1) or dense_pairs[-1] != Vector2i(18, 19):
+		push_error("SmokeTest: spatial hash must sub-bucket dense cells without losing pairs")
+		return false
+	print("SmokeTest: OK deterministic 64-unit spatial hash / 3x3 neighbor pairs / dense sub-buckets")
 	return true
 
 func _check_cell_death_cleanup() -> bool:

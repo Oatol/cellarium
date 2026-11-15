@@ -4,6 +4,7 @@ extends RefCounted
 const DAMPING: float = 0.98
 const CONSTRAINT_ITERATIONS: int = 2
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
+const SPATIAL_HASH_SOFT_LIMIT: int = 16
 
 static func step(cells: RefCounted, dt: float) -> void:
 	if cells == null or dt <= 0.0:
@@ -48,8 +49,12 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 		var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
 		var key: Vector2i = Vector2i(cell_x, cell_y)
 		if not buckets.has(key):
-			buckets[key] = []
-		buckets[key].append(cell_index)
+			buckets[key] = [[]]
+		var cell_buckets: Array = buckets[key]
+		if cell_buckets[cell_buckets.size() - 1].size() >= SPATIAL_HASH_SOFT_LIMIT:
+			cell_buckets.append([])
+		cell_buckets[cell_buckets.size() - 1].append(cell_index)
+		buckets[key] = cell_buckets
 	for a in range(count):
 		if alive[a] == 0:
 			continue
@@ -60,11 +65,12 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 				var key: Vector2i = Vector2i(cell_x + offset_x, cell_y + offset_y)
 				if not buckets.has(key):
 					continue
-				for b_value in buckets[key]:
-					var b: int = int(b_value)
-					if b <= a or org_ids[a] == org_ids[b]:
-						continue
-					pairs.append(Vector2i(a, b))
+				for sub_bucket in buckets[key]:
+					for b_value in sub_bucket:
+						var b: int = int(b_value)
+						if b <= a or org_ids[a] == org_ids[b]:
+							continue
+						pairs.append(Vector2i(a, b))
 	return pairs
 
 static func _solve_links(cells: RefCounted, cell_count: int) -> void:
