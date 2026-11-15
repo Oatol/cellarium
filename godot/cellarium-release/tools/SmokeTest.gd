@@ -17,6 +17,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/EnvironmentManager.gd",
 	"res://scripts/system/OrganismManager.gd",
 	"res://scripts/system/CellPhysics.gd",
+	"res://scripts/system/CellMetabolism.gd",
 ]
 
 func _initialize() -> void:
@@ -40,6 +41,8 @@ func _initialize() -> void:
 	if not _check_cell_physics():
 		failures += 1
 	if not _check_spatial_hash():
+		failures += 1
+	if not _check_link_energy_redistribution():
 		failures += 1
 	if not _check_cell_death_cleanup():
 		failures += 1
@@ -179,6 +182,67 @@ func _check_spatial_hash() -> bool:
 		push_error("SmokeTest: neighbor query must search all dense sub-buckets")
 		return false
 	print("SmokeTest: OK deterministic 64-unit spatial hash / 3x3 neighbor pairs / dense sub-buckets")
+	return true
+
+func _check_link_energy_redistribution() -> bool:
+	var cells_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
+	var metabolism: Script = load("res://scripts/system/CellMetabolism.gd") as Script
+	var cells: RefCounted = cells_script.new() as RefCounted
+	cells.call("append_cell", 0, Vector2.ZERO, 1.0, 0)
+	cells.call("append_cell", 0, Vector2.RIGHT, 0.0, 0)
+	cells.call("append_cell", 0, Vector2.DOWN, 0.5, 0)
+	cells.call("link_cells", 0, 1, 1.0)
+	var before_energy: float = float(cells.call("total_energy_for_org", 0))
+	var rates: PackedFloat32Array = PackedFloat32Array([0.0, 1.0, 0.0])
+	if not bool(metabolism.call("redistribute_link_energy", cells, rates, 1.0)):
+		push_error("SmokeTest: valid linked energy redistribution rejected")
+		return false
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var after_energy: float = float(cells.call("total_energy_for_org", 0))
+	if not is_equal_approx(energies[0], 0.9) or not is_equal_approx(energies[1], 0.1) or not is_equal_approx(energies[2], 0.5):
+		push_error("SmokeTest: linked energy transfer direction or per-link clamp mismatch")
+		return false
+	if not is_equal_approx(before_energy, after_energy):
+		push_error("SmokeTest: linked energy redistribution must conserve organism energy")
+		return false
+	var tick_cells: RefCounted = cells_script.new() as RefCounted
+	tick_cells.call("append_cell", 0, Vector2.ZERO, 1.0, 0)
+	tick_cells.call("append_cell", 0, Vector2.RIGHT, 0.0, 0)
+	tick_cells.call("append_cell", 0, Vector2.DOWN, 0.0, 0)
+	tick_cells.call("link_cells", 0, 1, 1.0)
+	tick_cells.call("link_cells", 0, 2, 1.0)
+	if not bool(metabolism.call("redistribute_link_energy", tick_cells, PackedFloat32Array([0.0, 1.0, 1.0]), 1.0 / 60.0)):
+		push_error("SmokeTest: multi-link tick redistribution failed")
+		return false
+	if float(tick_cells.get("cell_energy")[0]) < 0.0 or not is_equal_approx(float(tick_cells.call("total_energy_for_org", 0)), 1.0):
+		push_error("SmokeTest: multi-link donor scaling must preserve nonnegative energy and total")
+		return false
+	var dry_cells: RefCounted = cells_script.new() as RefCounted
+	dry_cells.call("append_cell", 0, Vector2.ZERO, 0.0, 0)
+	dry_cells.call("append_cell", 0, Vector2.RIGHT, 0.4, 0)
+	dry_cells.call("link_cells", 0, 1, 1.0)
+	if not bool(metabolism.call("redistribute_link_energy", dry_cells, PackedFloat32Array([1.0, 0.0]), 1.0)):
+		push_error("SmokeTest: zero-energy redistribution failed")
+		return false
+	if not is_equal_approx(float(dry_cells.get("cell_energy")[0]), 0.1) or not is_equal_approx(float(dry_cells.get("cell_energy")[1]), 0.3):
+		push_error("SmokeTest: transfer must not create negative cell energy")
+		return false
+	if bool(metabolism.call("redistribute_link_energy", dry_cells, PackedFloat32Array([1.0]), 1.0)):
+		push_error("SmokeTest: mismatched transfer-rate array must be rejected")
+		return false
+	var foreign_cells: RefCounted = cells_script.new() as RefCounted
+	foreign_cells.call("append_cell", 0, Vector2.ZERO, 0.4, 0)
+	foreign_cells.call("append_cell", 1, Vector2.RIGHT, 0.6, 0)
+	foreign_cells.get("link_cell_a").append(0)
+	foreign_cells.get("link_cell_b").append(1)
+	foreign_cells.get("link_rest_length").append(1.0)
+	if bool(metabolism.call("redistribute_link_energy", foreign_cells, PackedFloat32Array([1.0, 0.0]), 1.0)):
+		push_error("SmokeTest: cross-organism energy transfer must be rejected")
+		return false
+	if not is_equal_approx(float(foreign_cells.get("cell_energy")[0]), 0.4) or not is_equal_approx(float(foreign_cells.get("cell_energy")[1]), 0.6):
+		push_error("SmokeTest: rejected cross-organism transfer changed energy")
+		return false
+	print("SmokeTest: OK conservative linked energy transfer / clamp / donor floor / ownership")
 	return true
 
 func _check_cell_death_cleanup() -> bool:
