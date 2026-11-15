@@ -142,5 +142,21 @@ func _check_genome_codec() -> bool:
 	if codec_script.call("decode", damaged) != null:
 		push_error("SmokeTest: GNP1 checksum corruption was accepted")
 		return false
-	print("SmokeTest: OK GNP1 round-trip / CRC rejection bytes=", encoded.size())
+	var unsupported: PackedByteArray = encoded.duplicate()
+	unsupported[4] = 2
+	var unsupported_crc: int = int(codec_script.call("_crc32", unsupported.slice(0, unsupported.size() - 4)))
+	for shift in [0, 8, 16, 24]:
+		unsupported[unsupported.size() - 4 + (shift / 8)] = (unsupported_crc >> shift) & 255
+	if codec_script.call("decode", unsupported) != null:
+		push_error("SmokeTest: unsupported GNP1 version was accepted")
+		return false
+	var trailing: PackedByteArray = encoded.slice(0, encoded.size() - 4)
+	trailing.append(0)
+	var trailing_crc: int = int(codec_script.call("_crc32", trailing))
+	for shift in [0, 8, 16, 24]:
+		trailing.append((trailing_crc >> shift) & 255)
+	if codec_script.call("decode", trailing) != null:
+		push_error("SmokeTest: GNP1 trailing bytes were accepted")
+		return false
+	print("SmokeTest: OK GNP1 round-trip / CRC / version / length rejection bytes=", encoded.size())
 	return true

@@ -49,7 +49,7 @@ static func decode(bytes: PackedByteArray) -> RefCounted:
 	var flags: int = _read_u16(bytes, 6)
 	var locus_count: int = int(bytes[9])
 	var trait_count: int = int(bytes[10])
-	if version < 1 or trait_count != 8:
+	if version != 1 or trait_count != 8:
 		return null
 	var cursor: int = FIXED_HEADER_BYTES
 	if cursor + locus_count + trait_count + 2 > payload_end:
@@ -71,6 +71,13 @@ static func decode(bytes: PackedByteArray) -> RefCounted:
 	for i in range(instruction_count):
 		var packed: int = _read_u32(bytes, cursor + i * 4)
 		program.append({"opcode": (packed >> 26) & 63, "a": (packed >> 18) & 255, "b": (packed >> 10) & 255, "c": packed & 1023})
+	cursor += instruction_count * 4
+	var aligned_end: int = (cursor + 3) & ~3
+	if aligned_end != payload_end:
+		return null
+	for padding_index in range(cursor, aligned_end):
+		if int(bytes[padding_index]) != 0:
+			return null
 	if not bool(genome.call("set_development_program", program)):
 		return null
 	if not bool(genome.call("is_valid")):
