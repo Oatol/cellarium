@@ -32,34 +32,47 @@ static func step(cells: RefCounted, dt: float) -> void:
 	cells.set("cell_prev_y", prev_y)
 	_solve_links(cells, count)
 
+static func query_neighbors(cells: RefCounted, cell_index: int) -> Array[int]:
+	var neighbors: Array[int] = []
+	if cells == null:
+		return neighbors
+	var count: int = int(cells.call("size"))
+	if cell_index < 0 or cell_index >= count:
+		return neighbors
+	var alive: PackedByteArray = cells.get("cell_alive")
+	if alive[cell_index] == 0:
+		return neighbors
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var buckets: Dictionary = _build_spatial_hash(cells)
+	var cell_x: int = floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			var key: Vector2i = Vector2i(cell_x + offset_x, cell_y + offset_y)
+			if not buckets.has(key):
+				continue
+			for sub_bucket in buckets[key]:
+				for neighbor_value in sub_bucket:
+					var neighbor: int = int(neighbor_value)
+					if neighbor != cell_index:
+						neighbors.append(neighbor)
+	neighbors.sort()
+	return neighbors
+
 static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 	var pairs: Array[Vector2i] = []
 	if cells == null:
 		return pairs
 	var count: int = int(cells.call("size"))
-	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
-	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
-	var buckets: Dictionary = {}
-	for cell_index in range(count):
-		if alive[cell_index] == 0:
-			continue
-		var cell_x: int = floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE)
-		var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
-		var key: Vector2i = Vector2i(cell_x, cell_y)
-		if not buckets.has(key):
-			buckets[key] = [[]]
-		var cell_buckets: Array = buckets[key]
-		if cell_buckets[cell_buckets.size() - 1].size() >= SPATIAL_HASH_SOFT_LIMIT:
-			cell_buckets.append([])
-		cell_buckets[cell_buckets.size() - 1].append(cell_index)
-		buckets[key] = cell_buckets
+	var buckets: Dictionary = _build_spatial_hash(cells)
 	for a in range(count):
 		if alive[a] == 0:
 			continue
-		var cell_x: int = floori(pos_x[a] / SPATIAL_HASH_CELL_SIZE)
-		var cell_y: int = floori(pos_y[a] / SPATIAL_HASH_CELL_SIZE)
+		var cell_x: int = floori(float(cells.get("cell_pos_x")[a]) / SPATIAL_HASH_CELL_SIZE)
+		var cell_y: int = floori(float(cells.get("cell_pos_y")[a]) / SPATIAL_HASH_CELL_SIZE)
 		for offset_y in range(-1, 2):
 			for offset_x in range(-1, 2):
 				var key: Vector2i = Vector2i(cell_x + offset_x, cell_y + offset_y)
@@ -72,6 +85,25 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 							continue
 						pairs.append(Vector2i(a, b))
 	return pairs
+
+static func _build_spatial_hash(cells: RefCounted) -> Dictionary:
+	var buckets: Dictionary = {}
+	var count: int = int(cells.call("size"))
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	for cell_index in range(count):
+		if alive[cell_index] == 0:
+			continue
+		var key: Vector2i = Vector2i(floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE), floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE))
+		if not buckets.has(key):
+			buckets[key] = [[]]
+		var cell_buckets: Array = buckets[key]
+		if cell_buckets[cell_buckets.size() - 1].size() >= SPATIAL_HASH_SOFT_LIMIT:
+			cell_buckets.append([])
+		cell_buckets[cell_buckets.size() - 1].append(cell_index)
+		buckets[key] = cell_buckets
+	return buckets
 
 static func _solve_links(cells: RefCounted, cell_count: int) -> void:
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
