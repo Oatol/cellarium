@@ -16,6 +16,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/core/tick/TickCore.gd",
 	"res://scripts/system/EnvironmentManager.gd",
 	"res://scripts/system/OrganismManager.gd",
+	"res://scripts/system/CellPhysics.gd",
 ]
 
 func _initialize() -> void:
@@ -35,6 +36,8 @@ func _initialize() -> void:
 	else:
 		print("SmokeTest: OK res://scenes/main.tscn")
 	if not await _check_tick_divide_route():
+		failures += 1
+	if not _check_cell_physics():
 		failures += 1
 	if not _check_cell_death_cleanup():
 		failures += 1
@@ -110,6 +113,36 @@ func _run_development_replay(genome: RefCounted) -> Dictionary:
 	var state: Dictionary = {"org_id": org_id, "cell_count": int(organisms.get("cell_count")[org_id]), "org_state": int(organisms.get("org_state")[org_id]), "dev_cursor": int(organisms.get("org_dev_cursor")[org_id]), "cell_type": cells.get("cell_type").duplicate(), "positions": [cells.get("cell_pos_x").duplicate(), cells.get("cell_pos_y").duplicate()], "links": [cells.get("link_cell_a").duplicate(), cells.get("link_cell_b").duplicate()]}
 	manager.free()
 	return state
+
+func _check_cell_physics() -> bool:
+	var cell_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
+	var physics_script: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	var first: RefCounted = cell_script.new() as RefCounted
+	var second: RefCounted = cell_script.new() as RefCounted
+	for cells in [first, second]:
+		cells.call("append_cell", 0, Vector2(0, 0), 0.5, 0)
+		cells.call("append_cell", 0, Vector2(10, 0), 0.5, 0)
+		cells.call("link_cells", 0, 1, 4.0)
+		cells.get("cell_prev_x")[0] = -1.0
+		cells.get("cell_prev_x")[1] = 11.0
+		physics_script.call("step", cells, 1.0 / 60.0)
+	var first_distance: float = first.call("get_position", 0).distance_to(first.call("get_position", 1))
+	var second_distance: float = second.call("get_position", 0).distance_to(second.call("get_position", 1))
+	if not is_equal_approx(first_distance, 4.0) or first.get("cell_pos_x") != second.get("cell_pos_x"):
+		push_error("SmokeTest: spring constraints must converge deterministically")
+		return false
+	if not is_equal_approx((float(first.get("cell_pos_x")[0]) + float(first.get("cell_pos_x")[1])) * 0.5, 5.0):
+		push_error("SmokeTest: symmetric spring correction must preserve center of mass")
+		return false
+	var free_cells: RefCounted = cell_script.new() as RefCounted
+	free_cells.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
+	free_cells.get("cell_prev_x")[0] = -1.0
+	physics_script.call("step", free_cells, 1.0 / 60.0)
+	if not is_equal_approx(float(free_cells.get("cell_pos_x")[0]), 0.98):
+		push_error("SmokeTest: Verlet integration must apply 0.98 damping")
+		return false
+	print("SmokeTest: OK deterministic Verlet / damped motion / spring constraints")
+	return true
 
 func _check_cell_death_cleanup() -> bool:
 	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted

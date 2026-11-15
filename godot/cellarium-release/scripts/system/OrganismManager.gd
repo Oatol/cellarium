@@ -4,10 +4,14 @@ extends Node
 const CELL_ARRAY_SCRIPT: Script = preload("res://scripts/core/data/CellArray.gd")
 const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismStore.gd")
 const DEVELOPMENT_RULES_SCRIPT: Script = preload("res://scripts/core/data/DevelopmentRules.gd")
+const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
 var genomes: Dictionary = {}
+
+func advance_physics_tick(dt: float) -> void:
+	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 
 func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: RefCounted, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if genome == null or not bool(genome.call("is_valid")) or genome_id < 0:
