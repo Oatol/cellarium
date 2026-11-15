@@ -39,6 +39,8 @@ func _initialize() -> void:
 		failures += 1
 	if not _check_cell_physics():
 		failures += 1
+	if not _check_spatial_hash():
+		failures += 1
 	if not _check_cell_death_cleanup():
 		failures += 1
 	if not _check_basal_autonomy():
@@ -142,6 +144,26 @@ func _check_cell_physics() -> bool:
 		push_error("SmokeTest: Verlet integration must apply 0.98 damping")
 		return false
 	print("SmokeTest: OK deterministic Verlet / damped motion / spring constraints")
+	return true
+
+func _check_spatial_hash() -> bool:
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var physics: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	cells.call("append_cell", 0, Vector2(63, 0), 0.1, 0)
+	cells.call("append_cell", 1, Vector2(64, 0), 0.1, 0)
+	cells.call("append_cell", 1, Vector2(300, 20), 0.1, 0)
+	cells.call("append_cell", 2, Vector2(-1, 0), 0.1, 0)
+	cells.call("append_cell", 3, Vector2(300, 0), 0.1, 0)
+	cells.get("cell_alive")[4] = 0
+	var pairs: Array = physics.call("build_collision_pairs", cells)
+	var pairs_again: Array = physics.call("build_collision_pairs", cells)
+	if pairs != pairs_again or pairs.size() != 2:
+		push_error("SmokeTest: spatial hash pairs must be stable, unique and exclude same-organism/dead cells")
+		return false
+	if pairs[0] != Vector2i(0, 3) or pairs[1] != Vector2i(0, 1):
+		push_error("SmokeTest: 3x3 spatial hash neighbor enumeration mismatch")
+		return false
+	print("SmokeTest: OK deterministic 64-unit spatial hash / 3x3 neighbor pairs")
 	return true
 
 func _check_cell_death_cleanup() -> bool:
