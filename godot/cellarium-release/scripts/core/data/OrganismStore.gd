@@ -1,0 +1,53 @@
+extends RefCounted
+## 个体级 SoA 元数据。能量是细胞能量之和；不另存可漂移的重复 energy 字段。
+
+const STATE_ZYGOTE: int = 0
+const STATE_DEVELOPING: int = 1
+const STATE_MATURE: int = 2
+const STATE_DAMAGED: int = 3
+const STATE_DEAD: int = 4
+
+var org_alive: PackedByteArray = PackedByteArray()
+var org_genome_id: PackedInt32Array = PackedInt32Array()
+var org_species_id: PackedInt32Array = PackedInt32Array()
+var org_parent_id: PackedInt32Array = PackedInt32Array()
+var org_age: PackedFloat32Array = PackedFloat32Array()
+var org_health: PackedFloat32Array = PackedFloat32Array()
+var org_state: PackedByteArray = PackedByteArray()
+var cell_offset: PackedInt32Array = PackedInt32Array()
+var cell_count: PackedInt32Array = PackedInt32Array()
+
+func create_organism(genome_id: int, species_id: int, parent_id: int, initial_state: int = STATE_ZYGOTE) -> int:
+	if genome_id < 0 or species_id < 0 or parent_id < -1 or initial_state > STATE_DEAD:
+		return -1
+	var org_id: int = org_alive.size()
+	org_alive.append(1)
+	org_genome_id.append(genome_id)
+	org_species_id.append(species_id)
+	org_parent_id.append(parent_id)
+	org_age.append(0.0)
+	org_health.append(1.0)
+	org_state.append(initial_state)
+	cell_offset.append(0)
+	cell_count.append(0)
+	return org_id
+
+func set_cell_range(org_id: int, offset: int, count: int) -> bool:
+	if org_id < 0 or org_id >= org_alive.size() or offset < 0 or count < 0:
+		return false
+	cell_offset[org_id] = offset
+	cell_count[org_id] = count
+	return true
+
+func validate_cell_ranges(total_cells: int) -> bool:
+	if total_cells < 0:
+		return false
+	for org_id in range(org_alive.size()):
+		var start: int = cell_offset[org_id]
+		var count: int = cell_count[org_id]
+		if start < 0 or count < 0 or start + count > total_cells:
+			return false
+	return true
+
+func is_mature_single_cell(org_id: int, division_count: int) -> bool:
+	return org_id >= 0 and org_id < cell_count.size() and cell_count[org_id] == 1 and division_count == 0

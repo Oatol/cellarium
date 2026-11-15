@@ -4,6 +4,40 @@
 
 ---
 
+## 0.2.0 — 2026-11-15
+
+**类型**：玩法决策落地 / Godot P1 数据层 / 可运行工程快照
+**触发**：纳入 Godot 源码并继续实现核心数据模型
+
+### 四项决策
+
+1. **区分 `DIVIDE` 与 `REPRODUCE`**：`DIVIDE` 让同一个体 `cell_count += 1`（发育，不产生新 `org_id`、不写谱系），`REPRODUCE` 让个体数 +1（繁殖，产生新 `org_id` 与父代 ID）。v1.0 §5.4「无性二分裂」解释为 `REPRODUCE`；多细胞个体从新受精卵重建，不是把母体对半切开。
+2. **最小自治核基础值做成培养基参数**：由 `EnvironmentPreset.nutrient_density`（皿级只读标量）导出 `basal_autonomy`，不硬编码；随存档 / 快照 / 回放序列化，局部营养场仍只影响摄能速率。
+3. **v1 不做环境诱导的发育深度可塑性，但保留接口**：预留 `DevelopmentContext` 只读快照接口；v1 发育深度完全由 `dev_program[]` 遗传决定，tick 内禁止读环境场增删发育指令。
+4. **新建独立 Godot 工程 `D:\Tools\Godot_v4.7.2\project\cellarium`**：Genesis 保留为参考基线；后续开发通过 Godot MCP 操作编辑器，节点 / 属性 / 信号在 `.tscn` 中声明，脚本只承担必要逻辑。
+
+### 文档变更
+
+- `docs/创生模拟器_沙盒版人工生命系统设计文档_v1.1_合并稿.md`：新增 §5.3.6（术语统一、最小自治核、发育深度轴、表达预算与经济性、培养基参数、可塑性接口预留）、§5.4.1（发育与繁殖分离）；§7.5 增补营养密度参数；§10.3 更新工程位置与开发方式；§0 / §11.5 / 附录 A 同步。原文 128 段 / 13 表仍逐字保留，结构校验 `PROBLEMS=0`。
+- `docs/Godot项目技术设计文档.md`：新增 §0.7 实现约束（数据结构映射、命令对象、重复装备税、确定性约束、Godot MCP 开发方式、v1 不做项），头部版本与日期同步。
+- `README.md`：文档索引补充第二轮增补内容及公开 Godot 工程快照路径。
+- `godot/cellarium-release/`：纳入可运行 Godot 4.7.2 工程快照，含主场景、基础模拟节点和 P1 数据层源码；不含 `.godot/` 缓存、Godot AI MCP 插件、安装包与本地安装脚本。
+
+### 工程
+
+- 新建 `D:\Tools\Godot_v4.7.2\project\cellarium`：主场景与节点树通过 Godot MCP 创建。Genesis 未改动。
+- P1 首批数据层：SoA `CellArray` / `OrganismStore`、GNP1 运行时 `Genome` 与 u32 `GenomeCodec`、`DevelopmentRules`；实现连接同个体校验、个体能量聚合、DIVIDE 深度、REPRODUCE 命令分离、单细胞直接成熟。
+- Godot MCP 插件仍留在本机工程；公开快照可不依赖插件独立打开和运行。
+
+### 验收
+
+- 合并稿结构校验：PASS（0 problems）。
+- `SmokeTest.gd`：12 个运行脚本 + `main.tscn` 全部加载；自治值随营养密度变化；SoA 范围 / 同个体双向连接 / 能量求和 / DIVIDE 深度 / 单细胞成熟 / `DIVIDE` 与 `REPRODUCE` 分离 / GNP1 编解码与 CRC 损坏拒绝均 PASS；`FAILURES=0`、`EXITCODE=0`。
+- 主场景运行时：Godot MCP helper live、无启动错误；实测 tick 推进且排队命令在下一 tick 消费。
+- 干净快照独立 headless 验收通过；快照包含 12 个本项目脚本和 1 个场景，不含缓存与插件。
+
+---
+
 ## 0.1.0-docs — 2026-11-15
 
 **类型**：文档基线 / 首次备份

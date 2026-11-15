@@ -12,10 +12,16 @@ analysis/cell_lab_apk_extract/*/classes.dex
 analysis/cell_lab_apk_extract/*/AndroidManifest.xml
 analysis/cell_lab_apk_extract/*/levels.xml
 
-# Godot generated files (when the engine tree is added later)
+# Godot generated files
 .godot/
+**/.godot/
 *.import
 export_presets.cfg
+# Local MCP plugin/bootstrap payload (install separately from its official release)
+godot/cellarium-release/addons/
+godot/cellarium-release/install.cmd
+godot/cellarium-release/install.ps1
+godot/cellarium-release/SOURCE.txt
 
 # OS / editor noise
 Thumbs.db

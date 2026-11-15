@@ -12,7 +12,8 @@ Godot 4.x 2D 人工生命沙盒（木卫二冰下海洋世界观）的设计文�
 
 | 文件 | 作用 | 权威级别 |
 | --- | --- | --- |
-| `docs/创生模拟器_沙盒版人工生命系统设计文档_v1.1_合并稿.md` | 玩法与系统规格：v1.0 原文逐字保留 + 多细胞协作条款 + Cell Lab / Macro 借鉴章节 + 工程重写与版本备份 | **玩法权威（待用户确认后正式生效）** |
+| `godot/cellarium-release/` | 可运行 Godot 工程快照（4.7.2；不含本机 MCP 插件与引擎缓存） | 实现快照 |
+| `docs/创生模拟器_沙盒版人工生命系统设计文档_v1.1_合并稿.md` | 玩法与系统规格：v1.0 原文逐字保留 + P0 多细胞协作条款 + Cell Lab / Macro 借鉴章节 + 第二轮增补（§5.3.6 单细胞个体与发育深度轴、§5.4.1 DIVIDE/REPRODUCE 分离）+ 工程重写与版本备份 | **玩法权威（待用户确认后正式生效）** |
 | `docs/Godot项目技术设计文档.md` | Godot 施工图：tick 架构、数据结构、CommandBus、GNP1、Agent 契约、GPU 场与验收基准 | **实现权威** |
 | `docs/v1.0_P0补充条款_待并入.md` | P0 五条玩法条款的原件存档（已并入 v1.1 合并稿） | 存档 |
 | `analysis/CellLab_APK_解析报告.md` | 两个 Cell Lab APK 的静态解析：tick 主循环、对象池、分化树、18/33 类型、4 通道化学信号 | 证据 |
@@ -29,10 +30,10 @@ Godot 4.x 2D 人工生命沙盒（木卫二冰下海洋世界观）的设计文�
 
 ## 工程与验证
 
-Godot 工程实体当前位于本机 `D:\Tools\Godot_v4.7.2\project\Genesis\`，尚未纳入本仓库（见 `CHANGELOG.md` 的备份范围）。无头验证基线：
+新 Godot 工程位于本机 `D:\Tools\Godot_v4.7.2\project\cellarium\`，可运行源码快照纳入 `godot/cellarium-release/`（不含 `.godot/` 缓存与本机 MCP 插件）；旧 `Genesis` 保留为参考与回退基线，不纳入本仓库。无头验证命令：
 
 ```
-Godot_v4.7.2-stable_win64_console.exe --headless --path <Genesis> --quit-after 900
+Godot_v4.7.2-stable_win64_console.exe --headless --path <project> --script res://tools/SmokeTest.gd
 ```
 
 验收要求：`EXITCODE=0`、无脚本解析错误；新增脚本必须登记 `SmokeTest.gd` 清单。GPU 场需窗口 Vulkan 环境验证，无头下会自动回退 CPU。
