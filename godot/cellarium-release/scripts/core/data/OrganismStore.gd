@@ -51,6 +51,15 @@ func validate_cell_ranges(total_cells: int) -> bool:
 			return false
 	return true
 
+func remove_cell_from_organism(org_id: int) -> bool:
+	if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or cell_count[org_id] <= 0:
+		return false
+	cell_count[org_id] -= 1
+	if cell_count[org_id] == 0:
+		org_alive[org_id] = 0
+		org_state[org_id] = STATE_DEAD
+	return true
+
 func is_mature_single_cell(org_id: int, division_count: int) -> bool:
 	return org_id >= 0 and org_id < cell_count.size() and cell_count[org_id] == 1 and division_count == 0
 

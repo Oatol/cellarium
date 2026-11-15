@@ -30,6 +30,17 @@ func apply_command(command: Dictionary) -> int:
 		return -1
 	return int(DEVELOPMENT_RULES_SCRIPT.call("execute_divide", genomes[org_id], cells, organisms, command))
 
+func remove_cell(cell_index: int) -> float:
+	if cell_index < 0 or cell_index >= int(cells.call("size")):
+		return -1.0
+	if int(cells.get("cell_alive")[cell_index]) == 0:
+		return -1.0
+	var org_id: int = int(cells.get("cell_org_id")[cell_index])
+	var energy: float = float(cells.call("remove_cell", cell_index))
+	if energy < 0.0 or not bool(organisms.call("remove_cell_from_organism", org_id)):
+		return -1.0
+	return energy
+
 func get_organism_count() -> int:
 	var count: int = 0
 	for alive in organisms.get("org_alive"):

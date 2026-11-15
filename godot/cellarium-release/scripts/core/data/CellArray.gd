@@ -9,6 +9,7 @@ var cell_pos_y: PackedFloat32Array = PackedFloat32Array()
 var cell_prev_x: PackedFloat32Array = PackedFloat32Array()
 var cell_prev_y: PackedFloat32Array = PackedFloat32Array()
 var cell_energy: PackedFloat32Array = PackedFloat32Array()
+var cell_alive: PackedByteArray = PackedByteArray()
 var cell_type: PackedByteArray = PackedByteArray()
 var cell_org_id: PackedInt32Array = PackedInt32Array()
 var cell_link_count: PackedByteArray = PackedByteArray()
@@ -26,6 +27,7 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_prev_x.append(position.x)
 	cell_prev_y.append(position.y)
 	cell_energy.append(energy)
+	cell_alive.append(1)
 	cell_type.append(type_id)
 	cell_org_id.append(org_id)
 	cell_link_count.append(0)
@@ -71,9 +73,25 @@ func set_position(index: int, position: Vector2) -> bool:
 func total_energy_for_org(org_id: int) -> float:
 	var total: float = 0.0
 	for i in range(size()):
-		if cell_org_id[i] == org_id:
+		if cell_org_id[i] == org_id and cell_alive[i] != 0:
 			total += cell_energy[i]
 	return total
+
+func remove_cell(index: int) -> float:
+	if index < 0 or index >= size() or cell_alive[index] == 0:
+		return -1.0
+	var released_energy: float = cell_energy[index]
+	for link_index in range(link_cell_a.size() - 1, -1, -1):
+		if link_cell_a[link_index] == index or link_cell_b[link_index] == index:
+			var other: int = link_cell_b[link_index] if link_cell_a[link_index] == index else link_cell_a[link_index]
+			cell_link_count[other] -= 1
+			cell_link_count[index] -= 1
+			link_cell_a.remove_at(link_index)
+			link_cell_b.remove_at(link_index)
+			link_rest_length.remove_at(link_index)
+	cell_alive[index] = 0
+	cell_energy[index] = 0.0
+	return released_energy
 
 func link_cells(a: int, b: int, rest_length: float) -> bool:
 	if a < 0 or b < 0 or a >= size() or b >= size() or a == b or rest_length <= 0.0:

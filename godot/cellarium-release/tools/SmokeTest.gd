@@ -36,6 +36,8 @@ func _initialize() -> void:
 		print("SmokeTest: OK res://scenes/main.tscn")
 	if not await _check_tick_divide_route():
 		failures += 1
+	if not _check_cell_death_cleanup():
+		failures += 1
 	if not _check_basal_autonomy():
 		failures += 1
 	if not _check_development_rules():
@@ -81,6 +83,42 @@ func _check_tick_divide_route() -> bool:
 	print("SmokeTest: OK CommandBus next-tick DIVIDE route")
 	instance.queue_free()
 	await process_frame
+	return true
+
+func _check_cell_death_cleanup() -> bool:
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	var store: RefCounted = load("res://scripts/core/data/OrganismStore.gd").new() as RefCounted
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	var org_id: int = int(store.call("create_organism", 0, 0, -1, 2))
+	var a: int = int(cells.call("append_cell", org_id, Vector2.ZERO, 0.2, 0))
+	var b: int = int(cells.call("append_cell", org_id, Vector2.RIGHT, 0.3, 0))
+	var c: int = int(cells.call("append_cell", org_id, Vector2.DOWN, 0.5, 0))
+	store.call("set_cell_range", org_id, 0, 3)
+	cells.call("link_cells", a, b, 1.0)
+	cells.call("link_cells", b, c, 1.0)
+	manager.set("cells", cells)
+	manager.set("organisms", store)
+	var returned_energy: float = float(manager.call("remove_cell", b))
+	if not is_equal_approx(returned_energy, 0.3) or int(cells.get("link_cell_a").size()) != 0:
+		push_error("SmokeTest: removing a cell must return energy and clear all links")
+		manager.free()
+		return false
+	if int(store.get("cell_count")[org_id]) != 2 or int(store.get("org_alive")[org_id]) == 0:
+		push_error("SmokeTest: organism must survive while cells remain")
+		manager.free()
+		return false
+	if float(manager.call("remove_cell", b)) >= 0.0:
+		push_error("SmokeTest: repeated cell removal must be rejected")
+		manager.free()
+		return false
+	manager.call("remove_cell", a)
+	manager.call("remove_cell", c)
+	if int(store.get("org_alive")[org_id]) != 0 or int(store.get("org_state")[org_id]) != int(store.get_script().get_script_constant_map()["STATE_DEAD"]):
+		push_error("SmokeTest: organism must die after its last cell is removed")
+		manager.free()
+		return false
+	manager.free()
+	print("SmokeTest: OK cell removal / edge cleanup / last-cell death")
 	return true
 
 func _check_basal_autonomy() -> bool:
