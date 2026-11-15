@@ -32,6 +32,7 @@ func draw_cells_layer(cell_radius: float) -> void:
 		var position: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
 		draw_circle(position, cell_radius, color)
 		draw_arc(position, cell_radius, 0.0, TAU, 24, Color("#d5eee7"), 0.35, true)
+		draw_circle(position + Vector2(-cell_radius * 0.28, -cell_radius * 0.28), cell_radius * 0.24, Color("#e7fff5", 0.72))
 
 func draw_links_layer() -> void:
 	var cells: RefCounted = get_cells()
