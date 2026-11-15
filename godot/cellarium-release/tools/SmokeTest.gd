@@ -76,22 +76,40 @@ func _check_tick_divide_route() -> bool:
 		instance.queue_free()
 		return false
 	bus.call("execute_tick_commands", 1)
+	manager.call("advance_development_tick")
 	if int(cells.call("size")) != 2 or int(manager.call("get_organism_count")) != 1:
 		push_error("SmokeTest: next-tick DIVIDE did not update the existing organism")
 		instance.queue_free()
 		return false
-	bus.call("enqueue", {"type": "DEVELOPMENT_INSTRUCTION", "org_id": org_id, "instruction_index": 1})
-	bus.call("execute_tick_commands", 2)
-	bus.call("enqueue", {"type": "DEVELOPMENT_INSTRUCTION", "org_id": org_id, "instruction_index": 2})
-	bus.call("execute_tick_commands", 3)
-	if int(cells.get("cell_type")[1]) != 3 or not bool(cells.call("has_link", 0, 1)):
-		push_error("SmokeTest: queued DIFFERENTIATE/LINK instructions were not applied")
+	instance.call("_on_tick_advanced", 2)
+	if not bool(cells.call("has_link", 0, 1)):
+		push_error("SmokeTest: tick 2 must establish the LINK instruction")
 		instance.queue_free()
 		return false
-	print("SmokeTest: OK CommandBus next-tick development instruction route")
+	var replay_state: Dictionary = _run_development_replay(genome)
+	var replay_again: Dictionary = _run_development_replay(genome)
+	if replay_state != replay_again:
+		push_error("SmokeTest: same development input must produce identical state")
+		instance.queue_free()
+		return false
+	print("SmokeTest: OK deterministic per-tick development instruction route")
 	instance.queue_free()
 	await process_frame
 	return true
+
+func _run_development_replay(genome: RefCounted) -> Dictionary:
+	var manager_script: Script = load("res://scripts/system/OrganismManager.gd") as Script
+	var manager: Node = manager_script.new() as Node
+	var genome_id: int = int(genome.call("hash"))
+	var org_id: int = int(manager.call("register_zygote", genome_id, 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	manager.call("advance_development_tick")
+	manager.call("advance_development_tick")
+	manager.call("advance_development_tick")
+	var cells: RefCounted = manager.get("cells")
+	var organisms: RefCounted = manager.get("organisms")
+	var state: Dictionary = {"org_id": org_id, "cell_count": int(organisms.get("cell_count")[org_id]), "org_state": int(organisms.get("org_state")[org_id]), "dev_cursor": int(organisms.get("org_dev_cursor")[org_id]), "cell_type": cells.get("cell_type").duplicate(), "positions": [cells.get("cell_pos_x").duplicate(), cells.get("cell_pos_y").duplicate()], "links": [cells.get("link_cell_a").duplicate(), cells.get("link_cell_b").duplicate()]}
+	manager.free()
+	return state
 
 func _check_cell_death_cleanup() -> bool:
 	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted

@@ -1,7 +1,6 @@
 extends RefCounted
-## 发育计划由 GNP1 dev_program 唯一决定。v1 环境快照不改变细胞数量。
+## 发育计划由 GNP1 dev_program 唯一决定。v1 环境快照不改变细胞数量.
 
-const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismStore.gd")
 
 static func division_count(genome: RefCounted) -> int:
@@ -34,7 +33,7 @@ static func execute_instruction(genome: RefCounted, cells: RefCounted, organisms
 	if organisms.get("org_state")[org_id] != ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"]:
 		return -1
 	var program: Array = genome.get("dev_program")
-	if instruction_index < 0 or instruction_index >= program.size():
+	if instruction_index != int(organisms.get("org_dev_cursor")[org_id]) or instruction_index < 0 or instruction_index >= program.size():
 		return -1
 	var instruction: Dictionary = program[instruction_index]
 	var opcode: int = int(instruction.get("opcode", -1))
@@ -42,18 +41,21 @@ static func execute_instruction(genome: RefCounted, cells: RefCounted, organisms
 	var b: int = int(instruction.get("b", -1))
 	var c: int = int(instruction.get("c", -1))
 	if opcode == 0:
-		var divided_cell: int = execute_divide(genome, cells, organisms, {"type": "DIVIDE", "org_id": org_id, "cell_index": a, "instruction_index": instruction_index, "separation": float(command.get("separation", 1.0))})
-		if divided_cell >= 0:
+		var child_index: int = execute_divide(genome, cells, organisms, {"type": "DIVIDE", "org_id": org_id, "cell_index": a, "instruction_index": instruction_index, "separation": float(command.get("separation", 1.0))})
+		if child_index >= 0:
+			organisms.get("org_dev_cursor")[org_id] += 1
 			_update_maturity(genome, organisms, org_id)
-		return divided_cell
+		return child_index
 	if instruction_index >= 63 or (int(organisms.get("org_instruction_mask")[org_id]) & (1 << instruction_index)) != 0:
 		return -1
 	if opcode == 1:
-		if a < 0 or a >= cells.call("size") or cells.get("cell_org_id")[a] != org_id or b < 0 or b > 255:
+		if a < 0 or a >= cells.call("size") or cells.get("cell_alive")[a] == 0 or cells.get("cell_org_id")[a] != org_id or b < 0 or b > 255:
 			return -1
 		cells.get("cell_type")[a] = b
 	elif opcode == 2:
 		if a < 0 or b < 0 or a >= cells.call("size") or b >= cells.call("size") or c <= 0:
+			return -1
+		if cells.get("cell_alive")[a] == 0 or cells.get("cell_alive")[b] == 0:
 			return -1
 		if cells.get("cell_org_id")[a] != org_id or cells.get("cell_org_id")[b] != org_id:
 			return -1
@@ -62,6 +64,7 @@ static func execute_instruction(genome: RefCounted, cells: RefCounted, organisms
 	else:
 		return -1
 	organisms.get("org_instruction_mask")[org_id] = int(organisms.get("org_instruction_mask")[org_id]) | (1 << instruction_index)
+	organisms.get("org_dev_cursor")[org_id] += 1
 	_update_maturity(genome, organisms, org_id)
 	return a
 
@@ -80,17 +83,17 @@ static func execute_divide(genome: RefCounted, cells: RefCounted, organisms: Ref
 		return -1
 	var org_id: int = int(command["org_id"])
 	var source_index: int = int(command["cell_index"])
-	if org_id >= organisms.get("org_alive").size() or int(organisms.get("org_alive")[org_id]) == 0:
+	if org_id >= organisms.get("org_alive").size() or organisms.get("org_alive")[org_id] == 0:
 		return -1
-	if source_index >= cells.call("size") or int(cells.get("cell_org_id")[source_index]) != org_id:
+	if source_index >= cells.call("size") or cells.get("cell_alive")[source_index] == 0 or cells.get("cell_org_id")[source_index] != org_id:
 		return -1
-	if int(organisms.get("org_state")[org_id]) != int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"]):
+	if organisms.get("org_state")[org_id] != ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"]:
 		return -1
 	if int(organisms.get("cell_count")[org_id]) >= expected_cell_count(genome):
 		return -1
 	var instruction_index: int = int(command.get("instruction_index", -1))
 	var program: Array = genome.get("dev_program")
-	if instruction_index < 0 or instruction_index >= program.size():
+	if instruction_index != int(organisms.get("org_dev_cursor")[org_id]) or instruction_index < 0 or instruction_index >= program.size():
 		return -1
 	var instruction: Dictionary = program[instruction_index]
 	if int(instruction.get("opcode", -1)) != 0 or int(instruction.get("a", -1)) != source_index or instruction_index >= 63:
@@ -105,5 +108,4 @@ static func execute_divide(genome: RefCounted, cells: RefCounted, organisms: Ref
 	if not bool(organisms.call("add_developed_cell", org_id, child_index, expected_cell_count(genome))):
 		return -1
 	organisms.get("org_instruction_mask")[org_id] = int(organisms.get("org_instruction_mask")[org_id]) | instruction_bit
-	_update_maturity(genome, organisms, org_id)
 	return child_index

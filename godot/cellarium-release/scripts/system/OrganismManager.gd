@@ -27,10 +27,30 @@ func apply_command(command: Dictionary) -> int:
 	if not genomes.has(org_id):
 		return -1
 	if command.get("type", "") == "DIVIDE":
-		return int(DEVELOPMENT_RULES_SCRIPT.call("execute_divide", genomes[org_id], cells, organisms, command))
+		var result: int = int(DEVELOPMENT_RULES_SCRIPT.call("execute_divide", genomes[org_id], cells, organisms, command))
+		if result >= 0:
+			organisms.get("org_dev_cursor")[org_id] += 1
+			DEVELOPMENT_RULES_SCRIPT.call("_update_maturity", genomes[org_id], organisms, org_id)
+		return result
 	if command.get("type", "") == "DEVELOPMENT_INSTRUCTION":
 		return int(DEVELOPMENT_RULES_SCRIPT.call("execute_instruction", genomes[org_id], cells, organisms, command))
 	return -1
+
+func advance_development_tick() -> int:
+	var executed: int = 0
+	for org_id in range(organisms.get("org_alive").size()):
+		if organisms.get("org_alive")[org_id] == 0 or organisms.get("org_state")[org_id] != ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"]:
+			continue
+		if not genomes.has(org_id):
+			continue
+		var cursor: int = int(organisms.get("org_dev_cursor")[org_id])
+		var program: Array = genomes[org_id].get("dev_program")
+		if cursor >= program.size():
+			continue
+		var result: int = int(DEVELOPMENT_RULES_SCRIPT.call("execute_instruction", genomes[org_id], cells, organisms, {"type": "DEVELOPMENT_INSTRUCTION", "org_id": org_id, "instruction_index": cursor}))
+		if result >= 0:
+			executed += 1
+	return executed
 
 func remove_cell(cell_index: int) -> float:
 	if cell_index < 0 or cell_index >= int(cells.call("size")):

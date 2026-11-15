@@ -15,6 +15,7 @@ var org_age: PackedFloat32Array = PackedFloat32Array()
 var org_health: PackedFloat32Array = PackedFloat32Array()
 var org_state: PackedByteArray = PackedByteArray()
 var org_instruction_mask: PackedInt64Array = PackedInt64Array()
+var org_dev_cursor: PackedInt32Array = PackedInt32Array()
 var cell_offset: PackedInt32Array = PackedInt32Array()
 var cell_count: PackedInt32Array = PackedInt32Array()
 
@@ -30,6 +31,7 @@ func create_organism(genome_id: int, species_id: int, parent_id: int, initial_st
 	org_health.append(1.0)
 	org_state.append(initial_state)
 	org_instruction_mask.append(0)
+	org_dev_cursor.append(0)
 	cell_offset.append(0)
 	cell_count.append(0)
 	return org_id

@@ -35,10 +35,12 @@ func get_basal_autonomy() -> float:
 	return float(environment_manager.call("get_basal_autonomy"))
 
 func _on_tick_advanced(tick_index: int) -> void:
+	if organism_manager != null:
+		organism_manager.call("advance_development_tick")
 	if command_bus != null:
 		executed_commands += int(command_bus.call("execute_tick_commands", tick_index))
 	if status_label != null and tick_index % 60 == 0:
-		status_label.text = "tick %d | organisms 0 | basal %.3f" % [tick_index, get_basal_autonomy()]
+		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
 
 func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 	if organism_manager != null:
