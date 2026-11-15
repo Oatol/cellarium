@@ -18,6 +18,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/OrganismManager.gd",
 	"res://scripts/system/CellPhysics.gd",
 	"res://scripts/system/CellMetabolism.gd",
+	"res://scripts/system/CellBehavior.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
@@ -67,6 +68,8 @@ func _initialize() -> void:
 	if not _check_cell_arrays():
 		failures += 1
 	if not _check_genome_codec():
+		failures += 1
+	if not _check_cell_behavior():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -552,6 +555,54 @@ func _check_cell_arrays() -> bool:
 		push_error("SmokeTest: valid cell ranges rejected")
 		return false
 	print("SmokeTest: OK SoA ranges / symmetric links / same-organism constraint / energy sum")
+	return true
+
+func _check_cell_behavior() -> bool:
+	var behavior: Script = load("res://scripts/system/CellBehavior.gd") as Script
+	var cells_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
+	var inputs: PackedFloat32Array = PackedFloat32Array([0.2, -0.4, 0.6, 0.1, -0.1, 0.25, 0.5, 0.8])
+	var weights: PackedFloat32Array = PackedFloat32Array()
+	weights.resize(56)
+	for index in range(weights.size()):
+		weights[index] = float((index % 7) - 3) * 0.07
+	var outputs: PackedFloat32Array = behavior.call("evaluate", inputs, weights)
+	if outputs.size() != 6 or behavior.call("evaluate", PackedFloat32Array(), weights).size() != 6:
+		push_error("SmokeTest: neural evaluation must return fixed output shape for valid and invalid inputs")
+		return false
+	for output in outputs:
+		if not is_finite(output) or output < -1.0 or output > 1.0:
+			push_error("SmokeTest: neural outputs must be finite and bounded")
+			return false
+	var first_cells: RefCounted = cells_script.new() as RefCounted
+	var second_cells: RefCounted = cells_script.new() as RefCounted
+	first_cells.call("append_cell", 0, Vector2.ZERO, 0.8, 0)
+	second_cells.call("append_cell", 0, Vector2.ZERO, 0.8, 0)
+	if not bool(behavior.call("initialize_weights", first_cells, 0, 12345)) or not bool(behavior.call("initialize_weights", second_cells, 0, 12345)):
+		push_error("SmokeTest: neural weights must initialize")
+		return false
+	if first_cells.get("neural_weights") != second_cells.get("neural_weights"):
+		push_error("SmokeTest: same genome/cell seed must yield identical neural weights")
+		return false
+	var parent_weights: PackedFloat32Array = first_cells.get("neural_weights").duplicate()
+	var child_index: int = int(first_cells.call("divide_cell", 0, 0.0, 1.0))
+	if child_index != 1 or first_cells.get("neural_weights").slice(56, 112) != parent_weights:
+		push_error("SmokeTest: divided cells must inherit identical neural weights")
+		return false
+	var next_cell: int = int(first_cells.call("append_cell", 0, Vector2(2, 0), 0.2, 0))
+	if not bool(behavior.call("initialize_weights", first_cells, next_cell, 12345)) or first_cells.get("neural_weights").slice(112, 168) == parent_weights:
+		push_error("SmokeTest: each cell must derive distinct deterministic weights from its index")
+		return false
+	var neighbors: Dictionary = {0: [], 1: []}
+	var environment: Dictionary = {"fields": [0.1, 0.2, 0.3, 0.4, 0.5], "neighbors": neighbors, "energy_max": 1.0}
+	var replay_a: Array[PackedFloat32Array] = behavior.call("compute_outputs", second_cells, environment)
+	var replay_b: Array[PackedFloat32Array] = behavior.call("compute_outputs", second_cells, environment)
+	if replay_a != replay_b or replay_a[0].size() != 6:
+		push_error("SmokeTest: neural output pass must be deterministic")
+		return false
+	if not bool(behavior.call("apply_outputs", second_cells, replay_a, 1.0 / 60.0)):
+		push_error("SmokeTest: behavior intent application failed")
+		return false
+	print("SmokeTest: OK deterministic 8-4-6 cell behavior / bounded outputs / division inheritance")
 	return true
 
 func _check_genome_codec() -> bool:

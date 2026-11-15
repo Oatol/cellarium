@@ -3,6 +3,7 @@ extends RefCounted
 ## 连接端点使用全局 cell index，删除/压缩由后续主线程阶段处理。
 
 const MAX_LINKS_PER_CELL: int = 20
+const NEURAL_WEIGHT_COUNT: int = 56
 
 var cell_pos_x: PackedFloat32Array = PackedFloat32Array()
 var cell_pos_y: PackedFloat32Array = PackedFloat32Array()
@@ -17,6 +18,7 @@ var link_cell_a: PackedInt32Array = PackedInt32Array()
 var link_cell_b: PackedInt32Array = PackedInt32Array()
 var link_rest_length: PackedFloat32Array = PackedFloat32Array()
 var expression_weights: PackedFloat32Array = PackedFloat32Array()
+var neural_weights: PackedFloat32Array = PackedFloat32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -33,6 +35,8 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_link_count.append(0)
 	for i in range(8):
 		expression_weights.append(0.0)
+	for i in range(NEURAL_WEIGHT_COUNT):
+		neural_weights.append(0.0)
 	return index
 
 func size() -> int:
@@ -49,6 +53,9 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	var child_type: int = int(cell_type[index])
 	cell_energy[index] -= child_energy
 	var child_index: int = append_cell(org_id, child_position, child_energy, child_type)
+	var neural_start: int = index * NEURAL_WEIGHT_COUNT
+	for weight_index in range(NEURAL_WEIGHT_COUNT):
+		neural_weights[child_index * NEURAL_WEIGHT_COUNT + weight_index] = neural_weights[neural_start + weight_index]
 	var expression_start: int = index * 8
 	for trait_index in range(8):
 		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]

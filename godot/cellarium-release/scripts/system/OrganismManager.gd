@@ -6,6 +6,7 @@ const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismS
 const DEVELOPMENT_RULES_SCRIPT: Script = preload("res://scripts/core/data/DevelopmentRules.gd")
 const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
 const CELL_METABOLISM_SCRIPT: Script = preload("res://scripts/system/CellMetabolism.gd")
+const CELL_BEHAVIOR_SCRIPT: Script = preload("res://scripts/system/CellBehavior.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
@@ -19,6 +20,8 @@ var genomes: Dictionary = {}
 @export var default_transfer_rate: float = 0.0
 
 func advance_physics_tick(dt: float) -> void:
+	var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
+	CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt)
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius)
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, dish_radius, boundary_normal_damping)
@@ -27,6 +30,13 @@ func advance_physics_tick(dt: float) -> void:
 	rates.fill(default_transfer_rate)
 	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt)
 	_apply_base_metabolism(dt)
+
+func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
+	var neighbors: Dictionary = {}
+	for cell_index in range(int(cells.call("size"))):
+		neighbors[cell_index] = CELL_PHYSICS_SCRIPT.call("query_neighbors", cells, cell_index)
+	var environment: Dictionary = {"fields": [0.0, 0.0, 0.0, 0.0, 0.0], "neighbors": neighbors, "energy_max": 1.0}
+	return CELL_BEHAVIOR_SCRIPT.call("compute_outputs", cells, environment)
 
 func _apply_base_metabolism(dt: float) -> void:
 	var energies: PackedFloat32Array = cells.get("cell_energy")
@@ -50,6 +60,7 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	if cell_index < 0:
 		return -1
 	genomes[org_id] = genome.duplicate_genome()
+	CELL_BEHAVIOR_SCRIPT.call("initialize_weights", cells, cell_index, int(genome.call("hash")))
 	organisms.call("add_developed_cell", org_id, cell_index, int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome)))
 	return org_id
 
