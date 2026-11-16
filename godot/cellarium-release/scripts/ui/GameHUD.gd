@@ -54,6 +54,7 @@ var _cell_editor: Control = null
 var _draft_genome: RefCounted = null
 var _draft_type_id: int = 0
 var _syncing_speed: bool = false
+var _speed_capped: bool = false
 
 func _ready() -> void:
 	command_bus = get_node_or_null(command_bus_path)
@@ -118,6 +119,10 @@ func _register_speed_controls() -> void:
 		var on_speed: Callable = Callable(self, "_on_tick_speed_changed")
 		if not tick_core.is_connected("speed_changed", on_speed):
 			tick_core.connect("speed_changed", on_speed)
+	if tick_core != null and tick_core.has_signal("carry_changed"):
+		var on_carry: Callable = Callable(self, "_on_speed_carry_changed")
+		if not tick_core.is_connected("carry_changed", on_carry):
+			tick_core.connect("carry_changed", on_carry)
 	sync_speed_ui()
 
 func _register_cell_editor() -> void:
@@ -138,8 +143,24 @@ func sync_speed_ui() -> void:
 	if _speed_spin != null and not is_equal_approx(float(_speed_spin.value), value):
 		_speed_spin.set_value_no_signal(value)
 	_syncing_speed = false
-	if _speed_lod != null:
-		_speed_lod.text = "LOD %d" % int(tick_core.call("get_lod_level"))
+	_update_speed_lod_text()
+
+func _update_speed_lod_text() -> void:
+	if _speed_lod == null or tick_core == null:
+		return
+	var text_value: String = "LOD %d" % int(tick_core.call("get_lod_level"))
+	var tick_script: Script = tick_core.get_script() as Script
+	var frame_cap: int = 12
+	if tick_script != null:
+		frame_cap = int(tick_script.get_script_constant_map().get("MAX_TICKS_PER_FRAME", 12))
+	var capped: bool = _speed_capped or int(tick_core.get("carry_ticks")) > 0
+	if capped and float(tick_core.get("speed_scale")) > float(frame_cap):
+		text_value += " · 上限 %d×" % frame_cap
+	_speed_lod.text = text_value
+
+func _on_speed_carry_changed(_carry_ticks: int, lagging: bool) -> void:
+	_speed_capped = lagging
+	_update_speed_lod_text()
 
 func _apply_speed_value(value: float) -> void:
 	if tick_core == null:
@@ -150,7 +171,7 @@ func _apply_speed_value(value: float) -> void:
 		tick_core.set("running", true)
 	tick_core.call("clear_carry")
 	sync_speed_ui()
-	_set_feedback("倍速 → %s× · LOD %d · dt 固定 1/60" % [str(speed_value), int(tick_core.call("get_lod_level"))])
+	_set_feedback("倍速 → %s× · LOD %d · dt 固定 1/60 · 单帧 ≤12 tick" % [str(speed_value), int(tick_core.call("get_lod_level"))])
 
 func _on_speed_slider_changed(value: float) -> void:
 	_apply_speed_value(value)

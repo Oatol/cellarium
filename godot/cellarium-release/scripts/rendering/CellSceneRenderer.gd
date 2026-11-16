@@ -9,7 +9,6 @@ extends Node2D
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var batch_renderer_path: NodePath = ^"../CellBatch"
 @export var max_instances: int = 512
-@export var cell_radius: float = 4.0
 
 var organism_manager: Node = null
 var tick_core: Node = null

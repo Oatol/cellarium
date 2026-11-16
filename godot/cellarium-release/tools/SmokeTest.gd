@@ -9,6 +9,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/core/data/DevelopmentContext.gd",
 	"res://scripts/core/data/Genome.gd",
 	"res://scripts/core/data/GenomeCodec.gd",
+	"res://scripts/core/data/CellShape.gd",
 	"res://scripts/core/data/CellArray.gd",
 	"res://scripts/core/data/OrganismStore.gd",
 	"res://scripts/core/data/DevelopmentRules.gd",
@@ -145,6 +146,8 @@ func _initialize() -> void:
 	if not _check_cell_membrane():
 		failures += 1
 	if not await _check_camera_speed_editor():
+		failures += 1
+	if not await _check_shape_radius_and_motion():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1974,6 +1977,13 @@ func _check_camera_speed_editor() -> bool:
 	if not is_equal_approx(float(tick_core.get("speed_scale")), 3.0) or not is_equal_approx(float(slider.value), 3.0):
 		push_error("SmokeTest: numeric speed input did not drive TickCore + slider")
 		instance.queue_free(); return false
+	spin.value = 30.0
+	for _frame in range(10):
+		tick_core.call("_process", 1.0 / 60.0)
+	var lod_label: Label = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/LodLabel") as Label
+	if lod_label == null or not lod_label.text.contains("上限") or int(tick_core.get("carry_ticks")) <= 0:
+		push_error("SmokeTest: saturated speed must surface frame-cap hint in UI")
+		instance.queue_free(); return false
 
 	# 编辑草案 → 合成器 → CommandBus → 落地基因组与类型。
 	tick_core.set("running", false)
@@ -2034,4 +2044,71 @@ func _check_camera_speed_editor() -> bool:
 
 	instance.queue_free()
 	print("SmokeTest: OK camera wheel/pan / speed slider+input / editor-synthesizer-genome-inject loop")
+	return true
+
+func _check_shape_radius_and_motion() -> bool:
+	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var radius: float = float(manager.get("cell_radius"))
+	if not is_equal_approx(radius, float(shape.call("rest_radius"))):
+		push_error("SmokeTest: physics radius must equal CellShape.REST_RADIUS")
+		instance.queue_free(); return false
+	var cell_scene: PackedScene = load("res://scenes/cells/CellBase.tscn") as PackedScene
+	var view: Node2D = cell_scene.instantiate() as Node2D
+	if view == null or not is_equal_approx(float(view.call("get_collision_radius")), radius) or not is_equal_approx(float(view.call("get_visual_rest_radius")), radius):
+		push_error("SmokeTest: elastic membrane radius must equal physics collision radius")
+		instance.queue_free(); return false
+	view.free()
+
+	# 碰撞间距必须等于弹性膜静息直径。
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	cells.call("append_cell", 0, Vector2.ZERO, 0.5, 0)
+	cells.call("append_cell", 1, Vector2(2.0, 0.0), 0.5, 0)
+	load("res://scripts/system/CellPhysics.gd").call("resolve_collisions", cells, radius)
+	var separation: float = cells.call("get_position", 0).distance_to(cells.call("get_position", 1))
+	if separation < float(shape.call("min_center_distance")) - 0.01:
+		push_error("SmokeTest: collision separation smaller than elastic diameter")
+		instance.queue_free(); return false
+	instance.queue_free()
+	await process_frame
+
+	# 倍速必须转化为更多 tick 与更大位移；30× 受单帧 12 tick 上限约束。
+	var displacement_by_speed: Dictionary = {}
+	for speed_value in [1.0, 30.0]:
+		var probe: Node = scene.instantiate()
+		probe.set("create_demo_organism", true)
+		root.add_child(probe)
+		await process_frame
+		var tick_core: Node = probe.get_node("Simulation/TickCore")
+		var probe_manager: Node = probe.get_node("Simulation/OrganismManager")
+		tick_core.set("running", true)
+		tick_core.call("clear_carry")
+		tick_core.call("apply_speed", speed_value)
+		var probe_cells: RefCounted = probe_manager.get("cells") as RefCounted
+		var start_position: Vector2 = probe_cells.call("get_position", 0)
+		var start_tick: int = int(tick_core.get("tick_index"))
+		for _frame in range(60):
+			tick_core.call("_process", 1.0 / 60.0)
+		var ticks: int = int(tick_core.get("tick_index")) - start_tick
+		var displacement: float = start_position.distance_to(probe_cells.call("get_position", 0))
+		displacement_by_speed[speed_value] = {"ticks": ticks, "displacement": displacement, "carry": int(tick_core.get("carry_ticks"))}
+		probe.queue_free()
+		await process_frame
+	var slow: Dictionary = displacement_by_speed[1.0]
+	var fast: Dictionary = displacement_by_speed[30.0]
+	if int(slow["ticks"]) < 60 or int(fast["ticks"]) <= int(slow["ticks"]) * 5:
+		push_error("SmokeTest: high speed did not produce proportionally more ticks")
+		return false
+	if float(slow["displacement"]) < 0.05 or float(fast["displacement"]) < float(slow["displacement"]) * 3.0:
+		push_error("SmokeTest: high speed did not produce visibly larger cell displacement")
+		return false
+	if int(fast["carry"]) <= 0:
+		push_error("SmokeTest: 30x should report frame-cap carry")
+		return false
+	print("SmokeTest: OK unified CellShape radius / collision diameter / speed-to-ticks-and-motion")
 	return true

@@ -15,6 +15,7 @@ const SPECIES_SCRIPT: Script = preload("res://scripts/system/SpeciesSystem.gd")
 const STATISTICS_SCRIPT: Script = preload("res://scripts/system/StatisticsSystem.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const GENOME_CODEC_SCRIPT: Script = preload("res://scripts/core/data/GenomeCodec.gd")
+const CELL_SHAPE_SCRIPT: Script = preload("res://scripts/core/data/CellShape.gd")
 const SAVE_MANAGER_SCRIPT: Script = preload("res://scripts/system/SaveManager.gd")
 const PERF_PROBE_SCRIPT: Script = preload("res://scripts/system/PerfProbe.gd")
 
@@ -51,7 +52,7 @@ func _ready() -> void:
 @export var dish_center: Vector2 = Vector2.ZERO
 @export var dish_radius: float = 512.0
 @export_range(0.0, 1.0, 0.01) var boundary_normal_damping: float = 0.5
-@export var cell_radius: float = 1.0
+@export var cell_radius: float = CELL_SHAPE_SCRIPT.REST_RADIUS
 @export var base_metabolic_cost: float = 0.001
 @export var default_transfer_rate: float = 0.0
 @export var facultative_aerobic_efficiency: float = 2.0
@@ -61,6 +62,8 @@ func _ready() -> void:
 @export var chemotrophic_intake_rate: float = 0.02
 @export var predation_transfer_efficiency: float = 0.8
 @export var movement_energy_cost: float = 0.001
+## 每 tick 位移上限（世界单位/秒）。神经输出很小，需放大到可见尺度；dt 仍固定 1/60。
+@export var max_movement_speed: float = 144.0
 @export var predation_attack_threshold: float = 0.35
 @export var predation_reach: float = 14.0
 @export var predation_max_drain: float = 0.25
@@ -78,9 +81,9 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("begin", "behavior")
 	if update_neural:
 		var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
-		CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt)
+		CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt, max_movement_speed)
 	else:
-		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt)
+		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)

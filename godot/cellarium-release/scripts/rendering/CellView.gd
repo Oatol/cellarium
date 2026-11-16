@@ -5,10 +5,11 @@ extends Node2D
 
 const CATALOG: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const MEMBRANE: RefCounted = preload("res://scripts/rendering/CellMembrane.gd")
+const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 
-@export var cell_radius: float = 4.0
-## 视觉半径略大于物理半径，让近景能看清膜形变；不影响碰撞。
-@export var visual_radius: float = 7.0
+@export var cell_radius: float = SHAPE.REST_RADIUS
+## 碰撞半径与弹性膜静息半径同源（Cell Lab 的 Cell.d 用法）；不再分两套半径。
+@export var visual_radius: float = SHAPE.REST_RADIUS
 @export var shape_fps: float = 20.0
 
 @onready var body: Polygon2D = get_node_or_null("Body") as Polygon2D
@@ -86,3 +87,9 @@ func get_type_label() -> String:
 
 func get_outline_point_count() -> int:
 	return 0 if outline == null else outline.points.size()
+
+func get_collision_radius() -> float:
+	return cell_radius
+
+func get_visual_rest_radius() -> float:
+	return visual_radius
