@@ -4,6 +4,40 @@
 
 ---
 
+## 0.8.4 — 2026-11-16
+
+**类型**：程序化细胞外观 + 接触点压平
+**触发**：用户问「能不能直接用 cell lab 的细胞贴图，cell lab 的细胞贴图是怎么实现的，看起来不像一张图，倒像是程序化生成的。接触点压平要做！」
+
+### Cell Lab 贴图结论
+
+- 静态反编译证据（`analysis/CellLab_APK_解析报告.md` §8、`CellLab_多细胞协作_设计规格.md` §3.1）：Cell Lab 运行时细胞不是一张贴图，而是 `*_vert.glsl` / `*_frag.glsl` + `ByteBuffer/FloatBuffer/ShortBuffer` 逐 tick 程序化绘制；`assets/guide-icons/*.png` 只是类型图鉴图标。
+- 因此不把 guide-icon 当运行时细胞贴图，也不复制 APK shader；按同一思路改为「可复用 `.tscn` 节点 + 程序化几何/配色」。
+
+### 程序化细胞
+
+- `scenes/cells/CellBase.tscn` 移除 `Texture2D` 外部资源，保留 `Body` / `Outline` / `OrganelleRoot` / `SignalAnchor`，新增 `InnerRing`、`Nucleus` 与 5 个 `OrganelleN: Polygon2D`。所有外观节点由场景声明，脚本只填几何与颜色。
+- `CellView.gd` 按 `org_id/type_id` 派生稳定签名，生成弹性膜轮廓、内膜环、细胞核与随机分布细胞器；`CellVisualCatalog.color()/accent_color()` 提供类型稳定配色。
+- 膜仍是 12 控制点 Catmull-Rom + 3 谐波 + 速度限幅拉伸；碰撞半径、静息视觉半径、膜半径继续共用 `CellShape.REST_RADIUS = 7.0`。
+
+### 接触点压平
+
+- 参照 Cell Lab 的 `A[]` 接触点概念：`CellSceneRenderer` 复用 `CellPhysics` 空间哈希，为近景细胞取 `radius*2+1` 范围内最近的 6 个邻居方向，作为世界坐标接触方向传给 `CellView.apply_cell(..., contacts)`；不写模拟状态、不参与确定性 hash。
+- `CellView._flatten_contact()` 对与接触方向夹角小于约 38° 的膜点向内拉，最大压平 22%，下限 55%；压平同时作用于外膜与内膜，形成局部接触面而不是整体缩小。
+- 远景仍回退 MultiMesh 色块 LOD；512 实例阈值与单帧 12 tick 上限均未改。
+
+### 验收
+
+- `SmokeTest.gd` 删除 guide-icon 贴图/UV 裁切断言，改为断言无贴图依赖、程序化节点齐全、细胞器与核几何已生成、接触方向使右侧膜最大 x 内缩、`CellSceneRenderer` 确实派生接触方向。
+- 源码 SmokeTest：`SCRIPTS=42 FAILURES=0 EXITCODE=0`。
+
+### 边界
+
+- guide-icons 继续保留为图鉴/编辑器资源，不再参与运行时细胞渲染；没有复制 Cell Lab shader 源码。
+- 当前压平只按接触方向，不含 Cell Lab 的圆-圆重叠面积深度与 4 通道化学信号；后者仍按上游规格冻结。
+
+---
+
 ## 0.8.3 — 2026-11-16
 
 **类型**：贴图贴合与形变幅度修正

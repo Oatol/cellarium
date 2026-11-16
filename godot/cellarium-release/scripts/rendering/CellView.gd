@@ -1,59 +1,92 @@
 extends Node2D
-## 单个细胞的可复用视图控制器。外观节点、挂点均在 CellBase.tscn 中声明。
+## 单个细胞的可复用视图控制器。外观节点与挂点全部在 CellBase.tscn 中声明。
 ## 只读模拟数据，绝不回写；所有写操作仍走 CommandBus。
-## 弹性膜：12 控制点 Catmull-Rom + 3 谐波，20fps 刷新，沿速度轴轻度拉伸。
-## 速度做低通后再驱动形变，避免碰撞瞬间把膜拉成夸张的椭圆。
+##
+## Cell Lab 没有"细胞贴图"：细胞由 *_vert.glsl / *_frag.glsl + 顶点缓冲程序化绘制，
+## guide-icons 只是类型图鉴。本项目同样用场景节点程序化画膜、内膜、核与细胞器，
+## 并按接触点把膜局部压平（Cell Lab 的 A[] 接触点 → 膜压平概念）。
 
 const CATALOG: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const MEMBRANE: RefCounted = preload("res://scripts/rendering/CellMembrane.gd")
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 
 @export var cell_radius: float = SHAPE.REST_RADIUS
-## 碰撞半径与弹性膜静息半径同源（Cell Lab 的 Cell.d 用法）；不再分两套半径。
+## 物理碰撞半径与弹性膜静息半径同源（Cell Lab 的 Cell.d 用法）。
 @export var visual_radius: float = SHAPE.REST_RADIUS
 @export var shape_fps: float = 20.0
-## 弹性膜最大拉伸比例。Cell Lab 靠接触点压平而非整体拉长，这里刻意压低。
+## 速度拉伸上限，碰撞冲量先限幅再低通，避免夸张椭圆。
 @export_range(0.0, 0.2, 0.01) var max_stretch: float = 0.08
-## 速度低通系数，避免单 tick 碰撞冲量造成突变。
 @export_range(0.05, 1.0, 0.05) var stretch_smoothing: float = 0.18
+## 接触点的膜压平深度（相对半径）；Cell Lab 用 (r - Cell.a) * 0.8。
+@export_range(0.0, 0.5, 0.01) var contact_flatten: float = 0.22
 
 @onready var body: Polygon2D = get_node_or_null("Body") as Polygon2D
 @onready var outline: Line2D = get_node_or_null("Outline") as Line2D
+@onready var inner_ring: Line2D = get_node_or_null("InnerRing") as Line2D
+@onready var nucleus: Polygon2D = get_node_or_null("Nucleus") as Polygon2D
+@onready var organelle_root: Node2D = get_node_or_null("OrganelleRoot") as Node2D
 
 var _type_id: int = -1
 var _org_id: int = -1
 var _velocity: Vector2 = Vector2.ZERO
+var _contacts: Array[Vector2] = []
 var _shape_time: float = 0.0
 var _accumulated: float = 0.0
-var _membrane: RefCounted = null
-var _texture_cache: Dictionary = {}
-## 贴图内容矩形按资源路径全局缓存，避免数百个细胞实例重复扫描像素。
-static var _shared_content_rects: Dictionary = {}
 var _stretch: float = 0.0
+var _membrane: RefCounted = null
+var _organelles: Array[Polygon2D] = []
+var _base_color: Color = Color.WHITE
 
-func apply_cell(position: Vector2, type_id: int, org_id: int, energy: float, velocity: Vector2 = Vector2.ZERO) -> void:
+func _ready() -> void:
+	if organelle_root != null:
+		for child in organelle_root.get_children():
+			var organelle: Polygon2D = child as Polygon2D
+			if organelle != null:
+				_organelles.append(organelle)
+
+func apply_cell(
+	position: Vector2,
+	type_id: int,
+	org_id: int,
+	energy: float,
+	velocity: Vector2 = Vector2.ZERO,
+	contacts: Array[Vector2] = []
+) -> void:
 	global_position = position
 	_velocity = velocity
+	_contacts = contacts.duplicate()
 	if type_id != _type_id or org_id != _org_id:
 		_org_id = org_id
 		_apply_type(type_id)
-	var hue: float = fposmod(float(org_id) * 0.173 + 0.42, 1.0)
-	var tint: Color = Color.from_hsv(hue, 0.32, 1.0, 0.94)
-	# 能量低时轻微变暗；仅视图反馈，不影响账本。
 	var vitality: float = clampf(energy / 1.2, 0.35, 1.0)
-	tint.r *= vitality
-	tint.g *= vitality
-	tint.b *= vitality
-	if body != null:
-		body.modulate = tint
-	if outline != null:
-		outline.modulate = Color(tint.r, tint.g, tint.b, 0.9)
+	_base_color = CATALOG.call("color", _type_id)
+	var org_hue: float = fposmod(float(org_id) * 0.173 + 0.42, 1.0)
+	_base_color = _base_color.lerp(Color.from_hsv(org_hue, 0.34, 0.95), 0.16)
+	_apply_vitality(vitality)
 	_refresh_shape()
+
+func _apply_vitality(vitality: float) -> void:
+	var color_value: Color = _base_color
+	if body != null:
+		body.color = Color(color_value.r, color_value.g, color_value.b, 0.30 * vitality + 0.10)
+	if outline != null:
+		outline.modulate = Color(
+			minf(color_value.r * 1.35, 1.0),
+			minf(color_value.g * 1.35, 1.0),
+			minf(color_value.b * 1.35, 1.0),
+			0.95
+		)
+	if inner_ring != null:
+		inner_ring.modulate = Color(color_value.r, color_value.g, color_value.b, 0.70)
+	if nucleus != null:
+		nucleus.modulate = Color(0.08, 0.16, 0.15, 0.85 * vitality)
+	var accent: Color = CATALOG.call("accent_color", _type_id)
+	for organelle in _organelles:
+		organelle.modulate = Color(accent.r, accent.g, accent.b, 0.72 * vitality + 0.12)
 
 func _process(delta: float) -> void:
 	_accumulated += delta
-	var interval: float = 1.0 / maxf(1.0, shape_fps)
-	if _accumulated < interval:
+	if _accumulated < 1.0 / maxf(1.0, shape_fps):
 		return
 	_shape_time += _accumulated
 	_accumulated = 0.0
@@ -62,66 +95,60 @@ func _process(delta: float) -> void:
 func _refresh_shape() -> void:
 	if body == null or outline == null or _membrane == null:
 		return
-	# 碰撞修正会带来单 tick 速度尖峰，先限幅再低通。
 	var velocity_limit: float = maxf(1.0, visual_radius * 0.5)
 	var target_stretch: float = clampf(_velocity.length() / velocity_limit, 0.0, 1.0) * max_stretch
 	_stretch += (target_stretch - _stretch) * clampf(stretch_smoothing, 0.05, 1.0)
 	var unit: PackedVector2Array = _membrane.outline(_shape_time, _stretch)
 	var angle: float = 0.0 if _stretch < 0.001 else _velocity.angle()
-	# 轮廓与 UV 用同一组旋转后的单位点，纹理才会跟着膜走，不再留缝。
-	var rotated_unit: PackedVector2Array = PackedVector2Array()
 	var world_points: PackedVector2Array = PackedVector2Array()
+	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:
-		var rotated_point: Vector2 = point.rotated(angle)
-		rotated_unit.append(rotated_point)
-		world_points.append(rotated_point * visual_radius)
-	var texture: Texture2D = body.texture as Texture2D
-	var texture_size: Vector2 = Vector2(64.0, 64.0) if texture == null else texture.get_size()
-	var content: Rect2 = Rect2(Vector2.ZERO, texture_size)
-	if texture != null:
-		content = _content_rect(texture)
+		var rotated: Vector2 = point.rotated(angle)
+		var flattened: Vector2 = _flatten_contact(rotated)
+		world_points.append(flattened * visual_radius)
+		inner_points.append(flattened * visual_radius * 0.62)
 	body.polygon = world_points
-	body.uv = _membrane.texture_uv(rotated_unit, texture_size, content)
 	outline.points = world_points
+	if inner_ring != null:
+		inner_ring.points = inner_points
 
-## 取贴图实际不透明区域，裁掉 guide-icon 的透明内缩（zygocyte 166px 图内容仅 139px）。
-func _content_rect(texture: Texture2D) -> Rect2:
-	var path: String = texture.resource_path
-	if _shared_content_rects.has(path):
-		return _shared_content_rects[path]
-	var image: Image = texture.get_image()
-	var rect: Rect2 = Rect2(Vector2.ZERO, Vector2(image.get_width(), image.get_height()))
-	if image.get_width() > 0 and image.get_height() > 0:
-		var min_x: int = image.get_width()
-		var min_y: int = image.get_height()
-		var max_x: int = -1
-		var max_y: int = -1
-		for y in range(image.get_height()):
-			for x in range(image.get_width()):
-				if image.get_pixel(x, y).a > 0.03:
-					min_x = mini(min_x, x)
-					min_y = mini(min_y, y)
-					max_x = maxi(max_x, x)
-					max_y = maxi(max_y, y)
-		if max_x >= min_x and max_y >= min_y:
-			rect = Rect2(
-				Vector2(float(min_x), float(min_y)),
-				Vector2(float(max_x - min_x + 1), float(max_y - min_y + 1))
-			)
-	_shared_content_rects[path] = rect
-	return rect
+## 接触点的膜压平：沿接触法线把轮廓顶点向内拉，仍保持连续闭合曲线。
+func _flatten_contact(point: Vector2) -> Vector2:
+	if _contacts.is_empty():
+		return point
+	var direction: Vector2 = point.normalized()
+	var depth: float = 0.0
+	for contact in _contacts:
+		var alignment: float = direction.dot(contact)
+		if alignment > 0.78:
+			var amount: float = (alignment - 0.78) / 0.22
+			depth = maxf(depth, amount * amount * contact_flatten)
+	return point * maxf(0.55, 1.0 - depth)
 
 func _apply_type(type_id: int) -> void:
 	_type_id = type_id
-	if body == null:
-		return
-	var path: String = CATALOG.call("texture_path", type_id)
-	if not _texture_cache.has(path):
-		_texture_cache[path] = load(path)
-	var texture: Texture2D = _texture_cache[path] as Texture2D
-	if texture != null:
-		body.texture = texture
 	_membrane = MEMBRANE.new(MEMBRANE.call("make_signature", _org_id, type_id))
+	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
+	rng.seed = maxi(1, int(_membrane.get("signature")))
+	var accent: Color = CATALOG.call("accent_color", type_id)
+	for i in range(_organelles.size()):
+		var organelle: Polygon2D = _organelles[i]
+		var angle: float = rng.randf_range(0.0, TAU)
+		var distance: float = rng.randf_range(0.22, 0.52)
+		organelle.position = Vector2(cos(angle), sin(angle)) * distance * visual_radius
+		var size_value: float = rng.randf_range(0.06, 0.12) * visual_radius
+		organelle.polygon = _circle_polygon(size_value, 7)
+		organelle.color = Color(accent.r, accent.g, accent.b, 0.8)
+	if nucleus != null:
+		nucleus.polygon = _circle_polygon(visual_radius * 0.15, 10)
+
+static func _circle_polygon(radius: float, segments: int) -> PackedVector2Array:
+	var points: PackedVector2Array = PackedVector2Array()
+	var count: int = maxi(3, segments)
+	for i in range(count):
+		var angle: float = TAU * float(i) / float(count)
+		points.append(Vector2(cos(angle), sin(angle)) * radius)
+	return points
 
 func get_type_id() -> int:
 	return _type_id
@@ -141,5 +168,5 @@ func get_visual_rest_radius() -> float:
 func get_stretch() -> float:
 	return _stretch
 
-func get_content_rect() -> Rect2:
-	return Rect2(Vector2.ZERO, Vector2(1, 1)) if body == null or body.texture == null else _content_rect(body.texture as Texture2D)
+func get_contact_count() -> int:
+	return _contacts.size()

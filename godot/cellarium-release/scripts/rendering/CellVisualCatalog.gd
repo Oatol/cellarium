@@ -1,5 +1,7 @@
 extends RefCounted
-## 细胞外观静态目录（阶段7）。贴图来源：Cell Lab guide-icons（本地开发资产）。
+## 细胞外观静态目录（阶段7/8）。运行时细胞不再使用 guide-icon 贴图：
+## Cell Lab 的主体渲染是顶点缓冲 + *_vert.glsl/*_frag.glsl 程序化绘制，guide-icons 只是图鉴。
+## 这里保留类型名称/标签与图鉴路径供编辑器和图鉴使用，运行时只取 color()/accent_color()。
 ## 只提供视图资源，不写模拟状态；type_id 与 Genome/CellArray 的 type_id 对齐。
 ## 纯数据，无 class_name，调用方 preload。
 
@@ -38,3 +40,13 @@ static func texture_path(type_id: int) -> String:
 
 static func label(type_id: int) -> String:
 	return str(entry(type_id).get("label", "?"))
+
+## 程序化细胞的主色：按类型 ID 稳定派生，不依赖贴图。
+static func color(type_id: int) -> Color:
+	var hue: float = fposmod(float(type_id) * 0.137 + 0.42, 1.0)
+	return Color.from_hsv(hue, 0.42, 0.92, 1.0)
+
+## 膜内侧与细胞器的对比色。
+static func accent_color(type_id: int) -> Color:
+	var hue: float = fposmod(float(type_id) * 0.137 + 0.52, 1.0)
+	return Color.from_hsv(hue, 0.62, 0.72, 1.0)

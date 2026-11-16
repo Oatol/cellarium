@@ -1836,24 +1836,34 @@ func _check_cell_scene_renderer() -> bool:
 		push_error("SmokeTest: MultiMesh layer must hide in scene-render range")
 		instance.queue_free(); return false
 	var first_view: Node2D = layer.get_child(0) as Node2D
+	if first_view == null:
+		push_error("SmokeTest: CellSceneLayer has no instantiated cell view")
+		instance.queue_free(); return false
 	var body: Polygon2D = first_view.get_node_or_null("Body") as Polygon2D
 	var outline: Line2D = first_view.get_node_or_null("Outline") as Line2D
-	if first_view == null or body == null or body.texture == null or outline == null:
-		push_error("SmokeTest: CellBase.tscn instance has no textured elastic Body/Outline")
+	var inner_ring: Line2D = first_view.get_node_or_null("InnerRing") as Line2D
+	var nucleus: Polygon2D = first_view.get_node_or_null("Nucleus") as Polygon2D
+	var organelle_root: Node2D = first_view.get_node_or_null("OrganelleRoot") as Node2D
+	var organelle_count: int = 0
+	if organelle_root != null:
+		for child in organelle_root.get_children():
+			if child is Polygon2D:
+				organelle_count += 1
+	if first_view == null or body == null or outline == null or inner_ring == null or nucleus == null:
+		push_error("SmokeTest: CellBase.tscn instance missing procedural nodes")
+		instance.queue_free(); return false
+	if body.texture != null:
+		push_error("SmokeTest: CellBase.tscn must not depend on guide-icon texture")
+		instance.queue_free(); return false
+	if organelle_count < 5:
+		push_error("SmokeTest: procedural cell needs at least 5 organelles")
 		instance.queue_free(); return false
 	if body.polygon.size() < 64 or int(first_view.call("get_outline_point_count")) < 64:
 		push_error("SmokeTest: elastic membrane outline not generated")
 		instance.queue_free(); return false
-	# guide-icon 透明内缩必须被裁掉，UV 只能落在内容矩形内。
-	var content: Rect2 = first_view.call("get_content_rect")
-	var texture_size: Vector2 = (body.texture as Texture2D).get_size()
-	if content.size.x >= texture_size.x - 1.0 or content.size.y >= texture_size.y - 1.0:
-		push_error("SmokeTest: guide-icon transparent padding was not cropped from UV")
+	if inner_ring.points.size() < 64 or nucleus.polygon.size() < 8:
+		push_error("SmokeTest: inner ring / nucleus not generated")
 		instance.queue_free(); return false
-	for uv_point in body.uv:
-		if uv_point.x < content.position.x - 0.5 or uv_point.x > content.end.x + 0.5 or uv_point.y < content.position.y - 0.5 or uv_point.y > content.end.y + 0.5:
-			push_error("SmokeTest: membrane UV outside cropped texture content")
-			instance.queue_free(); return false
 	# 极高碰撞速度下形变也必须受限，不能拉成夸张椭圆。
 	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2(1000.0, 0.0))
 	var stretch_value: float = float(first_view.call("get_stretch"))
@@ -1867,21 +1877,52 @@ func _check_cell_scene_renderer() -> bool:
 	if stretch_value > 0.081 or aspect > 1.2:
 		push_error("SmokeTest: membrane stretch not bounded under collision velocity spike")
 		instance.queue_free(); return false
-	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
-	var texture_path: String = str(catalog.call("texture_path", 0))
-	if texture_path.is_empty() or load(texture_path) == null:
-		push_error("SmokeTest: Cell Lab cell texture not loadable")
+	# 接触点压平：同一签名下，右侧接触方向必须把右侧膜向内拉。
+	first_view.set("stretch_smoothing", 1.0)
+	var no_contacts: Array[Vector2] = []
+	var right_contact: Array[Vector2] = [Vector2.RIGHT]
+	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2.ZERO, no_contacts)
+	var plain_points: PackedVector2Array = (first_view.get_node_or_null("Outline") as Line2D).points
+	var plain_max_x: float = _max_x(plain_points)
+	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2.ZERO, right_contact)
+	var flattened_points: PackedVector2Array = (first_view.get_node_or_null("Outline") as Line2D).points
+	var flattened_max_x: float = _max_x(flattened_points)
+	if flattened_max_x >= plain_max_x - 0.2:
+		push_error("SmokeTest: contact point did not flatten membrane inward")
 		instance.queue_free(); return false
-	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	if int(first_view.call("get_contact_count")) != 1:
+		push_error("SmokeTest: CellView did not retain contact direction")
+		instance.queue_free(); return false
+	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2.ZERO, no_contacts)
+	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
+	var color_a: Color = catalog.call("color", 0)
+	var color_b: Color = catalog.call("color", 1)
+	var accent: Color = catalog.call("accent_color", 0)
+	if color_a == color_b or accent == color_a:
+		push_error("SmokeTest: procedural cell palette must vary by type")
+		instance.queue_free(); return false
+	# 渲染层必须从 SoA 邻域派生接触方向，而不是只发位置。
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(258, 250), "delta": Vector2.ZERO, "kind": "world"})
 	bus.call("execute_tick_commands", 1)
 	await process_frame
 	expected += 1
 	if int(layer.call("get_active_count")) != expected:
 		push_error("SmokeTest: CellSceneLayer did not refresh after SPAWN")
 		instance.queue_free(); return false
+	if int(layer.call("get_last_contact_count")) <= 0:
+		push_error("SmokeTest: CellSceneLayer did not derive contact directions")
+		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK reusable CellBase.tscn / Cell Lab texture / elastic membrane / scene-render refresh")
+	print("SmokeTest: OK procedural CellBase.tscn / contact flatten / elastic membrane / scene-render refresh")
 	return true
+
+func _max_x(points: PackedVector2Array) -> float:
+	if points.is_empty():
+		return 0.0
+	var maximum: float = points[0].x
+	for point in points:
+		maximum = maxf(maximum, point.x)
+	return maximum
 
 func _x_span(points: PackedVector2Array) -> float:
 	if points.is_empty():
