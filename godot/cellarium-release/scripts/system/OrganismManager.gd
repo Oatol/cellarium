@@ -84,7 +84,7 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("begin", "physics")
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius)
-	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, dish_radius, boundary_normal_damping)
+	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping)
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
 	var rates: PackedFloat32Array = PackedFloat32Array()
@@ -348,9 +348,17 @@ func _default_genome() -> RefCounted:
 	genome.call("set_development_program", [])
 	return genome
 
+## 所有外部干预落点都钳制在皿内，保留 cell_radius 余量让细胞完整落在皿中。
+func _clamp_to_dish(position: Vector2) -> Vector2:
+	var max_radius: float = maxf(1.0, dish_radius - maxf(cell_radius, 1.0))
+	var offset: Vector2 = position - dish_center
+	if offset.length_squared() <= max_radius * max_radius:
+		return position
+	return dish_center + offset.normalized() * max_radius
+
 func _apply_tool_command(command: Dictionary) -> int:
 	var command_type: String = str(command.get("type", ""))
-	var position: Vector2 = command.get("position", Vector2.ZERO)
+	var position: Vector2 = _clamp_to_dish(command.get("position", Vector2.ZERO))
 	var delta: Vector2 = command.get("delta", Vector2.ZERO)
 	match command_type:
 		"SPAWN":
@@ -513,13 +521,13 @@ func _apply_agent_command(command: Dictionary) -> int:
 			value = clampf(value, 260.0, 320.0)
 			return 0 if bool(environment_manager.call("set_temperature_at", position, value)) else -1
 		"AGENT_SPAWN":
-			var position: Vector2 = command.get("position", Vector2.ZERO)
+			var position: Vector2 = _clamp_to_dish(command.get("position", Vector2.ZERO))
 			var count: int = maxi(1, mini(int(command.get("count", args.get("count", 1))), 256))
 			var genome: RefCounted = _default_genome()
 			var last_id: int = -1
 			for i in range(count):
 				var offset: Vector2 = Vector2(float(i) * 4.0, 0.0)
-				last_id = register_zygote(_next_genome_id, 0, -1, genome, position + offset, 0.8, 0)
+				last_id = register_zygote(_next_genome_id, 0, -1, genome, _clamp_to_dish(position + offset), 0.8, 0)
 				_next_genome_id += 1
 				energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_BIO_TO_BIO, "E_external", "E_bio", 0.8, "agent_spawn")
 			return last_id

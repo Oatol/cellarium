@@ -12,6 +12,8 @@
 [ext_resource type="Script" path="res://scripts/ui/AnalysisPanel.gd" id="10_analysis"]
 [ext_resource type="Script" path="res://scripts/rendering/CellBatchRenderer.gd" id="11_batch"]
 [ext_resource type="Script" path="res://scripts/rendering/PostprocessLayer.gd" id="12_post"]
+[ext_resource type="PackedScene" path="res://scenes/cells/CellBase.tscn" id="13_cellbase"]
+[ext_resource type="Script" path="res://scripts/rendering/CellSceneRenderer.gd" id="14_scenerender"]
 
 [node name="Main" type="Node2D" unique_id=201441505]
 script = ExtResource("1_tbgi4")
@@ -29,6 +31,10 @@ script = ExtResource("7_links")
 [node name="CellLayer" type="Node2D" parent="DishView" unique_id=1347782208]
 visible = false
 script = ExtResource("8_cells")
+
+[node name="CellSceneLayer" type="Node2D" parent="DishView" unique_id=1492566720]
+script = ExtResource("14_scenerender")
+cell_scene = ExtResource("13_cellbase")
 
 [node name="CellBatch" type="MultiMeshInstance2D" parent="DishView" unique_id=1492566719]
 script = ExtResource("11_batch")

@@ -33,6 +33,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellLayer.gd",
 	"res://scripts/rendering/CellBatchRenderer.gd",
 	"res://scripts/rendering/PostprocessLayer.gd",
+	"res://scripts/rendering/CellVisualCatalog.gd",
+	"res://scripts/rendering/CellView.gd",
+	"res://scripts/rendering/CellSceneRenderer.gd",
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
@@ -56,6 +59,12 @@ func _initialize() -> void:
 		failures += 1
 	else:
 		print("SmokeTest: OK res://scenes/main.tscn")
+	var cell_scene: PackedScene = ResourceLoader.load("res://scenes/cells/CellBase.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
+	if cell_scene == null:
+		push_error("SmokeTest: CellBase.tscn not loadable")
+		failures += 1
+	else:
+		print("SmokeTest: OK res://scenes/cells/CellBase.tscn")
 	var tick_route_ok: bool = await _check_tick_divide_route()
 	if not tick_route_ok:
 		failures += 1
@@ -127,6 +136,8 @@ func _initialize() -> void:
 	if not _check_perf_probe():
 		failures += 1
 	if not await _check_batch_renderer():
+		failures += 1
+	if not await _check_cell_scene_renderer():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1020,6 +1031,39 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
+	# 越界 SPAWN 必须钳制到皿内。
+	var dish_center: Vector2 = manager.get("dish_center")
+	var dish_radius: float = float(manager.get("dish_radius"))
+	var cell_radius_value: float = float(manager.get("cell_radius"))
+	var allowed_radius: float = maxf(1.0, dish_radius - maxf(cell_radius_value, 1.0))
+	bus.call("enqueue", {"type": "SPAWN", "position": dish_center + Vector2(1000.0, 0.0), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 5)
+	var clamped_index: int = int(cells.call("size")) - 1
+	var clamped_pos: Vector2 = Vector2(float(cells.get("cell_pos_x")[clamped_index]), float(cells.get("cell_pos_y")[clamped_index]))
+	if clamped_pos.distance_to(dish_center) > allowed_radius + 0.01:
+		push_error("SmokeTest: out-of-dish SPAWN was not clamped")
+		instance.queue_free()
+		return false
+	# 皿壁碰撞：把细胞强推到皿外，下一物理 tick 必须投回内壁。
+	var px: PackedFloat32Array = cells.get("cell_pos_x")
+	var py: PackedFloat32Array = cells.get("cell_pos_y")
+	var ppx: PackedFloat32Array = cells.get("cell_prev_x")
+	var ppy: PackedFloat32Array = cells.get("cell_prev_y")
+	px[clamped_index] = dish_center.x + dish_radius + 50.0
+	py[clamped_index] = dish_center.y
+	ppx[clamped_index] = px[clamped_index] - 2.0
+	ppy[clamped_index] = py[clamped_index]
+	cells.set("cell_pos_x", px)
+	cells.set("cell_pos_y", py)
+	cells.set("cell_prev_x", ppx)
+	cells.set("cell_prev_y", ppy)
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	var wall_pos: Vector2 = Vector2(float(cells.get("cell_pos_x")[clamped_index]), float(cells.get("cell_pos_y")[clamped_index]))
+	if wall_pos.distance_to(dish_center) > allowed_radius + 0.01:
+		push_error("SmokeTest: cell escaped dish wall")
+		instance.queue_free()
+		return false
+
 	var hud_tools: int = hud.get("_tool_buttons").size()
 	var hud_modes: int = hud.get("_mode_buttons").size()
 	if hud_tools != 14 or hud_modes != 5:
@@ -1748,4 +1792,56 @@ func _check_batch_renderer() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK MultiMesh batch instances / LOD cap / postprocess auto-disable")
+	return true
+
+func _check_cell_scene_renderer() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", true)
+	root.add_child(instance)
+	await process_frame
+	await process_frame
+	var layer: Node = instance.get_node_or_null("DishView/CellSceneLayer")
+	var batch: Node = instance.get_node_or_null("DishView/CellBatch")
+	var manager: Node = instance.get_node_or_null("Simulation/OrganismManager")
+	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
+	if layer == null or batch == null or manager == null or bus == null:
+		push_error("SmokeTest: CellSceneLayer nodes missing")
+		instance.queue_free(); return false
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var expected: int = 0
+	for flag in alive:
+		if flag != 0:
+			expected += 1
+	if expected < 1:
+		push_error("SmokeTest: no demo cell for scene renderer")
+		instance.queue_free(); return false
+	layer.call("mark_dirty")
+	await process_frame
+	if int(layer.call("get_active_count")) != expected:
+		push_error("SmokeTest: CellSceneLayer active count mismatch expected=%d actual=%d" % [expected, int(layer.call("get_active_count"))])
+		instance.queue_free(); return false
+	if bool(batch.get("visible")):
+		push_error("SmokeTest: MultiMesh layer must hide in scene-render range")
+		instance.queue_free(); return false
+	var first_view: Node2D = layer.get_child(0) as Node2D
+	var body: Sprite2D = first_view.get_node_or_null("Body") as Sprite2D
+	if first_view == null or body == null or body.texture == null:
+		push_error("SmokeTest: CellBase.tscn instance has no textured Body")
+		instance.queue_free(); return false
+	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
+	var texture_path: String = str(catalog.call("texture_path", 0))
+	if texture_path.is_empty() or load(texture_path) == null:
+		push_error("SmokeTest: Cell Lab cell texture not loadable")
+		instance.queue_free(); return false
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 1)
+	await process_frame
+	expected += 1
+	if int(layer.call("get_active_count")) != expected:
+		push_error("SmokeTest: CellSceneLayer did not refresh after SPAWN")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK reusable CellBase.tscn / Cell Lab texture / scene-render refresh")
 	return true

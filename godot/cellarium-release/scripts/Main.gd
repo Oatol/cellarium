@@ -120,6 +120,14 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 		game_hud.call("apply_result", str(command.get("type", "?")), result)
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
 
+## 屏幕坐标 → 模拟世界坐标。用事件自身的 position + canvas transform，
+## 与渲染用的相机变换同源，避免 get_global_mouse_position() 在不同 viewport/stretch 下漂移。
+func screen_to_world(screen_position: Vector2) -> Vector2:
+	var viewport: Viewport = get_viewport()
+	if viewport == null:
+		return screen_position
+	return viewport.get_canvas_transform().affine_inverse() * screen_position
+
 ## 冻结/暂停档没有下一 tick，用户干预必须立即经 CommandBus 落盘。
 ## 仍然保持「唯一写入口」契约：不绕过 CommandBus，只是同步 flush 待执行批次。
 func _flush_commands_if_paused() -> void:
@@ -165,7 +173,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mouse_button: InputEventMouseButton = event as InputEventMouseButton
 		if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
-			var world_position: Vector2 = get_global_mouse_position()
+			var world_position: Vector2 = screen_to_world(mouse_button.position)
 			var accepted: bool = bool(game_hud.call("world_action", world_position, Vector2.ZERO))
 			if accepted:
 				_flush_commands_if_paused()

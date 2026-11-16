@@ -4,6 +4,39 @@
 
 ---
 
+## 0.7.0 — 2026-11-16
+
+**类型**：阶段 7 细胞可视化 + 三个交互 BUG 修复
+**触发**：用户反馈「落点偏移 / 皿壁无碰撞 / 可生成在皿外」，并要求随后做阶段 7、贴图用 Cell Lab 资源
+
+### BUG 修复
+
+- **落点偏移**：`Main._unhandled_input()` 原来用 `get_global_mouse_position()`，在不同 viewport/stretch 下与相机 canvas transform 不同源。改为 `screen_to_world(mouse_button.position)`，显式使用 `viewport.get_canvas_transform().affine_inverse()`，与渲染相机变换一致。
+- **皿壁碰撞**：`OrganismManager.advance_physics_tick()` 调 `project_to_dish` 时改为 `dish_radius - cell_radius`，细胞中心不再能贴到圆心边界导致半身出皿；下一 tick 强制投影回内壁并反射法向速度。
+- **越界生成**：新增 `OrganismManager._clamp_to_dish()`，`SPAWN` / `AGENT_SPAWN` / 工具落点统一钳制到皿内（保留 cell_radius 余量），Agent 批量生成的每个偏移位置也单独钳制。
+- SmokeTest 新增集成断言：越界 SPAWN 被钳制；细胞被强推到皿外后下一物理 tick 回到内壁。
+
+### 阶段 7 · 细胞可视化
+
+- **可复用场景**：新增 `scenes/cells/CellBase.tscn`，用 `Sprite2D` + `OrganelleRoot` + `SignalAnchor` 声明细胞外观与挂点；`scripts/rendering/CellView.gd` 只负责只读同步位置/类型/org_id/能量，绝不回写模拟状态。
+- **Cell Lab 贴图**：新增 `scripts/rendering/CellVisualCatalog.gd`，把 18 种细胞类型映射到 Cell Lab guide-icons（zygocyte/somatocyte/myocyte/photocyte/neurocyte/phagocyte 等）。按用户明确要求，18 张 PNG + `.import` 纳入 `godot/cellarium-release/assets/apk_local/guide-icons/`；仅作本地工程资源使用。
+- **双层渲染**：新增 `CellSceneRenderer.gd` / `DishView/CellSceneLayer`：≤512 细胞时用 CellBase.tscn 实例逐细胞渲染；>512 隐藏该层、退回 `CellBatchRenderer` MultiMesh 色块 LOD。tick 与 `command_executed` 均触发脏标记，冻结档干预后下一帧即可见。
+- 修复 `CellSceneRenderer` 的相对 NodePath（`../../Simulation/...`）与 `cell_type` 的 `PackedByteArray` 类型，避免路径/类型静默失败。
+- `main.tscn` 新增 `CellSceneLayer` 与 CellBase/MultiMesh 渲染器 ext_resource；`CellLayer` 仍隐藏。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=38 FAILURES=0 EXITCODE=0`——新增可复用 tscn 实例化、贴图可加载、SPAWN 后场景层刷新、MultiMesh 自动隐藏、坐标/皿壁/越界断言全通过。
+- 主场景 headless 900 帧：`EXITCODE=0`，无解析/运行错误。
+- 模拟确定性未改：细胞视图只读 SoA，不进状态 hash。
+
+### 边界
+
+- 贴图来自 Cell Lab APK 资源，按用户指令用于本地工程；不上传 APK 本体、反编译中间产物或音频。
+- 细胞编辑页仍未做，`INJECT_GENOME` 仍是 stub；阶段 8 再处理。
+
+---
+
 ## 0.6.2 — 2026-11-16
 
 **类型**：细胞可见性修复补丁

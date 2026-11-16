@@ -16,6 +16,7 @@ analysis/cell_lab_apk_extract/*/levels.xml
 .godot/
 **/.godot/
 *.import
+!godot/cellarium-release/assets/**/*.import
 export_presets.cfg
 # Local MCP plugin/bootstrap payload (install separately from its official release)
 godot/cellarium-release/addons/
