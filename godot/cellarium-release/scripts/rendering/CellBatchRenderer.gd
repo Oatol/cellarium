@@ -5,16 +5,27 @@ extends MultiMeshInstance2D
 
 @export var organism_manager_path: NodePath = ^"../../Simulation/OrganismManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
+@export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var cell_radius: float = 2.0
 @export var max_instances: int = 8000
 
 var organism_manager: Node = null
 var tick_core: Node = null
+var command_bus: Node = null
 var _dirty: bool = true
 
 func _ready() -> void:
 	organism_manager = get_node_or_null(organism_manager_path)
 	tick_core = get_node_or_null(tick_core_path)
+	command_bus = get_node_or_null(command_bus_path)
+	if tick_core != null and tick_core.has_signal("tick_advanced"):
+		var on_tick: Callable = Callable(self, "_on_tick_advanced")
+		if not tick_core.is_connected("tick_advanced", on_tick):
+			tick_core.connect("tick_advanced", on_tick)
+	if command_bus != null and command_bus.has_signal("command_executed"):
+		var on_command: Callable = Callable(self, "_on_command_executed")
+		if not command_bus.is_connected("command_executed", on_command):
+			command_bus.connect("command_executed", on_command)
 	if multimesh == null:
 		multimesh = MultiMesh.new()
 		multimesh.transform_format = MultiMesh.TRANSFORM_2D
@@ -29,6 +40,14 @@ func _process(_delta: float) -> void:
 	if _dirty:
 		_rebuild()
 		_dirty = false
+
+func _on_tick_advanced(_tick_index: int) -> void:
+	## 细胞位置/存活状态每个 tick 都可能变化，必须重建实例。
+	mark_dirty()
+
+func _on_command_executed(_command: Dictionary, _tick_index: int) -> void:
+	## 冻结档干预会立即 flush，不等下一 tick，也要立刻刷新可见实例。
+	mark_dirty()
 
 func mark_dirty() -> void:
 	_dirty = true

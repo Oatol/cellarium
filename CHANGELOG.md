@@ -4,6 +4,28 @@
 
 ---
 
+## 0.6.2 — 2026-11-16
+
+**类型**：细胞可见性修复补丁
+**触发**：用户反馈「默认基因组细胞放下了什么都看不到」
+
+### 根因与修复
+
+- **不是细胞没生成**：命令、SoA 数据与神经都正常；`SmokeTest` 已验证 SPAWN 后 `cells.size()` 增加。问题在渲染层：`CellBatchRenderer` 只在 `_ready()` 调一次 `_rebuild()`，而它运行在 `Main._ready()` 创建 demo 细胞之前，且**没有连接 `tick_advanced` / `command_executed`**，所以实例数一直停留在 0。
+- 新增 `command_bus_path` 与两个信号连接：每 tick 标记 dirty；冻结档干预经 `CommandBus.execute_tick_commands()` 立即 flush 时也标记 dirty，下一帧重建 MultiMesh。保持渲染只读，不写模拟状态。
+- 细胞可见性仍为**最小可读形态**：QuadMesh + per-instance color，按 org_id 着色；贴图、弹性膜、组织特异性外观尚未做（见下方阶段路线）。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=35 FAILURES=0 EXITCODE=0`——冻结档 HUD 落点后，`CellBatch.get_instance_count()` 至少覆盖当前存活细胞数。
+- 主场景 headless 900 帧：`EXITCODE=0`，无警告。
+
+### 后续约定
+
+- 用户明确要求：**后续细胞用可复用的 `.tscn` 场景/预制体做外观与挂载点**（节点优先、可复用），届时批量渲染与实例外观要重新对齐，不继续在脚本里堆一次性绘制代码。
+
+---
+
 ## 0.6.1 — 2026-11-16
 
 **类型**：v0.6.0 UI 交互修复补丁

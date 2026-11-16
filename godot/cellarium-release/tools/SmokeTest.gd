@@ -994,7 +994,12 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
-	# 冻结档点击：HUD → CommandBus → 立即 flush，合成器必须能落点。
+	# 冻结档点击：HUD → CommandBus → 立即 flush，合成器必须能落点且可见。
+	var batch: Node = instance.get_node_or_null("DishView/CellBatch")
+	if batch == null:
+		push_error("SmokeTest: CellBatch node missing")
+		instance.queue_free()
+		return false
 	var before_hud_spawn: int = int(cells.call("size"))
 	if not bool(hud.call("world_action", Vector2(250, 250), Vector2.ZERO)):
 		push_error("SmokeTest: HUD world_action rejected SPAWN")
@@ -1007,6 +1012,11 @@ func _check_tool_command_loop() -> bool:
 	instance.call("_flush_commands_if_paused")
 	if int(cells.call("size")) != before_hud_spawn + 1:
 		push_error("SmokeTest: frozen-mode HUD SPAWN did not place cell")
+		instance.queue_free()
+		return false
+	await process_frame
+	if int(batch.call("get_instance_count")) < int(cells.call("size")):
+		push_error("SmokeTest: spawned cell not rendered after flush")
 		instance.queue_free()
 		return false
 
