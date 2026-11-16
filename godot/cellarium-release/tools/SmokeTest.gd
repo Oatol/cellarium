@@ -149,6 +149,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_camera_speed_editor():
 		failures += 1
+	if not await _check_multicell_editor():
+		failures += 1
 	if not await _check_shape_radius_and_motion():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
@@ -1970,6 +1972,11 @@ func _check_multicellular_cooperation() -> bool:
 	if not type_set.has(2) or not type_set.has(4) or not type_set.has(5):
 		push_error("SmokeTest: demo organism must contain motion/energy/info cell roles")
 		instance.queue_free(); return false
+	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
+	var min_distance: float = _min_alive_distance(cells)
+	if min_distance < float(shape.call("min_center_distance")) - 0.5:
+		push_error("SmokeTest: demo multicellular cells overlap, min_distance=%.3f" % min_distance)
+		instance.queue_free(); return false
 	var link_layer: Node = instance.get_node("DishView/LinkLayer")
 	var scene_layer: Node = instance.get_node("DishView/CellSceneLayer")
 	if int(link_layer.call("get_rendered_link_count")) != 3:
@@ -2004,6 +2011,24 @@ func _check_multicellular_cooperation() -> bool:
 	instance.queue_free()
 	print("SmokeTest: OK 4-cell cooperation demo / role palette / link bridges / wall contact")
 	return true
+
+func _min_alive_distance(cells: RefCounted) -> float:
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var positions: PackedFloat32Array = cells.get("cell_pos_x")
+	var positions_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var minimum: float = INF
+	for a in range(alive.size()):
+		if alive[a] == 0:
+			continue
+		for b in range(a + 1, alive.size()):
+			if alive[b] == 0:
+				continue
+			var distance_value: float = Vector2(
+				positions[b] - positions[a],
+				positions_y[b] - positions_y[a]
+			).length()
+			minimum = minf(minimum, distance_value)
+	return minimum
 
 func _max_x(points: PackedVector2Array) -> float:
 	if points.is_empty():
@@ -2197,6 +2222,73 @@ func _check_camera_speed_editor() -> bool:
 
 	instance.queue_free()
 	print("SmokeTest: OK camera wheel/pan / speed slider+input / editor-synthesizer-genome-inject loop")
+	return true
+
+func _check_multicell_editor() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var editor: Control = instance.get_node("UI/HUD/CellEditorPanel") as Control
+	var hud: Node = instance.get_node("UI/HUD")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	if editor == null or hud == null or manager == null or tick_core == null:
+		push_error("SmokeTest: multicell editor nodes missing")
+		instance.queue_free(); return false
+	tick_core.set("running", false)
+	if (editor.call("get_dev_program") as Array).size() != 9:
+		push_error("SmokeTest: editor default must be 4-cell cooperation template")
+		instance.queue_free(); return false
+	editor.call("set_dev_program", [])
+	if (editor.call("get_dev_program") as Array).size() != 0:
+		push_error("SmokeTest: single-cell clear failed")
+		instance.queue_free(); return false
+	editor.call("_on_load_template")
+	if (editor.call("get_dev_program") as Array).size() != 9:
+		push_error("SmokeTest: 4-cell template did not restore")
+		instance.queue_free(); return false
+	editor.call("_on_add_instruction")
+	if (editor.call("get_dev_program") as Array).size() != 10:
+		push_error("SmokeTest: add development instruction failed")
+		instance.queue_free(); return false
+	editor.call("_on_remove_instruction", 9)
+	if (editor.call("get_dev_program") as Array).size() != 9:
+		push_error("SmokeTest: remove development instruction failed")
+		instance.queue_free(); return false
+	editor.call("_on_operand_changed", 16.0, 0, "c")
+	var program: Array = editor.call("get_dev_program")
+	if int(program[0].get("c", 0)) != 16:
+		push_error("SmokeTest: development operand edit failed")
+		instance.queue_free(); return false
+	editor.call("_on_apply")
+	if not bool(hud.call("has_draft")):
+		push_error("SmokeTest: multicell editor did not load draft into synthesizer")
+		instance.queue_free(); return false
+	if not bool(hud.call("world_action", Vector2(250, 250), Vector2.ZERO)):
+		push_error("SmokeTest: synthesizer rejected multicell draft")
+		instance.queue_free(); return false
+	instance.call("_flush_commands_if_paused")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var last_index: int = int(cells.call("size")) - 1
+	var org_id: int = int(cells.get("cell_org_id")[last_index])
+	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	if stored == null or (stored.get("dev_program") as Array) != program:
+		push_error("SmokeTest: edited development program did not survive CommandBus/GNP1")
+		instance.queue_free(); return false
+	for _tick in range(12):
+		manager.call("advance_development_tick")
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	if int(cells.call("size")) != 4 or link_a.size() != 3:
+		push_error("SmokeTest: synthesizer-loaded program did not develop 4 cells / 3 links")
+		instance.queue_free(); return false
+	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
+	if _min_alive_distance(cells) < float(shape.call("min_center_distance")) - 0.5:
+		push_error("SmokeTest: synthesizer-loaded organism cells overlap")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK multicell editor / dev instructions / synthesizer GNP1 round-trip / no overlap")
 	return true
 
 func _check_shape_radius_and_motion() -> bool:

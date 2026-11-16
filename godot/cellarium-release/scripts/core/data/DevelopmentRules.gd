@@ -41,7 +41,13 @@ static func execute_instruction(genome: RefCounted, cells: RefCounted, organisms
 	var b: int = int(instruction.get("b", -1))
 	var c: int = int(instruction.get("c", -1))
 	if opcode == 0:
-		var child_index: int = execute_divide(genome, cells, organisms, {"type": "DIVIDE", "org_id": org_id, "cell_index": a, "instruction_index": instruction_index, "separation": float(command.get("separation", 1.0))})
+		# DIVIDE 指令的 c 复用为分裂间距（世界单位，0 表示沿用默认 1）。
+		# 同个体细胞不做自碰撞，因此发育期必须按静息直径分开，否则亲子会重叠。
+		var separation: float = float(command.get("separation", 1.0))
+		var instruction_separation: float = float(instruction.get("c", 0))
+		if instruction_separation > 0.0:
+			separation = instruction_separation
+		var child_index: int = execute_divide(genome, cells, organisms, {"type": "DIVIDE", "org_id": org_id, "cell_index": a, "instruction_index": instruction_index, "separation": separation})
 		if child_index >= 0:
 			organisms.get("org_dev_cursor")[org_id] += 1
 			_update_maturity(genome, organisms, org_id)

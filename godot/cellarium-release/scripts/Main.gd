@@ -53,9 +53,9 @@ func _ready() -> void:
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
 		# 默认演示一个 4 细胞协作体：结构核 + 运动/能量/信息三类分化细胞，并用 Link 连成一体。
 		genome.call("set_development_program", [
-			{"opcode": 0, "a": 0, "b": 0,   "c": 0},
-			{"opcode": 0, "a": 0, "b": 85,  "c": 0},
-			{"opcode": 0, "a": 1, "b": 170, "c": 0},
+			{"opcode": 0, "a": 0, "b": 0,   "c": 14},
+			{"opcode": 0, "a": 0, "b": 85,  "c": 14},
+			{"opcode": 0, "a": 1, "b": 170, "c": 14},
 			{"opcode": 1, "a": 1, "b": 2,   "c": 0},
 			{"opcode": 1, "a": 2, "b": 4,   "c": 0},
 			{"opcode": 1, "a": 3, "b": 5,   "c": 0},

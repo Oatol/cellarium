@@ -301,53 +301,86 @@ theme_override_constants/margin_top = 8
 theme_override_constants/margin_right = 10
 theme_override_constants/margin_bottom = 8
 
-[node name="Content" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel"]
+[node name="Scroll" type="ScrollContainer" parent="UI/HUD/CellEditorPanel/Panel"]
 layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Content" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
 theme_override_constants/separation = 4
 
-[node name="Title" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Content"]
+[node name="Title" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
 layout_mode = 2
-text = "CELL EDITOR · 细胞编辑（8 组型 / 18 类型）"
+text = "CELL EDITOR · 细胞 / 多细胞编辑"
 
-[node name="TraitRows" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Content"]
+[node name="TraitRows" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
 layout_mode = 2
 theme_override_constants/separation = 2
 
-[node name="ConfigRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Content"]
+[node name="ConfigRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
 layout_mode = 2
 
-[node name="TypeLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Content/ConfigRow"]
+[node name="TypeLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
 layout_mode = 2
 custom_minimum_size = Vector2(72, 0)
 text = "类型"
 
-[node name="TypeOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Content/ConfigRow"]
+[node name="TypeOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
 layout_mode = 2
 custom_minimum_size = Vector2(150, 0)
 
-[node name="RespirationLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Content/ConfigRow"]
+[node name="RespirationLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
 layout_mode = 2
 text = "呼吸"
 
-[node name="RespirationOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Content/ConfigRow"]
+[node name="RespirationOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
 layout_mode = 2
 custom_minimum_size = Vector2(90, 0)
 
-[node name="ActionRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Content"]
+[node name="ActionRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
 layout_mode = 2
 theme_override_constants/separation = 6
 
-[node name="ApplyButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Content/ActionRow"]
+[node name="ApplyButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
 layout_mode = 2
 text = "装载到合成器"
 
-[node name="DefaultButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Content/ActionRow"]
+[node name="DefaultButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
 layout_mode = 2
 text = "恢复默认"
 
-[node name="CloseButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Content/ActionRow"]
+[node name="CloseButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
 layout_mode = 2
 text = "关闭"
+
+[node name="DevTitle" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
+layout_mode = 2
+text = "DEVELOPMENT · 多细胞发育程序"
+
+[node name="DevRows" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
+layout_mode = 2
+theme_override_constants/separation = 2
+
+[node name="DevActionRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="AddButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
+layout_mode = 2
+text = "添加指令"
+
+[node name="TemplateButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
+layout_mode = 2
+text = "4 细胞模板"
+
+[node name="ClearButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
+layout_mode = 2
+text = "单细胞"
+
+[node name="DevPreview" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
+layout_mode = 2
+text = "预览："
 
 [node name="Minimap" type="PanelContainer" parent="UI" unique_id=543256719]
 
