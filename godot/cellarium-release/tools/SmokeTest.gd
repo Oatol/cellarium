@@ -295,10 +295,19 @@ func _check_collision_resolution() -> bool:
 	same_org.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
 	same_org.call("append_cell", 0, Vector2.ZERO, 0.1, 0)
 	physics.call("resolve_collisions", same_org, 2.0)
-	if not is_equal_approx(same_org.call("get_position", 0).distance_to(same_org.call("get_position", 1)), 0.0):
-		push_error("SmokeTest: same-organism cells must skip collision separation")
+	if same_org.call("get_position", 0).distance_to(same_org.call("get_position", 1)) < 3.999:
+		push_error("SmokeTest: same-organism cells must also separate")
 		return false
-	print("SmokeTest: OK cross-organism collision resolution / same-organism skip")
+	# 连锁重叠：外细胞把中间细胞推入同簇后，单轮修正不够，必须多轮重建 pair。
+	var chain: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	chain.call("append_cell", 0, Vector2(0.0, 0.0), 0.1, 0)
+	chain.call("append_cell", 0, Vector2(2.0, 0.0), 0.1, 0)
+	chain.call("append_cell", 0, Vector2(4.0, 0.0), 0.1, 0)
+	physics.call("resolve_collisions", chain, 2.0)
+	if _min_alive_distance(chain) < 3.99:
+		push_error("SmokeTest: chained overlap was not fully resolved")
+		return false
+	print("SmokeTest: OK all-cell collision resolution / same-organism separation / chained overlap")
 	return true
 
 func _check_phase_two_tick_integration() -> bool:
@@ -681,6 +690,16 @@ func _check_cell_behavior() -> bool:
 	if replay_a != replay_b or replay_a[0].size() != 6:
 		push_error("SmokeTest: neural output pass must be deterministic")
 		return false
+	var flat_outputs: PackedFloat32Array = PackedFloat32Array()
+	flat_outputs.resize(int(second_cells.call("size")) * 6)
+	if not bool(behavior.call("compute_outputs_flat", second_cells, environment, flat_outputs)):
+		push_error("SmokeTest: flat neural hot path rejected valid cells")
+		return false
+	for cell_index in range(int(second_cells.call("size"))):
+		for output_index in range(6):
+			if not is_equal_approx(replay_a[cell_index][output_index], flat_outputs[cell_index * 6 + output_index]):
+				push_error("SmokeTest: flat neural hot path diverged from reference")
+				return false
 	if not bool(behavior.call("apply_outputs", second_cells, replay_a, 1.0 / 60.0)):
 		push_error("SmokeTest: behavior intent application failed")
 		return false
@@ -855,9 +874,14 @@ func _check_environment_field() -> bool:
 	if too_much > 1.251 or float(field.call("consume_nutrient", Vector2(-21, 0), 1.0)) != 0.0:
 		push_error("SmokeTest: nutrient withdrawal must clamp to available resource and dish boundary")
 		return false
-	if field.call("get_backend_diagnostics").get("backend", "") != "cpu":
+	var diagnostics: Dictionary = field.call("get_backend_diagnostics")
+	if diagnostics.get("backend", "") != "cpu":
 		push_error("SmokeTest: explicit CPU backend selection was ignored")
 		return false
+	for key in ["gpu_tick_count", "gpu_fallback_count", "gpu_upload_usec", "gpu_dispatch_usec", "gpu_readback_usec", "gpu_avg_tick_usec", "dispatch_groups", "readback_bytes"]:
+		if not diagnostics.has(key):
+			push_error("SmokeTest: backend diagnostics lost key " + str(key))
+			return false
 	var mask_field: RefCounted = script.new() as RefCounted
 	mask_field.call("configure", 8, Vector2.ZERO, 20.0, PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0]), false)
 	if not bool(mask_field.call("add_source", 0, 3, 3, 0.25)) or bool(mask_field.call("add_source", 0, 0, 0, 1.0)):

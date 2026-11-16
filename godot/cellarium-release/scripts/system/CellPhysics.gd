@@ -3,6 +3,7 @@ extends RefCounted
 
 const DAMPING: float = 0.98
 const CONSTRAINT_ITERATIONS: int = 2
+const COLLISION_ITERATIONS: int = 6
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
 
@@ -45,23 +46,33 @@ static func resolve_collisions(cells: RefCounted, cell_radius: float) -> int:
 		return -1
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
-	var alive: PackedByteArray = cells.get("cell_alive")
-	var pairs: Array[Vector2i] = build_collision_pairs(cells)
 	var resolved: int = 0
-	for pair in pairs:
-		var a: int = pair.x
-		var b: int = pair.y
-		var delta: Vector2 = Vector2(pos_x[b] - pos_x[a], pos_y[b] - pos_y[a])
-		var distance: float = delta.length()
-		if distance >= cell_radius * 2.0:
-			continue
-		var normal: Vector2 = Vector2.RIGHT if distance <= 0.000001 else delta / distance
-		var correction: float = (cell_radius * 2.0 - distance) * 0.5
-		pos_x[a] -= normal.x * correction
-		pos_y[a] -= normal.y * correction
-		pos_x[b] += normal.x * correction
-		pos_y[b] += normal.y * correction
-		resolved += 1
+	# 连锁碰撞需要多轮：A 被外细胞推进 B 后，单轮按旧 pairs 已无法再分离 A/B。
+	# pairs 每 3 轮重建一次；顺序仍由 cell index 与空间哈希桶决定，保持确定性。
+	var pairs: Array[Vector2i] = build_collision_pairs(cells)
+	for iteration in range(COLLISION_ITERATIONS):
+		if iteration > 0 and iteration % 3 == 0:
+			pairs = build_collision_pairs(cells)
+		var round_resolved: int = 0
+		var max_correction: float = 0.0
+		for pair in pairs:
+			var a: int = pair.x
+			var b: int = pair.y
+			var delta: Vector2 = Vector2(pos_x[b] - pos_x[a], pos_y[b] - pos_y[a])
+			var distance: float = delta.length()
+			if distance >= cell_radius * 2.0:
+				continue
+			var normal: Vector2 = Vector2.RIGHT if distance <= 0.000001 else delta / distance
+			var correction: float = (cell_radius * 2.0 - distance) * 0.5
+			pos_x[a] -= normal.x * correction
+			pos_y[a] -= normal.y * correction
+			pos_x[b] += normal.x * correction
+			pos_y[b] += normal.y * correction
+			round_resolved += 1
+			max_correction = maxf(max_correction, correction)
+		resolved += round_resolved
+		if max_correction < 0.001:
+			break
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
 	return resolved
@@ -154,7 +165,6 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 		return pairs
 	var count: int = int(cells.call("size"))
 	var alive: PackedByteArray = cells.get("cell_alive")
-	var org_ids: PackedInt32Array = cells.get("cell_org_id")
 	var buckets: Dictionary = build_spatial_hash(cells)
 	for a in range(count):
 		if alive[a] == 0:
@@ -169,7 +179,8 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 				for sub_bucket in buckets[key]:
 					for b_value in sub_bucket:
 						var b: int = int(b_value)
-						if b <= a or org_ids[a] == org_ids[b]:
+						# 同个体细胞也参与分离：外部撞击会把细胞推入同簇，跳过自碰撞会造成视觉重叠。
+						if b <= a:
 							continue
 						pairs.append(Vector2i(a, b))
 	return pairs

@@ -86,11 +86,22 @@ var _mask_buffer: RID
 var _source_buffer: RID
 var _active_buffer: int = 0
 var _force_cpu: bool = false
+## GPU 深化：分项计时与回退计数，仅观测，不改变场数值或确定性。
+var _gpu_tick_count: int = 0
+var _gpu_fallback_count: int = 0
+var _gpu_upload_usec: int = 0
+var _gpu_dispatch_usec: int = 0
+var _gpu_readback_usec: int = 0
 
 func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, defaults: PackedFloat32Array, prefer_compute: bool = true) -> bool:
 	if grid_resolution < 2 or dish_radius <= 0.0 or defaults.size() != CHANNEL_COUNT:
 		return false
 	_free_gpu_resources()
+	_gpu_tick_count = 0
+	_gpu_fallback_count = 0
+	_gpu_upload_usec = 0
+	_gpu_dispatch_usec = 0
+	_gpu_readback_usec = 0
 	resolution = grid_resolution
 	center = dish_center
 	radius = dish_radius
@@ -264,12 +275,23 @@ func diffuse_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 		for index in range(_pending_sources[channel_index].size()):
 			_pending_sources[channel_index][index] += source_additions[channel_index][index] if not source_additions.is_empty() else 0.0
 	if backend_name == "gpu_compute":
-		if not _upload_tick_buffers() or not _dispatch_gpu():
+		var upload_begin: int = Time.get_ticks_usec()
+		var uploaded: bool = _upload_tick_buffers()
+		var dispatch_begin: int = Time.get_ticks_usec()
+		var dispatched: bool = false if not uploaded else _dispatch_gpu()
+		var dispatch_end: int = Time.get_ticks_usec()
+		if not uploaded or not dispatched:
+			_gpu_fallback_count += 1
 			backend_name = "cpu"
 			_free_gpu_resources()
 			_apply_cpu_diffusion(_pending_sources)
 		else:
 			_read_active_buffer(1 - _active_buffer)
+			var readback_end: int = Time.get_ticks_usec()
+			_gpu_upload_usec += maxi(0, dispatch_begin - upload_begin)
+			_gpu_dispatch_usec += maxi(0, dispatch_end - dispatch_begin)
+			_gpu_readback_usec += maxi(0, readback_end - dispatch_end)
+			_gpu_tick_count += 1
 			_active_buffer = 1 - _active_buffer
 	else:
 		_apply_cpu_diffusion(_pending_sources)
@@ -278,7 +300,22 @@ func diffuse_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 	return true
 
 func get_backend_diagnostics() -> Dictionary:
-	return {"backend": backend_name, "compute_available": _rendering_device != null and _pipeline.is_valid(), "device": device_name, "vendor": device_vendor}
+	var total_usec: int = _gpu_upload_usec + _gpu_dispatch_usec + _gpu_readback_usec
+	var average_usec: float = float(total_usec) / float(maxi(1, _gpu_tick_count)) if _gpu_tick_count > 0 else 0.0
+	return {
+		"backend": backend_name,
+		"compute_available": _rendering_device != null and _pipeline.is_valid(),
+		"device": device_name,
+		"vendor": device_vendor,
+		"gpu_tick_count": _gpu_tick_count,
+		"gpu_fallback_count": _gpu_fallback_count,
+		"gpu_upload_usec": _gpu_upload_usec,
+		"gpu_dispatch_usec": _gpu_dispatch_usec,
+		"gpu_readback_usec": _gpu_readback_usec,
+		"gpu_avg_tick_usec": average_usec,
+		"dispatch_groups": [ceili(float(resolution) / 8.0), ceili(float(resolution) / 8.0), CHANNEL_COUNT],
+		"readback_bytes": CHANNEL_COUNT * resolution * resolution * 4
+	}
 
 func _select_backend() -> void:
 	backend_name = "cpu"

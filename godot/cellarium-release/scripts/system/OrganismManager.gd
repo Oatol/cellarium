@@ -44,6 +44,8 @@ const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT"
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
 var _sim_tick: int = 0
+## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
+var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
 
 func _ready() -> void:
 	species_system.call("configure", speciation_distance, speciation_cooldown)
@@ -80,8 +82,12 @@ func advance_physics_tick(dt: float) -> void:
 	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
 	perf_probe.call("begin", "behavior")
 	if update_neural:
-		var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
-		CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt, max_movement_speed)
+		var environment: Dictionary = _build_behavior_environment()
+		var needed: int = int(cells.call("size")) * 6
+		if _behavior_outputs_flat.size() != needed:
+			_behavior_outputs_flat.resize(needed)
+		CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
+		CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
 	else:
 		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
 	perf_probe.call("end", "behavior")
@@ -118,15 +124,20 @@ func _species_populations() -> Dictionary:
 		populations[species_id] = int(populations.get(species_id, 0)) + 1
 	return populations
 
-func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
-	## 一次 tick 只建一次空间哈希，所有细胞复用（避免 O(n²) 重建）。
+func _build_behavior_environment() -> Dictionary:
+	## 一次 tick 只建一次空间哈希；neighbors 用 Array 索引替代 Dictionary，减少热路径哈希开销。
 	var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash", cells)
-	var neighbors: Dictionary = {}
+	var neighbors: Array[Array] = []
+	var alive: PackedByteArray = cells.get("cell_alive")
 	for cell_index in range(int(cells.call("size"))):
-		neighbors[cell_index] = CELL_PHYSICS_SCRIPT.call("query_neighbors_cached", cells, cell_index, buckets)
+		if alive[cell_index] == 0:
+			neighbors.append([])
+			continue
+		var found: Array[int] = CELL_PHYSICS_SCRIPT.call("query_neighbors_cached", cells, cell_index, buckets)
+		neighbors.append(found)
 	var field_values: Array = []
 	for cell_index in range(int(cells.call("size"))):
-		if int(cells.get("cell_alive")[cell_index]) == 0:
+		if alive[cell_index] == 0:
 			field_values.append(PackedFloat32Array())
 			continue
 		var position: Vector2 = cells.call("get_position", cell_index)
@@ -134,7 +145,14 @@ func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
 		if environment_manager != null:
 			sampled = environment_manager.call("sample_fields", position)
 		field_values.append(sampled)
-	var environment: Dictionary = {"fields_by_cell": field_values, "neighbors": neighbors, "energy_max": 1.0}
+	return {
+		"fields_by_cell": field_values,
+		"neighbors": neighbors,
+		"energy_max": 1.0
+	}
+
+func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
+	var environment: Dictionary = _build_behavior_environment()
 	return CELL_BEHAVIOR_SCRIPT.call("compute_outputs", cells, environment)
 
 func _apply_base_metabolism(dt: float) -> void:

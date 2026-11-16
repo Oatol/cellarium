@@ -4,6 +4,63 @@
 
 ---
 
+## 0.8.7 — 2026-11-16
+
+**类型**：同个体自碰撞修复 + 性能与 GPU 深化
+**触发**：用户反馈「没有自碰撞不太对，被其他细胞撞到细胞发生位移还是会重叠」，并要求「完成这个之后做性能与 GPU 深化」
+
+### 自碰撞与连锁重叠
+
+- `CellPhysics.build_collision_pairs()` 不再因 `org_id` 相同跳过；所有活细胞按同一半径参与分离，Link 静息长度仍等于静息直径 14。
+- `resolve_collisions()` 改为最多 6 轮确定性位置修正，每 3 轮重建一次空间哈希 pair；收敛阈值 0.001。解决“外细胞把 A 推进同簇 B，单轮旧 pair 已处理完，A/B 仍重叠”的连锁问题。
+- 同步修订 `docs/Godot项目技术设计文档.md` §4.4/§4.5：同生物内部细胞也参与分离，不再写“跳过自碰撞”。
+- SmokeTest 将旧“同 org 跳过”断言改为同 org 必须分离，并新增三细胞连锁重叠收敛断言。
+
+### 性能深化
+
+- 行为热路径新增零分配接口：
+  - `CellBehavior.collect_inputs_into()` / `evaluate_into()` / `compute_outputs_flat()` / `apply_outputs_flat()`；
+  - 输入、隐层、输出、intents 全部复用调用方缓冲，不再每 tick 为每枚细胞创建临时 `PackedFloat32Array`。
+- `OrganismManager._build_behavior_environment()` 用 `Array[Array]` 取代 `Dictionary[int → neighbors]`，减少邻域热路径哈希查找；旧 `_compute_behavior_outputs()` 仍保留供测试与兼容。
+- SmokeTest 断言扁平热路径与旧逐细胞输出逐位一致（同输入/同权重/同顺序）。
+- BenchTest 三档结果（headless CPU，120 tick 上限 / 3000 档墙钟保护提前停止）：
+
+| 生物数 | avg tick | behavior | physics | 预算 |
+|---:|---:|---:|---:|---|
+| 300 | 18.0 ms | 7.85 ms | 7.87 ms | 未达 |
+| 1000 | 64.6 ms | 28.3 ms | 29.4 ms | 未达 |
+| 3000 | 204.7 ms | 89.6 ms | 96.2 ms | 未达 |
+
+- 结论：零分配改造保持数值等价、未引入回归；headless CPU 仍未达 §8.1 预算，真实运行应走 GPU 场与 LOD，不通过缩放 dt 或提高单帧 12 tick 上限来“刷”指标。
+
+### GPU 深化
+
+- `EnvironmentField` 增加分项诊断：`gpu_tick_count` / `gpu_fallback_count` / `gpu_upload_usec` / `gpu_dispatch_usec` / `gpu_readback_usec` / `gpu_avg_tick_usec` / `dispatch_groups` / `readback_bytes`。仅观测，不改场数值与确定性。
+- 新增 `tools/GpuThroughputTest.gd`：窗口 Vulkan 下以 64×64 五通道场跑 200 tick，输出 GPU/CPU 吞吐和后端诊断。
+- 实测 RTX 3050 Laptop GPU：
+
+| 后端 | 200 tick 墙钟 | 每 tick |
+|---|---:|---:|
+| gpu_compute | 470 ms | 2.35 ms |
+| cpu | 12,191 ms | 60.95 ms |
+
+- GPU 约快 **25.9×**；分项为 upload 141.6 ms / dispatch 37.0 ms / readback 148.6 ms，说明当前主要成本在缓冲上传与每 tick 回读，而不是 compute dispatch。dispatch groups = `(8,8,5)`，每 tick 回读 81,920 bytes。
+- `GpuFieldParityTest` 复验通过：两 tick 最大误差 `3.05e-5`（温度通道量化差），皿外值 0，EXITCODE=0。
+
+### 验收
+
+- SmokeTest：`SCRIPTS=42 FAILURES=0 EXITCODE=0`。
+- BenchTest：`FAILURES=0`；三档数据如上。
+- GPU parity 与 throughput 均在窗口 Vulkan 下完成，无截图/人工干预。
+
+### 边界
+
+- GPU 仍每 tick 回读 80KB，以保持 CPU 侧采样契约；吞吐收益已显著，但回读仍是主成本，进一步优化需要把采样/行为完全搬到 GPU，属于后续专项。
+- 同个体细胞现在物理分离，但连接内经济、角质 shielding、4 通道信号传播仍未实现。
+- 单帧 12 tick 上限与固定 dt 均保持不变。
+
+---
+
 ## 0.8.6 — 2026-11-16
 
 **类型**：演示体重叠修复 + 多细胞编辑闭环
