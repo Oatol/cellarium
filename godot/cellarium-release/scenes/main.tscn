@@ -27,10 +27,10 @@ script = ExtResource("6_dish")
 script = ExtResource("7_links")
 
 [node name="CellLayer" type="Node2D" parent="DishView" unique_id=1347782208]
-script = ExtResource("8_cells")
 visible = false
+script = ExtResource("8_cells")
 
-[node name="CellBatch" type="MultiMeshInstance2D" parent="DishView"]
+[node name="CellBatch" type="MultiMeshInstance2D" parent="DishView" unique_id=1492566719]
 script = ExtResource("11_batch")
 
 [node name="ParticleLayer" type="Node2D" parent="DishView" unique_id=910565151]
@@ -63,7 +63,7 @@ editor_description = "PLACEHOLDER - 4-channel chemical signal subsystem not impl
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=554468281]
 
-[node name="Postprocess" type="ColorRect" parent="UI"]
+[node name="Postprocess" type="ColorRect" parent="UI" unique_id=1490145301]
 script = ExtResource("12_post")
 
 [node name="HUD" type="Control" parent="UI" unique_id=2040799551]
@@ -75,16 +75,16 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
 script = ExtResource("9_hud")
-command_bus_path = NodePath("Simulation/CommandBus")
-tick_core_path = NodePath("Simulation/TickCore")
-environment_path = NodePath("Simulation/EnvironmentManager")
-organism_manager_path = NodePath("Simulation/OrganismManager")
-camera_path = NodePath("Camera2D")
+command_bus_path = NodePath("../../Simulation/CommandBus")
+tick_core_path = NodePath("../../Simulation/TickCore")
+environment_path = NodePath("../../Simulation/EnvironmentManager")
+organism_manager_path = NodePath("../../Simulation/OrganismManager")
+camera_path = NodePath("../../Camera2D")
 mode_row_path = NodePath("TopBar/Panel/ModeRow")
 tool_groups_path = NodePath("ToolDock/Panel/ToolGroups")
 substrate_rows_path = NodePath("SubstratePanel/Panel/SubstrateRows")
-lens_row_path = NodePath("MicroscopePanel/Panel/LensRow")
-view_row_path = NodePath("MicroscopePanel/Panel/ViewRow")
+lens_row_path = NodePath("MicroscopePanel/Panel/Content/LensRow")
+view_row_path = NodePath("MicroscopePanel/Panel/Content/ViewRow")
 
 [node name="TopBar" type="PanelContainer" parent="UI/HUD" unique_id=204459800]
 layout_mode = 1
@@ -164,9 +164,9 @@ anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 244.0
-offset_top = -152.0
-offset_right = 632.0
-offset_bottom = -8.0
+offset_top = -164.0
+offset_right = 824.0
+offset_bottom = -40.0
 grow_vertical = 0
 
 [node name="Panel" type="MarginContainer" parent="UI/HUD/MicroscopePanel" unique_id=928099582]
@@ -176,15 +176,19 @@ theme_override_constants/margin_top = 6
 theme_override_constants/margin_right = 8
 theme_override_constants/margin_bottom = 6
 
-[node name="LensTitle" type="Label" parent="UI/HUD/MicroscopePanel/Panel" unique_id=1162399343]
-layout_mode = 2
-text = "MICROSCOPE · 镜头滤镜"
-
-[node name="LensRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel" unique_id=1562735435]
+[node name="Content" type="VBoxContainer" parent="UI/HUD/MicroscopePanel/Panel" unique_id=1162399342]
 layout_mode = 2
 theme_override_constants/separation = 4
 
-[node name="ViewRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel" unique_id=1302842733]
+[node name="LensTitle" type="Label" parent="UI/HUD/MicroscopePanel/Panel/Content" unique_id=1162399343]
+layout_mode = 2
+text = "MICROSCOPE · 镜头滤镜"
+
+[node name="LensRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel/Content" unique_id=1562735435]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="ViewRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel/Content" unique_id=1302842733]
 layout_mode = 2
 theme_override_constants/separation = 4
 
@@ -195,7 +199,7 @@ anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 12.0
-offset_top = -30.0
+offset_top = -28.0
 offset_right = 900.0
 offset_bottom = -8.0
 grow_horizontal = 2
@@ -216,11 +220,11 @@ text = "就绪 · 选择工具后在皿内点击"
 [node name="Minimap" type="PanelContainer" parent="UI" unique_id=543256719]
 
 [node name="AnalysisPanel" type="PanelContainer" parent="UI" unique_id=1454371226]
-script = ExtResource("10_analysis")
 offset_left = 1180.0
 offset_top = 120.0
 offset_right = 1580.0
 offset_bottom = 700.0
+script = ExtResource("10_analysis")
 
 [connection signal="tick_advanced" from="Simulation/TickCore" to="." method="_on_tick_advanced"]
 [connection signal="command_executed" from="Simulation/CommandBus" to="." method="_on_command_executed"]

@@ -15,8 +15,8 @@ const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 @export var mode_row_path: NodePath = ^"TopBar/ModeRow"
 @export var tool_groups_path: NodePath = ^"ToolDock/ToolGroups"
 @export var substrate_rows_path: NodePath = ^"SubstratePanel/SubstrateRows"
-@export var lens_row_path: NodePath = ^"MicroscopePanel/LensRow"
-@export var view_row_path: NodePath = ^"MicroscopePanel/ViewRow"
+@export var lens_row_path: NodePath = ^"MicroscopePanel/Panel/Content/LensRow"
+@export var view_row_path: NodePath = ^"MicroscopePanel/Panel/Content/ViewRow"
 @export var feedback_path: NodePath = ^"FeedbackLabel"
 
 signal tool_changed(tool: Dictionary)
@@ -218,7 +218,10 @@ func _on_tool_pressed(index: int) -> void:
 		_tool_buttons[i].set_pressed_no_signal(i == index)
 	var tool: Dictionary = _tools[index]
 	tool_changed.emit(tool)
-	_set_feedback("已选 %s · %s · 在皿内点击执行" % [tool.get("name", "?"), tool.get("mode", "?")])
+	if str(tool.get("id", "")) == "SPAWN":
+		_set_feedback("细胞合成器 · 默认基因组直接落点放置；细胞编辑页尚未接入")
+	else:
+		_set_feedback("已选 %s · %s · 在皿内点击执行" % [tool.get("name", "?"), tool.get("mode", "?")])
 
 func _on_substrate_changed(value: float, index: int) -> void:
 	if index < 0 or index >= _substrate.size():
@@ -289,12 +292,17 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 	if command_bus == null:
 		return false
 	command_bus.call("enqueue", command)
-	_set_feedback("%s → CommandBus 入队（下一 tick 生效） @ (%.1f, %.1f)" % [tool.get("name", "?"), world_position.x, world_position.y])
+	if str(tool.get("id", "")) == "SPAWN":
+		_set_feedback("细胞合成器 → 默认基因组落点 (%.1f, %.1f)；编辑页未接入" % [world_position.x, world_position.y])
+	else:
+		_set_feedback("%s → CommandBus 入队（下一 tick 生效） @ (%.1f, %.1f)" % [tool.get("name", "?"), world_position.x, world_position.y])
 	return true
 
 func apply_result(command_type: String, result: int) -> void:
 	## Main 在执行命令后回传结果，用于状态栏反馈。
 	if result >= 0:
 		_set_feedback("%s 执行成功 · code=%d" % [command_type, result])
+	elif command_type == "SPAWN":
+		_set_feedback("SPAWN 未执行 · code=%d · 请点在皿内；冻结档已自动 flush" % result)
 	else:
 		_set_feedback("%s 未执行 · code=%d" % [command_type, result])

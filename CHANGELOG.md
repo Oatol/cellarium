@@ -4,6 +4,26 @@
 
 ---
 
+## 0.6.1 — 2026-11-16
+
+**类型**：v0.6.0 UI 交互修复补丁
+**触发**：用户反馈「细胞合成器点击后放置不了、MicroscopePanel 重叠、偏振镜点不到」
+
+### 根因与修复
+
+- **合成器放置失败根因**：`main.tscn` 中 `UI/HUD` 的依赖路径覆盖写成了 `Simulation/CommandBus` / `Camera2D` 等从 HUD 出发的错误相对路径，实际解析为 `UI/HUD/Simulation/...`，导致 `GameHUD.command_bus`、`environment_manager`、`camera` 全部为 null，`world_action()` 直接返回 false；培养基滑块与镜头按钮同样无效。已改为 `../../Simulation/...` 与 `../../Camera2D`，与脚本默认值一致。**这才是点击工具后无法落点的真正原因，不是命令总线或 SPAWN 写入逻辑故障。**
+- **冻结档交互**：冻结/暂停时没有下一 tick，命令会一直留在队列里造成「点了没反应」。新增 `Main._flush_commands_if_paused()`，在暂停或 `speed_scale<=0` 时立即经 `CommandBus.execute_tick_commands()` 落盘，仍保持唯一写入口契约。
+- **MicroscopePanel 布局**：`LensTitle` / `LensRow` / `ViewRow` 原本同为 `MarginContainer` 直接子节点而互相重叠；新增 `Content` VBoxContainer 纵向排列，面板加宽到 580px（5 个镜头按钮 + 4 个视野按钮完整可见），底边上移到 `-40` 与 StatusBar 留出 12px 间隙，「偏振镜」不再被裁切/遮挡。
+- **反馈与状态澄清**：选中/落点细胞合成器时明确提示「默认基因组直接放置；细胞编辑页尚未接入」；SPAWN 失败提示补充皿内落点检查。`main.tscn` 同时移除全部 `ext_resource` 的 UID 声明，消除 3 条 invalid UID 警告。
+- **细胞编辑页**：确认尚未移植到 cellarium（旧 Genesis 有 `GenomeEditorPanel.gd`）。本补丁不假装已有；`INJECT_GENOME` 仍是唯一 stub。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=35 FAILURES=0 EXITCODE=0`——新增两项断言：①冻结档下 `HUD.world_action()` → `CommandBus` → 立即 flush 后细胞数 +1；②镜头面板 5/4 按钮完整、LensRow 不溢出面板、面板不与 StatusBar 重叠、最右侧按钮不被裁切。
+- 主场景 headless 900 帧：`EXITCODE=0`，无 UID/解析/运行警告。
+
+---
+
 ## 0.6.0 — 2026-11-16
 
 **类型**：阶段 6 倍速、LOD 与性能验证

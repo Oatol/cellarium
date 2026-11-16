@@ -120,6 +120,17 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 		game_hud.call("apply_result", str(command.get("type", "?")), result)
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
 
+## 冻结/暂停档没有下一 tick，用户干预必须立即经 CommandBus 落盘。
+## 仍然保持「唯一写入口」契约：不绕过 CommandBus，只是同步 flush 待执行批次。
+func _flush_commands_if_paused() -> void:
+	if command_bus == null:
+		return
+	var paused: bool = tick_core == null or not bool(tick_core.get("running")) or float(tick_core.get("speed_scale")) <= 0.0
+	if not paused:
+		return
+	var tick_index: int = int(tick_core.get("tick_index")) if tick_core != null else 0
+	command_bus.call("execute_tick_commands", tick_index)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event: InputEventKey = event as InputEventKey
@@ -155,4 +166,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		var mouse_button: InputEventMouseButton = event as InputEventMouseButton
 		if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
 			var world_position: Vector2 = get_global_mouse_position()
-			game_hud.call("world_action", world_position, Vector2.ZERO)
+			var accepted: bool = bool(game_hud.call("world_action", world_position, Vector2.ZERO))
+			if accepted:
+				_flush_commands_if_paused()

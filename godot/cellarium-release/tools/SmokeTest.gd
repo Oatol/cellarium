@@ -98,6 +98,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_tool_command_loop():
 		failures += 1
+	if not await _check_microscope_layout():
+		failures += 1
 	if not _check_predation():
 		failures += 1
 	if not _check_energy_ledger():
@@ -992,6 +994,22 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
+	# 冻结档点击：HUD → CommandBus → 立即 flush，合成器必须能落点。
+	var before_hud_spawn: int = int(cells.call("size"))
+	if not bool(hud.call("world_action", Vector2(250, 250), Vector2.ZERO)):
+		push_error("SmokeTest: HUD world_action rejected SPAWN")
+		instance.queue_free()
+		return false
+	if int(cells.call("size")) != before_hud_spawn:
+		push_error("SmokeTest: HUD SPAWN mutated state before flush")
+		instance.queue_free()
+		return false
+	instance.call("_flush_commands_if_paused")
+	if int(cells.call("size")) != before_hud_spawn + 1:
+		push_error("SmokeTest: frozen-mode HUD SPAWN did not place cell")
+		instance.queue_free()
+		return false
+
 	var hud_tools: int = hud.get("_tool_buttons").size()
 	var hud_modes: int = hud.get("_mode_buttons").size()
 	if hud_tools != 14 or hud_modes != 5:
@@ -1004,7 +1022,49 @@ func _check_tool_command_loop() -> bool:
 		return false
 
 	instance.queue_free()
-	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/SELECT + HUD 14 tools 5 modes")
+	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/SELECT + frozen click + HUD 14 tools 5 modes")
+	return true
+
+func _check_microscope_layout() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		push_error("SmokeTest: microscope layout scene missing")
+		return false
+	var instance: Node = scene.instantiate()
+	root.add_child(instance)
+	await process_frame
+	await process_frame
+	var panel: Control = instance.get_node_or_null("UI/HUD/MicroscopePanel") as Control
+	var lens: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/Panel/Content/LensRow") as HBoxContainer
+	var view: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/Panel/Content/ViewRow") as HBoxContainer
+	var status: Control = instance.get_node_or_null("UI/HUD/StatusBar") as Control
+	if panel == null or lens == null or view == null or status == null:
+		push_error("SmokeTest: microscope layout nodes missing")
+		instance.queue_free()
+		return false
+	if lens.get_child_count() != 5 or view.get_child_count() != 4:
+		push_error("SmokeTest: lens/view button count mismatch")
+		instance.queue_free()
+		return false
+	var panel_rect: Rect2 = panel.get_global_rect()
+	var lens_rect: Rect2 = lens.get_global_rect()
+	var status_rect: Rect2 = status.get_global_rect()
+	if lens_rect.end.x > panel_rect.end.x + 0.5:
+		push_error("SmokeTest: lens row overflows microscope panel")
+		instance.queue_free()
+		return false
+	if panel_rect.end.y > status_rect.position.y + 0.5:
+		push_error("SmokeTest: microscope panel overlaps status bar")
+		instance.queue_free()
+		return false
+	var last_button: Control = lens.get_child(lens.get_child_count() - 1) as Control
+	if last_button == null or last_button.get_global_rect().end.x > lens_rect.end.x + 0.5:
+		push_error("SmokeTest: rightmost lens button is clipped")
+		instance.queue_free()
+		return false
+	print("SmokeTest: OK microscope layout / lens buttons visible / status bar clear")
+	instance.queue_free()
+	await process_frame
 	return true
 
 func _check_predation() -> bool:
