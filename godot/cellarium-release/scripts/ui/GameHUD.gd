@@ -5,6 +5,7 @@ extends Control
 ## 用词对照 analysis/CellLab_界面与实验条件_词条证据.md。
 
 const CATALOG: RefCounted = preload("res://scripts/ui/ToolCatalog.gd")
+const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
@@ -58,8 +59,27 @@ func _ready() -> void:
 	_build_lenses()
 	_build_view_buttons()
 	_build_tint()
+	_register_semantic_ids()
 	_apply_mode(_selected_mode)
-	print("[GameHUD] ready tools=", _tools.size(), " modes=", _modes.size(), " substrate=", _substrate.size())
+	print("[GameHUD] ready tools=", _tools.size(), " modes=", _modes.size(), " substrate=", _substrate.size(), " semantic=", SEMANTIC.call("count"))
+
+## 把可交互控件注册到语义注册表（§3.6 / §6.9），供 Agent ui.click 无坐标访问。
+func _register_semantic_ids() -> void:
+	# 场景可能被测试/热重载反复实例化：先清掉本实例命名空间下的旧注册再重注册。
+	SEMANTIC.call("clear_prefix", "ui://sim/")
+	for i in range(_mode_buttons.size()):
+		_mode_buttons[i].set_meta("semantic_id", "ui://sim/mode/%d" % i)
+		SEMANTIC.call("register", "ui://sim/mode/%d" % i, _mode_buttons[i])
+	for tool in _tools:
+		var tool_id: String = str(tool.get("id", ""))
+		for button in _tool_buttons:
+			if int(button.get_meta("index", -1)) == _tools.find(tool):
+				button.set_meta("semantic_id", "ui://sim/tool/%s" % tool_id)
+				SEMANTIC.call("register", "ui://sim/tool/%s" % tool_id, button)
+				break
+	for i in range(_lens_buttons.size()):
+		_lens_buttons[i].set_meta("semantic_id", "ui://sim/lens/%d" % i)
+		SEMANTIC.call("register", "ui://sim/lens/%d" % i, _lens_buttons[i])
 
 func _make_button(text_value: String, tooltip_value: String) -> Button:
 	var button: Button = Button.new()

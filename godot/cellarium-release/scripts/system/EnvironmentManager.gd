@@ -62,6 +62,18 @@ func add_signal_source(position: Vector2, amount: float) -> bool:
 	var grid: Vector2i = field.call("get_grid_position", position)
 	return bool(field.call("add_source", 4, grid.x, grid.y, amount))
 
+## 地形编辑（阶段5）：世界坐标 → 格坐标 → 固体 mask 笔刷。
+func paint_terrain(position: Vector2, radius_cells: int, solid: bool) -> int:
+	var grid: Vector2i = field.call("get_grid_position", position)
+	return int(field.call("paint_terrain", grid.x, grid.y, radius_cells, solid))
+
+func set_temperature_at(position: Vector2, value: float) -> bool:
+	var grid: Vector2i = field.call("get_grid_position", position)
+	return bool(field.call("set_value", 1, grid.x, grid.y, value))
+
+func get_terrain_solid_count() -> int:
+	return int(field.call("get_terrain_solid_count"))
+
 func get_basal_autonomy() -> float:
 	if preset == null:
 		return 0.0

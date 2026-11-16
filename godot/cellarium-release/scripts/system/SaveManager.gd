@@ -74,6 +74,7 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 				"active_buffer": int(field.get("_active_buffer")),
 				"channels": field.call("get_state_snapshot"),
 				"dish_mask": _copy_array(field.get("dish_mask")),
+				"terrain_mask": _copy_array(field.get("terrain_mask")),
 				"pending_sources": field.get("_pending_sources"),
 			}
 
@@ -170,6 +171,9 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		field.set("advection", field_data.get("advection"))
 		field.set("active_buffer", int(field_data.get("active_buffer", 0)))
 		field.set("dish_mask", _copy_array(field_data.get("dish_mask")))
+		var restored_terrain: Variant = field_data.get("terrain_mask")
+		if restored_terrain != null:
+			field.set("terrain_mask", _copy_array(restored_terrain))
 		field.set("channels", restored_channels)
 		var restored_sources: Array[PackedFloat32Array] = []
 		for source in field_data.get("pending_sources", []):

@@ -4,6 +4,35 @@
 
 ---
 
+## 0.5.0 — 2026-11-16
+
+**类型**：阶段 5 沙盒工具与观测
+**触发**：阶段 4 发布后按用户指令「开始阶段 5」
+
+### 工程（godot/cellarium-release）
+
+- **语义 ID 注册表**：新增 `scripts/ui/SemanticRegistry.gd`（静态模块），支持 §3.6 五类命名空间 `ui://tool://cmd://org://sp://`；重复 ID 在开发构建下断言失败、发布构建只计数；WeakRef 避免悬空。GameHUD 的 14 工具/5 档位/5 镜头按钮在 `_ready` 注册（24 个 ID），并提供 `ui.click` → `act()`/`pressed` 无坐标派发。场景反复实例化时先 `clear_prefix` 再注册，避免误报重复。
+- **AgentBridge（17 接口）**：新增 `scripts/agent/AgentBridge.gd`，承接 v1.0 §10 全部 17 个上游接口 + 13 个 v2.0 扩展接口；默认关闭，需 `enable(token, mode)`，JSON Lines 请求/响应，`readonly`/`sandbox`/`full` 三档权限，逐条审计记录（issuer/tick/args/result）。写入类统一封装成 CommandBus 命令，与 UI 点击等价可重放；查询类返回只读快照。`Main.gd` 持有实例并支持启动参数式启用（默认关）。
+- **地形编辑真实化**：`EnvironmentField` 增加独立可编辑 `terrain_mask`（固体阻挡层），`_is_active()` 统一有效格判定，CPU 扩散/采样、GPU mask 上传同步生效；`paint_terrain()` 笔刷写入并清零固体格浓度。SELECT/ROTATE_SELECTION/TERRAIN_PAINT/TERRAIN_ERASE 从 stub 变为真实写入（选择集/质心旋转/场 mask），ToolCatalog 对应 kind 改为 world。地形 mask 纳入存档往返。
+- **书签与分支（T09）**：`AgentBridge` 的 `sim.save_bookmark`/`load_bookmark`/`save.fork` 走 SaveManager，分支快照写入 `parent_archive_id` 且不修改父包；父 ID 链可核验。
+- **开发者模式**：`Main.gd` F9 切换 dev_mode，白名单命令 `DEV_FORCE_MUTATE`/`DEV_FORCE_SPECIATE`/`DEV_SPAWN_BATCH`/`DEV_DUMP_WORLD` 经 CommandBus → OrganismManager 执行。
+- **生态分析面板**：空壳 `AnalysisPanel` 接入数据驱动脚本，R 键开合，显示种群折线/死因/事实；注册 `ui://report/panel` 供 Agent 自动化。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=32 FAILURES=0 EXITCODE=0`——新增语义注册表（重复守卫/命名空间/click 派发）、AgentBridge（17 接口数量/默认关闭/token 门禁/权限分级/JSON Lines/审计）、T07（干预前后 E_total 不变 + 账本自洽）、T09（父存档不可变/父 ID 链/分支独立推进）四项测试全过，原有 28 项保持通过。
+- 主场景 headless 900 帧：无报错、EXITCODE=0；`[GameHUD] ready tools=14 modes=5 substrate=8 semantic=24`。
+- 快照独立 headless 冒烟通过；移除 `main.tscn` 的 ext_resource UID 声明，消除快照无 .uid 历史文件的启动警告。
+- GPU/CPU 场 parity：地形 mask 改动在无地形时行为不变，headless 自动回退 CPU 通过；窗口 Vulkan 复验归入阶段 6。
+
+### 边界
+
+- 化学信号子系统仍按 v2.1 §0.5/§12.7 冻结，未实现。
+- `INJECT_GENOME` 仍为唯一 stub（基因组注射底层待接）。
+- 32× 倍速/T11、CPU 回退长跑/T12、性能基准等归入阶段 6。
+
+---
+
 ## 0.4.0 — 2026-11-16
 
 **类型**：阶段 4 完整进化引擎

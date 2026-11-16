@@ -16,10 +16,10 @@ static func tools() -> Array[Dictionary]:
 		{"id":"INJECT_SIGNAL","key":"8","name":"信号注射","en":"Signal injector","group":"macro","kind":"world","mode":"点击型","desc":"向信号通道注入化学信号 source。"},
 		{"id":"INJECT_SUBSTANCE","key":"9","name":"物质注射","en":"Substance injector","group":"macro","kind":"world","mode":"点击型","desc":"在落点注入营养物质，进入场 source。"},
 		{"id":"INJECT_COLOR","key":"0","name":"颜色注射","en":"Color injector","group":"macro","kind":"world","mode":"点击型","desc":"标记落点细胞的表现类型，用于观测分组。"},
-		{"id":"SELECT","key":"Q","name":"选择","en":"Select","group":"edit","kind":"stub","mode":"拖拽框选","desc":"框选细胞（命令已入队，选择集管理待接入）。"},
-		{"id":"ROTATE_SELECTION","key":"W","name":"旋转选区","en":"Rotate selection","group":"edit","kind":"stub","mode":"拖拽型","desc":"旋转选区（命令已入队，选择集管理待接入）。"},
-		{"id":"TERRAIN_PAINT","key":"E","name":"地形笔刷","en":"Terrain brush","group":"edit","kind":"stub","mode":"拖拽型","desc":"绘制地形（命令已入队，场 mask 编辑待接入）。"},
-		{"id":"TERRAIN_ERASE","key":"R","name":"地形橡皮","en":"Terrain eraser","group":"edit","kind":"stub","mode":"拖拽型","desc":"擦除地形（命令已入队，场 mask 编辑待接入）。"}
+		{"id":"SELECT","key":"Q","name":"选择","en":"Select","group":"edit","kind":"world","mode":"点击/框选","desc":"点选或框选细胞，写入选择集供选区工具使用。"},
+		{"id":"ROTATE_SELECTION","key":"W","name":"旋转选区","en":"Rotate selection","group":"edit","kind":"world","mode":"拖拽型","desc":"绕选区质心旋转已选细胞。"},
+		{"id":"TERRAIN_PAINT","key":"E","name":"地形笔刷","en":"Terrain brush","group":"edit","kind":"world","mode":"拖拽型","desc":"绘制固体地形，阻挡场扩散与细胞通行。"},
+		{"id":"TERRAIN_ERASE","key":"R","name":"地形橡皮","en":"Terrain eraser","group":"edit","kind":"world","mode":"拖拽型","desc":"擦除固体地形，恢复场扩散。"}
 	]
 
 static func groups() -> Array[Dictionary]:

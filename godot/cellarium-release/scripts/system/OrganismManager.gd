@@ -22,7 +22,7 @@ var genomes: Dictionary = {}
 var environment_manager: Node = null
 
 ## 工具命令诊断计数：仅统计外部干预注入，不进入确定性 hash（干预本身是外部输入）。
-var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "STUB": 0}
+var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
 var last_inspection: Dictionary = {}
 var _next_genome_id: int = 1
 var energy_ledger: RefCounted = ENERGY_LEDGER_SCRIPT.new() as RefCounted
@@ -30,8 +30,13 @@ var predation_diagnostics: Dictionary = {"events": 0, "energy_transferred": 0.0,
 var species_system: RefCounted = SPECIES_SCRIPT.new() as RefCounted
 var statistics: RefCounted = STATISTICS_SCRIPT.new() as RefCounted
 var reproduce_diagnostics: Dictionary = {"attempts": 0, "success": 0, "speciations": 0}
+## 选择集（阶段5）：当前框选/点选的存活细胞索引，SELECT/ROTATE_SELECTION 真实写入。
+var selection: Array[int] = []
+var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
 
 const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+## AgentBridge 写入命令与开发者命令（阶段5），均走 CommandBus → apply_command。
+const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
 var _sim_tick: int = 0
 
@@ -430,10 +435,185 @@ func _apply_tool_command(command: Dictionary) -> int:
 			cells.set("cell_type", types)
 			tool_diagnostics["INJECT_COLOR"] = int(tool_diagnostics["INJECT_COLOR"]) + 1
 			return index
-		"SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE":
-			tool_diagnostics["STUB"] = int(tool_diagnostics["STUB"]) + 1
-			return -2
+		"SELECT":
+			# 点选：半径内最近细胞；delta.x>0 表示框选半径由 delta.y 指定。
+			var radius: float = maxf(8.0, absf(delta.y))
+			var index: int = _nearest_alive_cell(position, radius)
+			var next_selection: Array[int] = []
+			if index >= 0:
+				next_selection.append(index)
+			selection = next_selection
+			tool_diagnostics["SELECT"] = int(tool_diagnostics["SELECT"]) + 1
+			return index
+		"ROTATE_SELECTION":
+			# 绕选区质心旋转各细胞位置（确定性，角度来自 delta.x）。
+			if selection.is_empty():
+				return -1
+			var center: Vector2 = Vector2.ZERO
+			var valid: Array[int] = []
+			var alive: PackedByteArray = cells.get("cell_alive")
+			for index in selection:
+				if index >= 0 and index < alive.size() and alive[index] != 0:
+					center += cells.call("get_position", index)
+					valid.append(index)
+			if valid.is_empty():
+				return -1
+			center /= float(valid.size())
+			var angle: float = deg_to_rad(delta.x)
+			for index in valid:
+				var offset: Vector2 = cells.call("get_position", index) - center
+				cells.call("set_position", index, center + offset.rotated(angle))
+			tool_diagnostics["ROTATE_SELECTION"] = int(tool_diagnostics["ROTATE_SELECTION"]) + 1
+			return valid.size()
+		"TERRAIN_PAINT", "TERRAIN_ERASE":
+			if environment_manager == null or not environment_manager.has_method("paint_terrain"):
+				return -1
+			var solid: bool = command_type == "TERRAIN_PAINT"
+			var radius_cells: int = maxi(0, int(delta.x)) if absf(delta.x) > 0.0 else 1
+			var changed: int = int(environment_manager.call("paint_terrain", position, radius_cells, solid))
+			tool_diagnostics[command_type] = int(tool_diagnostics.get(command_type, 0)) + 1
+			return changed
 	return -1
+
+## AgentBridge 写入命令与开发者白名单命令（阶段5），在下一 tick 由 CommandBus 调用。
+func _apply_agent_command(command: Dictionary) -> int:
+	var command_type: String = str(command.get("type", ""))
+	var args: Dictionary = command.get("args", {}) as Dictionary
+	if args == null:
+		args = {}
+	agent_diagnostics["commands"] = int(agent_diagnostics["commands"]) + 1
+	match command_type:
+		"SET_TEMP":
+			if environment_manager == null or not environment_manager.has_method("set_temperature_at"):
+				return -1
+			var position: Vector2 = command.get("position", Vector2.ZERO)
+			var value: float = float(command.get("value", args.get("value", 273.0)))
+			value = clampf(value, 260.0, 320.0)
+			return 0 if bool(environment_manager.call("set_temperature_at", position, value)) else -1
+		"AGENT_SPAWN":
+			var position: Vector2 = command.get("position", Vector2.ZERO)
+			var count: int = maxi(1, mini(int(command.get("count", args.get("count", 1))), 256))
+			var genome: RefCounted = _default_genome()
+			var last_id: int = -1
+			for i in range(count):
+				var offset: Vector2 = Vector2(float(i) * 4.0, 0.0)
+				last_id = register_zygote(_next_genome_id, 0, -1, genome, position + offset, 0.8, 0)
+				_next_genome_id += 1
+				energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_BIO_TO_BIO, "E_external", "E_bio", 0.8, "agent_spawn")
+			return last_id
+		"ERASE_AREA":
+			var position: Vector2 = command.get("position", Vector2.ZERO)
+			var radius: float = clampf(float(args.get("radius", 24.0)), 1.0, 256.0)
+			var removed: int = 0
+			var alive: PackedByteArray = cells.get("cell_alive")
+			var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+			var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+			for index in range(alive.size() - 1, -1, -1):
+				if alive[index] == 0:
+					continue
+				var dx: float = pos_x[index] - position.x
+				var dy: float = pos_y[index] - position.y
+				if dx * dx + dy * dy <= radius * radius:
+					_remove_cell_with_cause(index, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_INTERVENTION"]))
+					removed += 1
+			return removed
+		"AGENT_TOOL":
+			var tool_id: String = str(args.get("tool_id", ""))
+			if tool_id in TOOL_TYPES:
+				var forwarded: Dictionary = command.duplicate(true)
+				forwarded["type"] = tool_id
+				return _apply_tool_command(forwarded)
+			return -1
+		"GENE_SET_TRAIT":
+			return _set_gene_trait(args)
+		"GENE_SET_RESPIRATION":
+			return _set_gene_respiration(args)
+		"DEV_FORCE_MUTATE":
+			agent_diagnostics["dev_commands"] = int(agent_diagnostics["dev_commands"]) + 1
+			return _dev_force_mutate(args)
+		"DEV_FORCE_SPECIATE":
+			agent_diagnostics["dev_commands"] = int(agent_diagnostics["dev_commands"]) + 1
+			return _dev_force_speciate(args)
+		"DEV_SPAWN_BATCH":
+			agent_diagnostics["dev_commands"] = int(agent_diagnostics["dev_commands"]) + 1
+			var forward: Dictionary = command.duplicate(true)
+			forward["count"] = int(args.get("count", 10))
+			return _apply_agent_command({"type": "AGENT_SPAWN", "position": command.get("position", Vector2.ZERO), "args": args})
+		"DEV_DUMP_WORLD":
+			agent_diagnostics["dev_commands"] = int(agent_diagnostics["dev_commands"]) + 1
+			return int(get_state_hash())
+	return -1
+
+func _set_gene_trait(args: Dictionary) -> int:
+	var species_id: int = int(args.get("species_id", 0))
+	var trait_name: String = str(args.get("trait_name", ""))
+	var level: int = int(args.get("level", 0))
+	if level < 0 or level > 255:
+		return -1
+	var trait_index: int = _trait_name_to_index(trait_name)
+	if trait_index < 0:
+		return -1
+	var changed: int = 0
+	for org_id in genomes:
+		var genome: RefCounted = genomes[org_id] as RefCounted
+		if int(genome.get("species_id")) != species_id:
+			continue
+		var traits: PackedByteArray = genome.get("traits")
+		if trait_index >= traits.size():
+			continue
+		traits[trait_index] = level
+		genome.set("traits", traits)
+		changed += 1
+	return changed
+
+func _set_gene_respiration(args: Dictionary) -> int:
+	var species_id: int = int(args.get("species_id", 0))
+	var respiration_type: int = int(args.get("type", 1))
+	if respiration_type < 0 or respiration_type > 2:
+		return -1
+	var changed: int = 0
+	for org_id in genomes:
+		var genome: RefCounted = genomes[org_id] as RefCounted
+		if int(genome.get("species_id")) != species_id:
+			continue
+		genome.set("respiration", respiration_type)
+		changed += 1
+	return changed
+
+func _trait_name_to_index(trait_name: String) -> int:
+	match trait_name:
+		"speed", "速度": return 0
+		"sense", "感知": return 1
+		"shell", "外壳": return 2
+		"attack", "攻击": return 3
+		"reproduce", "繁殖": return 4
+		"metabolism", "代谢": return 5
+		"neural", "神经": return 6
+		"temperature", "耐温": return 7
+	return -1
+
+func _dev_force_mutate(args: Dictionary) -> int:
+	var org_id: int = int(args.get("org_id", -1))
+	if not genomes.has(org_id):
+		return -1
+	var genome: RefCounted = genomes[org_id] as RefCounted
+	var mutated: RefCounted = MUTATION_SCRIPT.call("mutate", genome, _next_genome_id, org_id, _sim_tick, 1.0)
+	_next_genome_id += 1
+	genomes[org_id] = mutated
+	return int(mutated.call("hash"))
+
+func _dev_force_speciate(args: Dictionary) -> int:
+	var species_id: int = int(args.get("species_id", 0))
+	var all_species: Dictionary = species_system.call("get_all_species") as Dictionary
+	var representative: RefCounted = (all_species.get(species_id, {}) as Dictionary).get("representative") as RefCounted
+	if representative == null:
+		return -1
+	var far: RefCounted = representative.duplicate_genome()
+	var traits: PackedByteArray = far.get("traits")
+	for i in range(traits.size()):
+		traits[i] = (int(traits[i]) + 100) % 256
+	far.set("traits", traits)
+	return int(species_system.call("classify", far, species_id, _sim_tick + speciation_cooldown + 1))
 
 func _execute_reproduce(command: Dictionary) -> int:
 	## 无性繁殖（v1.0 §5.4 REPRODUCE）：亲代能量达阈值 → 突变子基因组 → 物种判定 → 新受精卵。
@@ -487,6 +667,8 @@ func apply_command(command: Dictionary) -> int:
 		return _execute_reproduce(command)
 	if command_type in TOOL_TYPES:
 		return _apply_tool_command(command)
+	if command_type in AGENT_COMMAND_TYPES:
+		return _apply_agent_command(command)
 	var org_id: int = int(command.get("org_id", -1))
 	if not genomes.has(org_id):
 		return -1

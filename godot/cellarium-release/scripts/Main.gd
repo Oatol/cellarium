@@ -10,6 +10,10 @@ extends Node2D
 @export var game_hud_path: NodePath = ^"UI/HUD"
 @export var dish_view_path: NodePath = ^"DishView"
 @export var create_demo_organism: bool = true
+## AgentBridge 默认关闭（§7.2）；仅当 .tscn 开启 agent_bridge_enabled 时才启用。
+@export var agent_bridge_enabled: bool = false
+@export var agent_permission: String = "readonly"
+@export var agent_token: String = ""
 
 var tick_core: Node = null
 var command_bus: Node = null
@@ -19,6 +23,8 @@ var status_label: Label = null
 var game_hud: Node = null
 var dish_view: Node2D = null
 var executed_commands: int = 0
+var agent_bridge: RefCounted = null
+var dev_mode: bool = false
 
 func _ready() -> void:
 	tick_core = get_node_or_null(tick_core_path)
@@ -36,6 +42,7 @@ func _ready() -> void:
 		command_bus.connect("command_executed", on_cmd)
 	if organism_manager != null:
 		organism_manager.set("environment_manager", environment_manager)
+	_setup_agent_bridge()
 	if create_demo_organism and organism_manager != null and int(organism_manager.call("get_organism_count")) == 0:
 		var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
@@ -44,6 +51,35 @@ func _ready() -> void:
 		if org_id >= 0 and status_label != null:
 			status_label.text = "cellarium | tick 0 | demo organism"
 	print("[cellarium] boot ok basal_autonomy=", get_basal_autonomy())
+
+func _setup_agent_bridge() -> void:
+	## AgentBridge 默认关闭；显式启用时绑定依赖并设置权限/token（§7.2）。
+	var bridge_script: Script = load("res://scripts/agent/AgentBridge.gd") as Script
+	agent_bridge = bridge_script.new() as RefCounted
+	agent_bridge.call("configure", command_bus, organism_manager, environment_manager, tick_core)
+	if agent_bridge_enabled:
+		var token_value: String = agent_token if not agent_token.is_empty() else _generate_token()
+		var mode: String = agent_permission if agent_permission in ["readonly", "sandbox", "full"] else "readonly"
+		agent_bridge.call("enable", token_value, mode)
+		print("[cellarium] AgentBridge enabled mode=", mode, " token=", token_value)
+
+func _generate_token() -> String:
+	return "agent-%d-%d" % [Time.get_unix_time_from_system(), randi() % 100000]
+
+func get_agent_bridge() -> RefCounted:
+	return agent_bridge
+
+## 开发者模式开关（F9）：解锁 dev.* 命令入口，仅在当前进程生效。
+func toggle_dev_mode() -> bool:
+	dev_mode = not dev_mode
+	if agent_bridge != null and dev_mode:
+		agent_bridge.call("enable", str(agent_bridge.get("token")) if not str(agent_bridge.get("token")).is_empty() else "dev", "full")
+	_set_status("dev mode " + ("ON" if dev_mode else "OFF"))
+	return dev_mode
+
+func _set_status(text_value: String) -> void:
+	if status_label != null:
+		status_label.text = text_value
 
 func get_basal_autonomy() -> float:
 	if environment_manager == null:
@@ -72,6 +108,11 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		var key_event: InputEventKey = event as InputEventKey
+		if key_event.keycode == KEY_F9:
+			toggle_dev_mode()
+			return
 	if game_hud == null or not game_hud.has_method("world_action"):
 		return
 	if event is InputEventMouseButton:

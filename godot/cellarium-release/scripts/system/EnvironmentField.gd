@@ -69,6 +69,8 @@ var center: Vector2 = Vector2.ZERO
 var radius: float = 512.0
 var channels: Array[PackedFloat32Array] = []
 var dish_mask: PackedByteArray = PackedByteArray()
+## 可编辑地形固体层（阶段5）：1=固体阻挡，0=可通行。独立于圆形 dish_mask。
+var terrain_mask: PackedByteArray = PackedByteArray()
 var advection: Vector2 = Vector2.ZERO
 var _pending_sources: Array[PackedFloat32Array] = []
 var backend_name: String = "cpu"
@@ -95,15 +97,18 @@ func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, d
 	_force_cpu = not prefer_compute
 	channels.clear()
 	dish_mask.resize(resolution * resolution)
+	terrain_mask.resize(resolution * resolution)
 	for y in range(resolution):
 		for x in range(resolution):
 			var local_position: Vector2 = Vector2((float(x) + 0.5) / resolution * 2.0 - 1.0, (float(y) + 0.5) / resolution * 2.0 - 1.0)
-			dish_mask[y * resolution + x] = 1 if local_position.length_squared() <= 1.0 else 0
+			var index: int = y * resolution + x
+			dish_mask[index] = 1 if local_position.length_squared() <= 1.0 else 0
+			terrain_mask[index] = 0
 	for channel_index in range(CHANNEL_COUNT):
 		var values: PackedFloat32Array = PackedFloat32Array()
 		values.resize(resolution * resolution)
 		for index in range(values.size()):
-			values[index] = defaults[channel_index] if dish_mask[index] != 0 else 0.0
+			values[index] = defaults[channel_index] if _is_active(index) else 0.0
 		channels.append(values)
 	_pending_sources.clear()
 	for channel_index in range(CHANNEL_COUNT):
@@ -115,11 +120,61 @@ func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, d
 	_select_backend()
 	return true
 
+## 有效格：位于圆形皿内且未被地形固体阻挡。
+func _is_active(index: int) -> bool:
+	if index < 0 or index >= dish_mask.size():
+		return false
+	if dish_mask[index] == 0:
+		return false
+	if terrain_mask.size() == dish_mask.size() and terrain_mask[index] != 0:
+		return false
+	return true
+
+## 地形笔刷：以 grid 坐标为中心、radius 为格半径写入固体层。solid=true 绘制，false 擦除。
+## 返回实际变更的格数。写入后把被固体覆盖的格浓度清零，上传 GPU mask。
+func paint_terrain(grid_x: int, grid_y: int, radius: int, solid: bool) -> int:
+	var value: int = 1 if solid else 0
+	var changed: int = 0
+	for y in range(grid_y - radius, grid_y + radius + 1):
+		for x in range(grid_x - radius, grid_x + radius + 1):
+			if x < 0 or y < 0 or x >= resolution or y >= resolution:
+				continue
+			var dx: float = float(x - grid_x)
+			var dy: float = float(y - grid_y)
+			if dx * dx + dy * dy > float(radius * radius):
+				continue
+			var index: int = y * resolution + x
+			if dish_mask[index] == 0:
+				continue
+			if terrain_mask[index] == value:
+				continue
+			terrain_mask[index] = value
+			changed += 1
+			if solid:
+				for channel_index in range(CHANNEL_COUNT):
+					channels[channel_index][index] = 0.0
+	if changed > 0:
+		_upload_mask_buffer()
+		_upload_active_buffer()
+	return changed
+
+func get_terrain_solid_count() -> int:
+	var count: int = 0
+	for value in terrain_mask:
+		count += int(value)
+	return count
+
+func _upload_mask_buffer() -> bool:
+	if _rendering_device == null or not _mask_buffer.is_valid():
+		return false
+	var bytes: PackedByteArray = _pack_mask()
+	return _rendering_device.buffer_update(_mask_buffer, 0, bytes.size(), bytes) == OK
+
 func set_value(channel_index: int, x: int, y: int, value: float) -> bool:
 	if channel_index < 0 or channel_index >= CHANNEL_COUNT or x < 0 or y < 0 or x >= resolution or y >= resolution or not is_finite(value):
 		return false
 	var index: int = y * resolution + x
-	channels[channel_index][index] = value if dish_mask[index] != 0 else 0.0
+	channels[channel_index][index] = value if _is_active(index) else 0.0
 	return _upload_active_buffer()
 
 func set_advection(velocity_cells_per_tick: Vector2) -> bool:
@@ -135,7 +190,7 @@ func add_source(channel_index: int, x: int, y: int, amount: float) -> bool:
 	if channel_index < 0 or channel_index >= CHANNEL_COUNT or x < 0 or y < 0 or x >= resolution or y >= resolution or not is_finite(amount):
 		return false
 	var index: int = y * resolution + x
-	if dish_mask[index] == 0:
+	if not _is_active(index):
 		return false
 	_pending_sources[channel_index][index] += amount
 	return true
@@ -311,7 +366,7 @@ func _apply_cpu_diffusion(source_additions: Array[PackedFloat32Array] = []) -> v
 		for y in range(resolution):
 			for x in range(resolution):
 				var index: int = y * resolution + x
-				if dish_mask[index] == 0:
+				if not _is_active(index):
 					next_values[index] = 0.0
 					continue
 				var center_value: float = channels[channel_index][index]
@@ -322,7 +377,7 @@ func _apply_cpu_diffusion(source_additions: Array[PackedFloat32Array] = []) -> v
 					if nx < 0 or ny < 0 or nx >= resolution or ny >= resolution:
 						continue
 					var neighbor_index: int = ny * resolution + nx
-					if dish_mask[neighbor_index] != 0:
+					if _is_active(neighbor_index):
 						laplacian += channels[channel_index][neighbor_index] - center_value
 				var advected: float = _sample_grid(channel_index, Vector2(x, y) - advection)
 				var source_value: float = source[index] if source.size() == resolution * resolution else 0.0
@@ -343,7 +398,7 @@ func _sample_grid(channel_index: int, grid_position: Vector2) -> float:
 			var x: int = mini(base_x + offset_x, resolution - 1)
 			var y: int = mini(base_y + offset_y, resolution - 1)
 			var index: int = y * resolution + x
-			if dish_mask[index] == 0:
+			if not _is_active(index):
 				continue
 			var weight: float = (1.0 - fraction.x if offset_x == 0 else fraction.x) * (1.0 - fraction.y if offset_y == 0 else fraction.y)
 			weighted_sum += channels[channel_index][index] * weight
@@ -388,7 +443,8 @@ func _pack_mask() -> PackedByteArray:
 	var bytes: PackedByteArray = PackedByteArray()
 	bytes.resize(dish_mask.size() * 4)
 	for index in range(dish_mask.size()):
-		bytes.encode_u32(index * 4, int(dish_mask[index]))
+		var active: bool = _is_active(index)
+		bytes.encode_u32(index * 4, 1 if active else 0)
 	return bytes
 
 func _pack_parameters() -> PackedByteArray:

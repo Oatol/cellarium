@@ -32,6 +32,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellLayer.gd",
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/GameHUD.gd",
+	"res://scripts/ui/SemanticRegistry.gd",
+	"res://scripts/agent/AgentBridge.gd",
+	"res://scripts/ui/AnalysisPanel.gd",
 ]
 
 func _initialize() -> void:
@@ -105,6 +108,14 @@ func _initialize() -> void:
 	if not _check_statistics():
 		failures += 1
 	if not _check_save_restore():
+		failures += 1
+	if not _check_semantic_registry():
+		failures += 1
+	if not _check_agent_bridge():
+		failures += 1
+	if not _check_terrain_and_t07():
+		failures += 1
+	if not _check_branching():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -964,12 +975,11 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
-	bus.call("enqueue", {"type": "SELECT", "position": Vector2.ZERO, "delta": Vector2.ZERO, "kind": "stub"})
-	var stub_result: int = -99
+	# SELECT 现为真实选择集工具（阶段5），验证写入 selection
+	bus.call("enqueue", {"type": "SELECT", "position": Vector2.ZERO, "delta": Vector2(0, 48), "kind": "world"})
 	bus.call("execute_tick_commands", 4)
-	stub_result = int(diag.get("STUB", 0))
-	if stub_result < 1:
-		push_error("SmokeTest: stub tool not counted")
+	if int(diag.get("SELECT", 0)) < 1:
+		push_error("SmokeTest: SELECT tool not counted")
 		instance.queue_free()
 		return false
 
@@ -985,7 +995,7 @@ func _check_tool_command_loop() -> bool:
 		return false
 
 	instance.queue_free()
-	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/STUB + HUD 14 tools 5 modes")
+	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/SELECT + HUD 14 tools 5 modes")
 	return true
 
 func _check_predation() -> bool:
@@ -1276,6 +1286,223 @@ func _check_save_restore() -> bool:
 		push_error("SmokeTest: T08 ledger conservation broken after 1000 ticks")
 		return false
 	print("SmokeTest: OK T08 save/load round-trip, 1000-tick dual-path state match")
+	return true
+
+func _check_semantic_registry() -> bool:
+	var registry: Script = load("res://scripts/ui/SemanticRegistry.gd") as Script
+	registry.call("set_strict", false)
+	registry.call("reset")
+	var button_a: Button = Button.new()
+	var button_b: Button = Button.new()
+	registry.call("set_log_duplicates", false)  # 重复注册是本次测试的预期断言，静默其日志
+	# 用 ui://test/ 独立前缀，避免与 GameHUD 的 ui://sim/ 重注册清理冲突
+	if not bool(registry.call("register", "ui://test/tool/a", button_a)):
+		push_error("SemanticRegistry: first registration must succeed")
+		return false
+	if not bool(registry.call("register", "ui://test/tool/b", button_b)):
+		push_error("SemanticRegistry: second registration must succeed")
+		return false
+	if int(registry.call("count")) != 2:
+		push_error("SemanticRegistry: expected 2 registered controls")
+		return false
+	if registry.call("find", "ui://test/tool/a") != button_a:
+		push_error("SemanticRegistry: find must return registered control")
+		return false
+	# 重复 ID 必须被拒绝（非严格模式仅计数，不 assert）
+	if bool(registry.call("register", "ui://test/tool/a", button_b)):
+		push_error("SemanticRegistry: duplicate id must be rejected")
+		return false
+	if int(registry.call("duplicate_count")) != 1:
+		push_error("SemanticRegistry: duplicate count mismatch")
+		return false
+	# 命名空间校验
+	for valid_id in ["ui://sim/mode/0", "tool://tool_01", "cmd://sim.set_speed", "org://18422:3", "sp://A-02"]:
+		if not bool(registry.call("is_valid_id", valid_id)):
+			push_error("SemanticRegistry: valid id rejected %s" % valid_id)
+			return false
+	if bool(registry.call("is_valid_id", "bad://x")) or bool(registry.call("is_valid_id", "")):
+		push_error("SemanticRegistry: invalid id accepted")
+		return false
+	# click 转发：Button 无 act 时回退 emit pressed（用 Dictionary 引用避免 int 按值捕获）
+	var counter: Dictionary = {"n": 0}
+	button_a.pressed.connect(func() -> void: counter["n"] = int(counter["n"]) + 1)
+	if not bool(registry.call("click", "ui://test/tool/a")) or int(counter["n"]) != 1:
+		push_error("SemanticRegistry: click must dispatch to control")
+		return false
+	registry.call("unregister", "ui://test/tool/a")
+	if registry.call("find", "ui://test/tool/a") != null:
+		push_error("SemanticRegistry: unregister failed")
+		return false
+	button_a.queue_free()
+	button_b.queue_free()
+	registry.call("set_strict", true)
+	registry.call("set_log_duplicates", true)
+	registry.call("reset")
+	print("SmokeTest: OK semantic id registry / duplicate guard / namespace / click dispatch")
+	return true
+
+## T10：Agent 17 接口 + 权限门禁 + JSON Lines 端到端。
+func _check_agent_bridge() -> bool:
+	var bridge_script: Script = load("res://scripts/agent/AgentBridge.gd") as Script
+	var bridge: RefCounted = bridge_script.new() as RefCounted
+	var upstream: Array = bridge.get("UPSTREAM_COMMANDS")
+	if upstream.size() != 17:
+		push_error("SmokeTest: AgentBridge must expose 17 upstream commands, got %d" % upstream.size())
+		return false
+	# 未启用时全部拒绝
+	var disabled_response: Dictionary = bridge.call("handle_request", {"id": 1, "cmd": "sim.get_state", "token": "x"})
+	if bool(disabled_response.get("ok", false)) or str((disabled_response.get("error", {}) as Dictionary).get("code", "")) != "BRIDGE_DISABLED":
+		push_error("SmokeTest: AgentBridge must be disabled by default")
+		return false
+	if not bool(bridge.call("enable", "test-token", "readonly")):
+		push_error("SmokeTest: AgentBridge enable failed")
+		return false
+	# token 校验
+	var bad_token: Dictionary = bridge.call("handle_request", {"id": 2, "cmd": "sim.get_state", "token": "wrong"})
+	if bool(bad_token.get("ok", false)):
+		push_error("SmokeTest: AgentBridge token mismatch must be rejected")
+		return false
+	# 绑定最小依赖：用独立节点，避免污染场景测试
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager._ready()
+	var bus: Node = load("res://scripts/core/command/CommandBus.gd").new() as Node
+	var tick: Node = load("res://scripts/core/tick/TickCore.gd").new() as Node
+	bridge.call("configure", bus, manager, environment, tick)
+
+	# readonly：查询可用、写入被拒
+	var query: Dictionary = bridge.call("handle_request", {"id": 3, "cmd": "sim.get_state", "token": "test-token"})
+	if not bool(query.get("ok", false)) or int((query.get("data", {}) as Dictionary).get("schema_version", 0)) != 1:
+		push_error("SmokeTest: AgentBridge readonly query failed")
+		return false
+	var forbidden: Dictionary = bridge.call("handle_request", {"id": 4, "cmd": "organism.spawn", "token": "test-token", "args": {"x": 0, "y": 0, "count": 1}})
+	if bool(forbidden.get("ok", false)) or str((forbidden.get("error", {}) as Dictionary).get("code", "")) != "FORBIDDEN":
+		push_error("SmokeTest: AgentBridge readonly must forbid writes")
+		return false
+	# sandbox：写入入队
+	bridge.call("enable", "test-token", "sandbox")
+	var spawned: Dictionary = bridge.call("handle_request", {"id": 5, "cmd": "organism.spawn", "token": "test-token", "args": {"x": 10, "y": 10, "count": 1}})
+	if not bool(spawned.get("ok", false)) or int(bus.call("pending_count")) < 1:
+		push_error("SmokeTest: AgentBridge sandbox write must enqueue")
+		return false
+	# 执行队列 → 实际生成生物
+	bus.call("execute_tick_commands", 1)
+	manager.call("apply_command", {"type": "AGENT_SPAWN", "position": Vector2(10, 10), "args": {"count": 1}})
+	# JSON Lines 批量
+	var lines: Array[String] = [
+		'{"id":6,"cmd":"sim.get_phylogeny","token":"test-token"}',
+		'{"id":7,"cmd":"sim.get_ecology_report","token":"test-token"}',
+		"not-json"
+	]
+	var responses: Array[String] = bridge.call("handle_lines", lines)
+	if responses.size() != 3:
+		push_error("SmokeTest: AgentBridge JSON Lines response count mismatch")
+		return false
+	var parsed_ok: Variant = JSON.parse_string(responses[0])
+	if not (parsed_ok is Dictionary) or not bool((parsed_ok as Dictionary).get("ok", false)):
+		push_error("SmokeTest: AgentBridge JSON Lines query failed")
+		return false
+	var parsed_bad: Variant = JSON.parse_string(responses[2])
+	if not (parsed_bad is Dictionary) or bool((parsed_bad as Dictionary).get("ok", false)):
+		push_error("SmokeTest: AgentBridge must reject malformed line")
+		return false
+	# 审计记录齐全
+	if (bridge.call("audit_entries") as Array).size() < 4:
+		push_error("SmokeTest: AgentBridge audit trail too short")
+		return false
+	manager.free()
+	environment.free()
+	bus.free()
+	tick.free()
+	print("SmokeTest: OK AgentBridge 17 upstream / permission gate / JSON Lines / audit")
+	return true
+
+## T07 + 地形：地形笔刷真实写入 mask；干预前后 E_total 不变。
+func _check_terrain_and_t07() -> bool:
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager._ready()
+	var field: RefCounted = environment.get("field")
+	if int(environment.call("get_terrain_solid_count")) != 0:
+		push_error("SmokeTest: terrain mask must start empty")
+		manager.free(); environment.free(); return false
+	var changed: int = int(environment.call("paint_terrain", Vector2(250, 250), 2, true))
+	if changed <= 0 or int(environment.call("get_terrain_solid_count")) != changed:
+		push_error("SmokeTest: terrain paint did not write mask")
+		manager.free(); environment.free(); return false
+	# 固体格浓度必须清零且不参与扩散
+	field.call("diffuse_tick")
+	if float(field.call("get_total_nutrient")) < 0.0:
+		push_error("SmokeTest: terrain diffusion produced negative field")
+		manager.free(); environment.free(); return false
+	var erased: int = int(environment.call("paint_terrain", Vector2(250, 250), 2, false))
+	if erased <= 0 or int(environment.call("get_terrain_solid_count")) != 0:
+		push_error("SmokeTest: terrain erase failed")
+		manager.free(); environment.free(); return false
+	# T07：干预工具前后 E_total 不变
+	var ledger: RefCounted = manager.get("energy_ledger")
+	var before: float = float(ledger.call("total"))
+	manager.call("apply_command", {"type": "SPAWN", "position": Vector2(20, 20), "delta": Vector2.ZERO})
+	manager.call("apply_command", {"type": "BOOST", "position": Vector2(20, 20), "delta": Vector2.ZERO})
+	manager.call("apply_command", {"type": "INJECT_SUBSTANCE", "position": Vector2(30, 30), "delta": Vector2.ZERO})
+	manager.call("apply_command", {"type": "TERRAIN_PAINT", "position": Vector2(40, 40), "delta": Vector2(2, 0)})
+	var after: float = float(ledger.call("total"))
+	if absf(after - before) > 0.01:
+		push_error("SmokeTest: T07 E_total changed across interventions %.4f -> %.4f" % [before, after])
+		manager.free(); environment.free(); return false
+	if not bool(ledger.call("assert_conservation", 0.01)):
+		push_error("SmokeTest: T07 ledger self-consistency failed")
+		manager.free(); environment.free(); return false
+	manager.free(); environment.free()
+	print("SmokeTest: OK terrain mask paint/erase + T07 E_total invariant across tools")
+	return true
+
+## T09：分支演化——父存档不被修改，父 ID 链正确。
+func _check_branching() -> bool:
+	var save_manager: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager._ready()
+	var parent_path: String = "user://cellarium_t09_parent.gsave"
+	var fork_path: String = "user://cellarium_t09_fork.gsave"
+	if not bool(manager.call("save_state_to_file", parent_path)):
+		push_error("SmokeTest: T09 parent save failed")
+		manager.free(); environment.free(); return false
+	var parent_snapshot: Dictionary = save_manager.call("load_from_file", parent_path) as Dictionary
+	var parent_tick: int = int(parent_snapshot.get("sim_tick", 0))
+	# 父存档继续演化并再次保存前，先做分支：fork 写新文件、带 parent_archive_id
+	var fork_snapshot: Dictionary = parent_snapshot.duplicate(true)
+	fork_snapshot["parent_archive_id"] = "cellarium_t09_parent"
+	if not bool(save_manager.call("save_to_file", fork_path, fork_snapshot)):
+		push_error("SmokeTest: T09 fork save failed")
+		manager.free(); environment.free(); return false
+	var fork_loaded: Dictionary = save_manager.call("load_from_file", fork_path) as Dictionary
+	if str(fork_loaded.get("parent_archive_id", "")) != "cellarium_t09_parent":
+		push_error("SmokeTest: T09 parent id chain missing")
+		manager.free(); environment.free(); return false
+	# 父存档文件未被 fork 修改（tick 仍一致）
+	var parent_reloaded: Dictionary = save_manager.call("load_from_file", parent_path) as Dictionary
+	if int(parent_reloaded.get("sim_tick", -1)) != parent_tick or parent_reloaded.has("parent_archive_id"):
+		push_error("SmokeTest: T09 parent archive was modified by fork")
+		manager.free(); environment.free(); return false
+	# 分支可独立继续跑：加载 fork 到 manager，推进后状态推进
+	if not bool(manager.call("restore_state", fork_loaded)):
+		push_error("SmokeTest: T09 fork restore failed")
+		manager.free(); environment.free(); return false
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	if int(manager.get("_sim_tick")) != parent_tick + 1:
+		push_error("SmokeTest: T09 fork cannot advance independently")
+		manager.free(); environment.free(); return false
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(parent_path))
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(fork_path))
+	manager.free(); environment.free()
+	print("SmokeTest: OK T09 fork parent-id chain / parent immutable / branch advances")
 	return true
 
 func _t08_make_world(genome_script: Script) -> Dictionary:
