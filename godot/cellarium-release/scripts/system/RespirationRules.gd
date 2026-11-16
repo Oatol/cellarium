@@ -9,8 +9,10 @@ const ANAEROBIC_EFFICIENCY: float = 1.0
 const AEROBIC_EFFICIENCY: float = 3.0
 const HYPOXIC_AEROBIC_EFFICIENCY: float = 0.5
 const FACULTATIVE_BUDGET_COST: int = 2
+const FACULTATIVE_AEROBIC_EFFICIENCY: float = 2.0
+const ANAEROBIC_TOXICITY_DAMAGE_PER_SECOND: float = 0.1
 
-static func evaluate(respiration: int, oxygen_fraction: float, facultative_aerobic_efficiency: float = 2.0) -> Dictionary:
+static func evaluate(respiration: int, oxygen_fraction: float, facultative_aerobic_efficiency: float = FACULTATIVE_AEROBIC_EFFICIENCY) -> Dictionary:
 	if respiration < ANAEROBIC or respiration > FACULTATIVE or oxygen_fraction < 0.0 or oxygen_fraction > 1.0:
 		return {"valid": false, "efficiency": 0.0, "toxic": false, "budget_cost": 0}
 	if facultative_aerobic_efficiency <= ANAEROBIC_EFFICIENCY or facultative_aerobic_efficiency >= AEROBIC_EFFICIENCY:

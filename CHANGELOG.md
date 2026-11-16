@@ -4,6 +4,29 @@
 
 ---
 
+## 0.3.0 — 2026-11-16
+
+**类型**：阶段 3 收尾（捕食 + 能量守恒）/ 阶段 5 UI 骨架落地
+**触发**：用户确认 UI v5 布局后落地 Godot，并补齐阶段 3 最后两块缺口
+
+### 工程（godot/cellarium-release）
+
+- **UI 骨架（阶段 5 起点）**：新增 `scripts/ui/ToolCatalog.gd`（14 工具 / 5 档模式 / 8 培养基 / 5 镜头数据目录）与 `scripts/ui/GameHUD.gd`（数据驱动实例化 `Button`/`HSlider` 进 `.tscn` 声明的 `Control` 容器）。`main.tscn` 的 `UI/HUD` 下声明 `TopBar`/`ToolDock`/`SubstratePanel`/`MicroscopePanel`/`StatusBar`/`FeedbackLabel`。模式按钮接 `TickCore.set_speed`（冻结/观察/培养/慢速观察/过夜培养，**不缩放 dt**），镜头/视图仅改 `Camera2D`，培养基可写参数直接改 `EnvironmentManager` 导出值。
+- **交互闭环**：`Main.gd` 的 `_unhandled_input` 把皿内左键点击 → `CommandBus.enqueue()` → 下一 tick `apply_command` → 结果回传 HUD。`OrganismManager.apply_command` 扩展 `TOOL_TYPES`：SPAWN/REMOVE/DRAG/BOOST/INSPECT/ADHERE/INJECT_SIGNAL/INJECT_SUBSTANCE/INJECT_COLOR 真实写入；SELECT/ROTATE_SELECTION/TERRAIN_PAINT/TERRAIN_ERASE 返回 -2 记入 `tool_diagnostics.STUB`（底层待接入，不虚假承诺）。
+- **捕食闭环（阶段 3）**：新增 `scripts/system/Predation.gd`——消费神经攻击意图 `intent[2]`（阈值 0.35），空间哈希找邻近异种细胞捕食，转移率 0.8；按索引升序 + 邻居排序保证确定性，猎物榨干记 `DEATH_PREDATION`。
+- **能量守恒账本（阶段 3）**：新增 `scripts/system/EnergyLedger.gd` 追踪 `E_env/E_bio/E_detritus/E_external` 四池逐项借贷，`assert_conservation()` 校验 `初始+Σ流水净额==当前`。摄入（ENV→BIO）、捕食（BIO→BIO + 损耗→detritus）、死亡分解（经 `add_nutrient_source` 写回场）、工具干预（E_external→对应池）全部记账，工具前后 E_total 不变。参数可配置，不进确定性 hash。
+- **渲染批量化**：`CellariumView.gd` 去掉每帧 `_process→queue_redraw`，改由 `tick_advanced` 信号驱动（冻结档零重绘）；细胞按 `org_id` 分桶减少颜色切换，每细胞 2 实心圆替代 24 段弧。
+- `ChemicalSignalSystem` 空节点只加 `editor_description` 标注待立项，**未实现**（遵守 v2.1 §0.5/§12.7「上游 v1.0 §2.2 修订前不动」）。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=25 FAILURES=0 EXITCODE=0`——新增工具闭环、捕食单元、守恒账本、捕食端到端集成四项测试全过；原有 T04/T06、五场 parity 前置、同种子 hash、GNP1 等全部保持通过。
+- 主场景 headless 900 tick：无报错、EXITCODE=0；`[GameHUD] ready tools=14 modes=5 substrate=8`。
+- 快照独立 headless 冒烟通过（无 MCP 插件依赖）。
+- `preview/ui_skeleton_v5.html`：纯 UI 规格稿（PC 整体单视图），不在公开快照内（`.gitignore`）。
+
+---
+
 ## 0.2.0 — 2026-11-15
 
 **类型**：玩法决策落地 / Godot P1 数据层 / 可运行工程快照

@@ -1,13 +1,14 @@
 [gd_scene format=3 uid="uid://g8sma0dt8jgv"]
 
-[ext_resource type="Script" uid="uid://cqkiikhed30if" path="res://scripts/Main.gd" id="1_tbgi4"]
-[ext_resource type="Script" uid="uid://2n0a70x7f52s" path="res://scripts/core/tick/TickCore.gd" id="2_tefeu"]
-[ext_resource type="Script" uid="uid://u46s1pn85gl4" path="res://scripts/core/command/CommandBus.gd" id="3_o6xl0"]
-[ext_resource type="Script" uid="uid://b5wv86xpn12a2" path="res://scripts/system/EnvironmentManager.gd" id="4_tipki"]
-[ext_resource type="Script" uid="uid://dclhvddlnxfbs" path="res://scripts/system/OrganismManager.gd" id="5_85g3d"]
+[ext_resource type="Script" path="res://scripts/Main.gd" id="1_tbgi4"]
+[ext_resource type="Script" path="res://scripts/core/tick/TickCore.gd" id="2_tefeu"]
+[ext_resource type="Script" path="res://scripts/core/command/CommandBus.gd" id="3_o6xl0"]
+[ext_resource type="Script" path="res://scripts/system/EnvironmentManager.gd" id="4_tipki"]
+[ext_resource type="Script" path="res://scripts/system/OrganismManager.gd" id="5_85g3d"]
 [ext_resource type="Script" path="res://scripts/rendering/DishLayer.gd" id="6_dish"]
 [ext_resource type="Script" path="res://scripts/rendering/LinkLayer.gd" id="7_links"]
 [ext_resource type="Script" path="res://scripts/rendering/CellLayer.gd" id="8_cells"]
+[ext_resource type="Script" path="res://scripts/ui/GameHUD.gd" id="9_hud"]
 
 [node name="Main" type="Node2D" unique_id=201441505]
 script = ExtResource("1_tbgi4")
@@ -57,24 +58,144 @@ base_metabolic_cost = 0.001
 default_transfer_rate = 0.0
 
 [node name="ChemicalSignalSystem" type="Node" parent="Simulation" unique_id=468925911]
+editor_description = "PLACEHOLDER - 4-channel chemical signal subsystem not implemented. Per docs v2.1 §12.7 and 0.5: frozen until upstream v1.0 §2.2 (chemical signal field) is revised. Do not attach write logic here before spec freeze."
 
 [node name="UI" type="CanvasLayer" parent="." unique_id=554468281]
 
 [node name="HUD" type="Control" parent="UI" unique_id=2040799551]
 layout_mode = 3
-anchors_preset = 0
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
 mouse_filter = 2
+script = ExtResource("9_hud")
+command_bus_path = NodePath("Simulation/CommandBus")
+tick_core_path = NodePath("Simulation/TickCore")
+environment_path = NodePath("Simulation/EnvironmentManager")
+organism_manager_path = NodePath("Simulation/OrganismManager")
+camera_path = NodePath("Camera2D")
+mode_row_path = NodePath("TopBar/Panel/ModeRow")
+tool_groups_path = NodePath("ToolDock/Panel/ToolGroups")
+substrate_rows_path = NodePath("SubstratePanel/Panel/SubstrateRows")
+lens_row_path = NodePath("MicroscopePanel/Panel/LensRow")
+view_row_path = NodePath("MicroscopePanel/Panel/ViewRow")
+feedback_path = NodePath("FeedbackLabel")
+
+[node name="TopBar" type="PanelContainer" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 10
+anchor_w = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = 56.0
+
+[node name="Panel" type="MarginContainer" parent="UI/HUD/TopBar"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 6
+
+[node name="ModeRow" type="HBoxContainer" parent="UI/HUD/TopBar/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="ToolDock" type="PanelContainer" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = -472.0
+offset_right = 236.0
+offset_bottom = -8.0
+
+[node name="Panel" type="MarginContainer" parent="UI/HUD/ToolDock"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+
+[node name="ToolGroups" type="VBoxContainer" parent="UI/HUD/ToolDock/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 3
+
+[node name="SubstratePanel" type="PanelContainer" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 3
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -372.0
+offset_top = 64.0
+offset_right = -8.0
+offset_bottom = -8.0
+
+[node name="Panel" type="MarginContainer" parent="UI/HUD/SubstratePanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 8
+
+[node name="Title" type="Label" parent="UI/HUD/SubstratePanel/Panel"]
+layout_mode = 2
+text = "SUBSTRATE · 培养基（* 为仅 UI 占位）"
+
+[node name="SubstrateRows" type="VBoxContainer" parent="UI/HUD/SubstratePanel/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 2
+
+[node name="MicroscopePanel" type="PanelContainer" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 244.0
+offset_top = -152.0
+offset_right = 632.0
+offset_bottom = -8.0
+
+[node name="Panel" type="MarginContainer" parent="UI/HUD/MicroscopePanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 6
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 6
+
+[node name="LensTitle" type="Label" parent="UI/HUD/MicroscopePanel/Panel"]
+layout_mode = 2
+text = "MICROSCOPE · 镜头滤镜"
+
+[node name="LensRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="ViewRow" type="HBoxContainer" parent="UI/HUD/MicroscopePanel/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 4
 
 [node name="StatusBar" type="Label" parent="UI/HUD" unique_id=2660341]
-layout_mode = 0
-offset_left = 24.0
-offset_top = 16.0
-offset_right = 25.0
-offset_bottom = 39.0
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 12.0
+offset_top = -30.0
+offset_right = 900.0
+offset_bottom = -8.0
 text = "cellarium | tick 0 | ready"
 
-[node name="ToolPalette" type="HBoxContainer" parent="UI/HUD" unique_id=827162083]
-layout_mode = 0
+[node name="FeedbackLabel" type="Label" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 10
+anchor_w = 1.0
+offset_left = 12.0
+offset_top = 60.0
+offset_right = -388.0
+offset_bottom = 84.0
+text = "就绪 · 选择工具后在皿内点击"
 
 [node name="Minimap" type="PanelContainer" parent="UI" unique_id=543256719]
 

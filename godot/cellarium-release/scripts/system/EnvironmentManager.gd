@@ -4,12 +4,20 @@ extends Node
 
 const PRESET_SCRIPT: GDScript = preload("res://scripts/core/data/EnvironmentPreset.gd")
 const CONTEXT_SCRIPT: GDScript = preload("res://scripts/core/data/DevelopmentContext.gd")
+const FIELD_SCRIPT: GDScript = preload("res://scripts/system/EnvironmentField.gd")
+const FIELD_RESOLUTION: int = 32
 
 @export_range(0.0, 4.0, 0.01) var nutrient_density: float = 1.0
 @export_range(0, 64, 1) var max_dev_depth: int = 8
+@export var temperature: float = 273.0
+@export_range(0.0, 1.0, 0.01) var oxygen_fraction: float = 0.0
+@export var dish_center: Vector2 = Vector2(250, 250)
+@export var dish_radius: float = 240.0
 
 var preset: Resource = null
 var dev_context: RefCounted = null
+var field: RefCounted = FIELD_SCRIPT.new() as RefCounted
+var field_diagnostics: Dictionary = {}
 
 func _ready() -> void:
 	bind_preset()
@@ -17,10 +25,42 @@ func _ready() -> void:
 func bind_preset() -> void:
 	preset = PRESET_SCRIPT.new() as Resource
 	preset.set("nutrient_density", nutrient_density)
+	preset.set("temperature", temperature)
+	preset.set("oxygen_fraction", oxygen_fraction)
 	dev_context = CONTEXT_SCRIPT.new() as RefCounted
 	var snap: Variant = preset.call("to_snapshot")
 	var summary: Dictionary = Dictionary(snap)
 	dev_context.call("setup", summary, max_dev_depth)
+	var defaults: PackedFloat32Array = PackedFloat32Array([nutrient_density, float(summary.get("temperature", 273.0)), float(summary.get("oxygen_fraction", 0.0)), 0.0, 0.0])
+	field.call("configure", FIELD_RESOLUTION, dish_center, dish_radius, defaults)
+	field_diagnostics = field.call("get_backend_diagnostics")
+
+func advance_field_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
+	return bool(field.call("diffuse_tick", source_additions))
+
+func sample_fields(position: Vector2) -> PackedFloat32Array:
+	return field.call("sample", position)
+
+func get_field_diagnostics() -> Dictionary:
+	return field_diagnostics.duplicate()
+
+func consume_nutrient(position: Vector2, requested: float) -> float:
+	return float(field.call("consume", 0, position, requested))
+
+func consume_signal(position: Vector2, requested: float) -> float:
+	return float(field.call("consume", 4, position, requested))
+
+func add_nutrient_source(position: Vector2, amount: float) -> bool:
+	if amount <= 0.0:
+		return false
+	var grid: Vector2i = field.call("get_grid_position", position)
+	return bool(field.call("add_source", 0, grid.x, grid.y, amount))
+
+func add_signal_source(position: Vector2, amount: float) -> bool:
+	if amount <= 0.0:
+		return false
+	var grid: Vector2i = field.call("get_grid_position", position)
+	return bool(field.call("add_source", 4, grid.x, grid.y, amount))
 
 func get_basal_autonomy() -> float:
 	if preset == null:

@@ -7,6 +7,7 @@ extends Node2D
 @export var environment_path: NodePath = ^"Simulation/EnvironmentManager"
 @export var organism_manager_path: NodePath = ^"Simulation/OrganismManager"
 @export var status_label_path: NodePath = ^"UI/HUD/StatusBar"
+@export var game_hud_path: NodePath = ^"UI/HUD"
 @export var dish_view_path: NodePath = ^"DishView"
 @export var create_demo_organism: bool = true
 
@@ -15,6 +16,7 @@ var command_bus: Node = null
 var environment_manager: Node = null
 var organism_manager: Node = null
 var status_label: Label = null
+var game_hud: Node = null
 var dish_view: Node2D = null
 var executed_commands: int = 0
 
@@ -24,6 +26,7 @@ func _ready() -> void:
 	environment_manager = get_node_or_null(environment_path)
 	organism_manager = get_node_or_null(organism_manager_path)
 	status_label = get_node_or_null(status_label_path) as Label
+	game_hud = get_node_or_null(game_hud_path)
 	dish_view = get_node_or_null(dish_view_path) as Node2D
 	var on_tick: Callable = Callable(self, "_on_tick_advanced")
 	if tick_core != null and tick_core.has_signal("tick_advanced") and not tick_core.is_connected("tick_advanced", on_tick):
@@ -31,6 +34,8 @@ func _ready() -> void:
 	var on_cmd: Callable = Callable(self, "_on_command_executed")
 	if command_bus != null and command_bus.has_signal("command_executed") and not command_bus.is_connected("command_executed", on_cmd):
 		command_bus.connect("command_executed", on_cmd)
+	if organism_manager != null:
+		organism_manager.set("environment_manager", environment_manager)
 	if create_demo_organism and organism_manager != null and int(organism_manager.call("get_organism_count")) == 0:
 		var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
@@ -51,12 +56,26 @@ func _on_tick_advanced(tick_index: int) -> void:
 	if organism_manager != null:
 		organism_manager.call("advance_physics_tick", 1.0 / 60.0)
 		organism_manager.call("advance_development_tick")
+	if environment_manager != null:
+		environment_manager.call("advance_field_tick")
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
 
 func _on_command_executed(command: Dictionary, tick_index: int) -> void:
+	var result: int = -1
 	if organism_manager != null:
-		var result: int = int(organism_manager.call("apply_command", command))
+		result = int(organism_manager.call("apply_command", command))
 		if command.get("type", "") == "DIVIDE" and result < 0:
 			push_warning("[cellarium] DIVIDE rejected @tick %d" % tick_index)
-	print("[cellarium] cmd ", command.get("type", "?"), " @tick ", tick_index)
+	if game_hud != null and game_hud.has_method("apply_result"):
+		game_hud.call("apply_result", str(command.get("type", "?")), result)
+	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if game_hud == null or not game_hud.has_method("world_action"):
+		return
+	if event is InputEventMouseButton:
+		var mouse_button: InputEventMouseButton = event as InputEventMouseButton
+		if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
+			var world_position: Vector2 = get_global_mouse_position()
+			game_hud.call("world_action", world_position, Vector2.ZERO)

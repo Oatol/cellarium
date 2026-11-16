@@ -7,12 +7,19 @@ const STATE_MATURE: int = 2
 const STATE_DAMAGED: int = 3
 const STATE_DEAD: int = 4
 
+const DEATH_NONE: int = 0
+const DEATH_STARVATION: int = 1
+const DEATH_TOXICITY: int = 2
+const DEATH_PREDATION: int = 3
+const DEATH_INTERVENTION: int = 4
+
 var org_alive: PackedByteArray = PackedByteArray()
 var org_genome_id: PackedInt32Array = PackedInt32Array()
 var org_species_id: PackedInt32Array = PackedInt32Array()
 var org_parent_id: PackedInt32Array = PackedInt32Array()
 var org_age: PackedFloat32Array = PackedFloat32Array()
 var org_health: PackedFloat32Array = PackedFloat32Array()
+var org_death_cause: PackedByteArray = PackedByteArray()
 var org_state: PackedByteArray = PackedByteArray()
 var org_instruction_mask: PackedInt64Array = PackedInt64Array()
 var org_dev_cursor: PackedInt32Array = PackedInt32Array()
@@ -29,6 +36,7 @@ func create_organism(genome_id: int, species_id: int, parent_id: int, initial_st
 	org_parent_id.append(parent_id)
 	org_age.append(0.0)
 	org_health.append(1.0)
+	org_death_cause.append(DEATH_NONE)
 	org_state.append(initial_state)
 	org_instruction_mask.append(0)
 	org_dev_cursor.append(0)
@@ -53,13 +61,15 @@ func validate_cell_ranges(total_cells: int) -> bool:
 			return false
 	return true
 
-func remove_cell_from_organism(org_id: int) -> bool:
+func remove_cell_from_organism(org_id: int, death_cause: int = DEATH_NONE) -> bool:
 	if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or cell_count[org_id] <= 0:
 		return false
 	cell_count[org_id] -= 1
 	if cell_count[org_id] == 0:
 		org_alive[org_id] = 0
 		org_state[org_id] = STATE_DEAD
+		if death_cause != DEATH_NONE:
+			org_death_cause[org_id] = death_cause
 	return true
 
 func is_mature_single_cell(org_id: int, division_count: int) -> bool:

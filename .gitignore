@@ -23,6 +23,15 @@ godot/cellarium-release/install.cmd
 godot/cellarium-release/install.ps1
 godot/cellarium-release/SOURCE.txt
 
+# Historical Godot snapshots/backups kept locally; only godot/cellarium-release is the publish snapshot
+godot/backup_*/
+godot/backup_project_godot_*
+godot/cellarium/
+godot/cellarium-public/
+godot/cellarium-snapshot/
+# APK extraction scratch dirs (decompiled intermediates, never publish)
+analysis/cell_lab_apk_extract/tmp_*/
+
 # OS / editor noise
 Thumbs.db
 .DS_Store

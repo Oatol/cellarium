@@ -15,15 +15,19 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/core/command/CommandBus.gd",
 	"res://scripts/core/tick/TickCore.gd",
 	"res://scripts/system/EnvironmentManager.gd",
-	"res://scripts/system/OrganismManager.gd",
 	"res://scripts/system/CellPhysics.gd",
 	"res://scripts/system/CellMetabolism.gd",
 	"res://scripts/system/CellBehavior.gd",
 	"res://scripts/system/RespirationRules.gd",
+	"res://scripts/system/EnvironmentField.gd",
+	"res://scripts/system/Predation.gd",
+	"res://scripts/system/EnergyLedger.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
 	"res://scripts/rendering/CellLayer.gd",
+	"res://scripts/ui/ToolCatalog.gd",
+	"res://scripts/ui/GameHUD.gd",
 ]
 
 func _initialize() -> void:
@@ -73,6 +77,22 @@ func _initialize() -> void:
 	if not _check_cell_behavior():
 		failures += 1
 	if not _check_respiration_rules():
+		failures += 1
+	if not _check_environment_field():
+		failures += 1
+	if not _check_full_tick_determinism():
+		failures += 1
+	if not _check_phase_three_metabolism():
+		failures += 1
+	if not _check_signal_secretion():
+		failures += 1
+	if not await _check_tool_command_loop():
+		failures += 1
+	if not _check_predation():
+		failures += 1
+	if not _check_energy_ledger():
+		failures += 1
+	if not await _check_predation_integration():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -621,6 +641,179 @@ func _check_cell_behavior() -> bool:
 	print("SmokeTest: OK deterministic 8-4-6 cell behavior / bounded outputs / intent persistence / division inheritance")
 	return true
 
+func _check_signal_secretion() -> bool:
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment.nutrient_density = 0.0
+	environment.dish_center = Vector2.ZERO
+	environment.dish_radius = 100.0
+	environment._ready()
+	var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager.dish_center = Vector2.ZERO
+	manager.dish_radius = 100.0
+	manager.base_metabolic_cost = 0.0
+	var org_id: int = int(manager.call("register_zygote", int(genome.call("hash")), 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	manager.get("cells").get("behavior_intents")[org_id * 6 + 3] = 0.75
+	var before: Array[PackedFloat32Array] = environment.get("field").call("get_state_snapshot")
+	manager.call("_apply_signal_secretion", 1.0 / 60.0)
+	environment.call("advance_field_tick")
+	var after: Array[PackedFloat32Array] = environment.get("field").call("get_state_snapshot")
+	if after[4] == before[4] or after[0] != before[0]:
+		push_error("SmokeTest: secretion intent must inject signal only, not create nutrient energy")
+		manager.free()
+		environment.free()
+		return false
+	manager.free()
+	environment.free()
+	print("SmokeTest: OK behavior secretion routes only to chemical signal field")
+	return true
+
+func _check_phase_three_metabolism() -> bool:
+	var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	genome.set("respiration", 0)
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment.nutrient_density = 0.0
+	environment.oxygen_fraction = 0.10
+	environment.dish_center = Vector2.ZERO
+	environment.dish_radius = 100.0
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager.dish_center = Vector2.ZERO
+	manager.dish_radius = 100.0
+	manager.base_metabolic_cost = 0.0
+	manager.anaerobic_toxicity_damage_per_second = 1.0
+	var org_id: int = int(manager.call("register_zygote", int(genome.call("hash")), 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	var store: RefCounted = manager.get("organisms")
+	for tick in range(61):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	if int(store.get("org_alive")[org_id]) != 0 or int(store.get("org_death_cause")[org_id]) != int(store.get_script().get_script_constant_map()["DEATH_TOXICITY"]):
+		push_error("SmokeTest: T04 anaerobic cell did not die from oxygen toxicity at 10 percent")
+		manager.free()
+		environment.free()
+		return false
+	manager.free()
+	environment.free()
+	for respiration in range(3):
+		var rules: Script = load("res://scripts/system/RespirationRules.gd") as Script
+		var oxygenated: Dictionary = rules.call("evaluate", respiration, 0.21, 2.0)
+		var anoxic: Dictionary = rules.call("evaluate", respiration, 0.0, 2.0)
+		if not bool(oxygenated.get("valid", false)) or not bool(anoxic.get("valid", false)):
+			return false
+	if not is_equal_approx(float(load("res://scripts/system/RespirationRules.gd").call("evaluate", 0, 0.0).get("efficiency", -1.0)), 1.0):
+		return false
+	if not is_equal_approx(float(load("res://scripts/system/RespirationRules.gd").call("evaluate", 1, 0.21).get("efficiency", -1.0)), 3.0):
+		return false
+	var facultative: Dictionary = load("res://scripts/system/RespirationRules.gd").call("evaluate", 2, 0.21)
+	if not is_equal_approx(float(facultative.get("efficiency", -1.0)), 2.0) or int(facultative.get("budget_cost", 0)) != 2:
+		return false
+	print("SmokeTest: OK T04 oxygen toxicity death cause / T06 respiration efficiency and budget")
+	return true
+
+func _check_full_tick_determinism() -> bool:
+	var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	var first: Dictionary = _run_physics_replay(genome, 240)
+	var second: Dictionary = _run_physics_replay(genome, 240)
+	if first != second:
+		push_error("SmokeTest: same-seed complete physics ticks must produce identical state hashes")
+		return false
+	var manager_script: Script = load("res://scripts/system/OrganismManager.gd") as Script
+	var baseline: Node = manager_script.new() as Node
+	var baseline_org: int = int(baseline.call("register_zygote", int(genome.call("hash")), 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	var baseline_hash: int = int(baseline.call("get_state_hash"))
+	baseline.get("organisms").get("org_health")[baseline_org] = 0.9
+	if int(baseline.call("get_state_hash")) == baseline_hash:
+		push_error("SmokeTest: organism hash must include health")
+		baseline.free()
+		return false
+	baseline.get("organisms").get("org_health")[baseline_org] = 1.0
+	baseline.get("cells").get("behavior_intents")[2] = 0.5
+	if int(baseline.call("get_state_hash")) == baseline_hash:
+		push_error("SmokeTest: organism hash must include behavior intents")
+		baseline.free()
+		return false
+	baseline.free()
+	var field: RefCounted = load("res://scripts/system/EnvironmentField.gd").new() as RefCounted
+	field.call("configure", 8, Vector2.ZERO, 20.0, PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0]), false)
+	var field_hash: int = int(field.call("get_state_hash"))
+	field.call("set_value", 4, 4, 4, 0.25)
+	if int(field.call("get_state_hash")) == field_hash:
+		push_error("SmokeTest: environment hash must include every channel cell")
+		return false
+	print("SmokeTest: OK 240-tick state hashes / health, intent and environment coverage")
+	return true
+
+func _run_physics_replay(genome: RefCounted, tick_count: int) -> Dictionary:
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment.nutrient_density = 1.2
+	environment.oxygen_fraction = 0.21
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager.dish_center = Vector2.ZERO
+	manager.dish_radius = 1000.0
+	manager.call("register_zygote", int(genome.call("hash")), 0, -1, genome, Vector2.ZERO, 0.8, 0)
+	for tick in range(tick_count):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		environment.call("advance_field_tick")
+	var state: Dictionary = {
+		"organism_hash": int(manager.call("get_state_hash")),
+		"environment_hash": int(environment.get("field").call("get_state_hash")),
+	}
+	manager.free()
+	environment.free()
+	return state
+
+func _check_environment_field() -> bool:
+	var script: Script = load("res://scripts/system/EnvironmentField.gd") as Script
+	var field: RefCounted = script.new() as RefCounted
+	var defaults: PackedFloat32Array = PackedFloat32Array([2.0, 273.0, 0.21, 0.4, 0.0])
+	if not bool(field.call("configure", 8, Vector2.ZERO, 20.0, defaults, false)):
+		push_error("SmokeTest: CPU environment field configuration failed")
+		return false
+	var center_sample: PackedFloat32Array = field.call("sample", Vector2.ZERO)
+	if center_sample != defaults:
+		push_error("SmokeTest: environment field must return all five channel defaults")
+		return false
+	var outside_sample: PackedFloat32Array = field.call("sample", Vector2(21, 0))
+	if outside_sample != PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0]):
+		push_error("SmokeTest: environment field must return zero outside dish")
+		return false
+	var before: float = float(field.call("get_total_nutrient"))
+	var consumed: float = float(field.call("consume_nutrient", Vector2.ZERO, 0.75))
+	var after: float = float(field.call("get_total_nutrient"))
+	if not is_equal_approx(consumed, 0.75) or not is_equal_approx(before - after, consumed):
+		push_error("SmokeTest: nutrient withdrawal must conserve field nutrient accounting")
+		return false
+	var too_much: float = float(field.call("consume_nutrient", Vector2.ZERO, 100.0))
+	if too_much > 1.251 or float(field.call("consume_nutrient", Vector2(-21, 0), 1.0)) != 0.0:
+		push_error("SmokeTest: nutrient withdrawal must clamp to available resource and dish boundary")
+		return false
+	if field.call("get_backend_diagnostics").get("backend", "") != "cpu":
+		push_error("SmokeTest: explicit CPU backend selection was ignored")
+		return false
+	var mask_field: RefCounted = script.new() as RefCounted
+	mask_field.call("configure", 8, Vector2.ZERO, 20.0, PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0]), false)
+	if not bool(mask_field.call("add_source", 0, 3, 3, 0.25)) or bool(mask_field.call("add_source", 0, 0, 0, 1.0)):
+		push_error("SmokeTest: source additions must accept in-dish cells and reject masked cells")
+		return false
+	mask_field.call("set_value", 0, 3, 3, 1.0)
+	mask_field.call("set_value", 0, 3, 2, 0.5)
+	mask_field.call("diffuse_tick")
+	var masked_state: Array[PackedFloat32Array] = mask_field.call("get_state_snapshot")
+	if masked_state[0][0] != 0.0 or masked_state[0][27] < 0.9:
+		push_error("SmokeTest: circular mask or queued source injection failed")
+		return false
+	print("SmokeTest: OK five-channel CPU field / circular mask / source injection / nutrient accounting")
+	return true
+
 func _check_respiration_rules() -> bool:
 	var rules: Script = load("res://scripts/system/RespirationRules.gd") as Script
 	var anaerobic_at_limit: Dictionary = rules.call("evaluate", 0, 0.08)
@@ -696,4 +889,185 @@ func _check_genome_codec() -> bool:
 		push_error("SmokeTest: GNP1 trailing bytes were accepted")
 		return false
 	print("SmokeTest: OK GNP1 round-trip / CRC / version / length rejection bytes=", encoded.size())
+	return true
+
+func _check_tool_command_loop() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		push_error("SmokeTest: tool loop scene missing")
+		return false
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var hud: Node = instance.get_node("UI/HUD")
+	if manager == null or bus == null or hud == null:
+		push_error("SmokeTest: tool loop nodes missing")
+		instance.queue_free()
+		return false
+	var catalog_script: Script = load("res://scripts/ui/ToolCatalog.gd") as Script
+	var tools: Array = catalog_script.call("tools")
+	if tools.size() != 14:
+		push_error("SmokeTest: tool catalog != 14")
+		instance.queue_free()
+		return false
+	var cells: RefCounted = manager.get("cells")
+	var base_count: int = int(cells.call("size"))
+
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	if int(cells.call("size")) != base_count:
+		push_error("SmokeTest: SPAWN mutated state before tick")
+		instance.queue_free()
+		return false
+	bus.call("execute_tick_commands", 1)
+	if int(cells.call("size")) != base_count + 1:
+		push_error("SmokeTest: SPAWN did not create cell next tick")
+		instance.queue_free()
+		return false
+
+	var spawned_index: int = int(cells.call("size")) - 1
+	var energy_before: float = float(cells.get("cell_energy")[spawned_index])
+	bus.call("enqueue", {"type": "BOOST", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 2)
+	var energy_after: float = float(cells.get("cell_energy")[spawned_index])
+	if energy_after <= energy_before:
+		push_error("SmokeTest: BOOST did not add energy")
+		instance.queue_free()
+		return false
+
+	bus.call("enqueue", {"type": "INJECT_COLOR", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 3)
+	if int(cells.get("cell_type")[spawned_index]) == 0:
+		push_error("SmokeTest: INJECT_COLOR did not change type")
+		instance.queue_free()
+		return false
+
+	var diag: Dictionary = manager.get("tool_diagnostics")
+	if int(diag.get("SPAWN", 0)) < 1 or int(diag.get("BOOST", 0)) < 1 or int(diag.get("INJECT_COLOR", 0)) < 1:
+		push_error("SmokeTest: tool diagnostics not incremented")
+		instance.queue_free()
+		return false
+
+	bus.call("enqueue", {"type": "SELECT", "position": Vector2.ZERO, "delta": Vector2.ZERO, "kind": "stub"})
+	var stub_result: int = -99
+	bus.call("execute_tick_commands", 4)
+	stub_result = int(diag.get("STUB", 0))
+	if stub_result < 1:
+		push_error("SmokeTest: stub tool not counted")
+		instance.queue_free()
+		return false
+
+	var hud_tools: int = hud.get("_tool_buttons").size()
+	var hud_modes: int = hud.get("_mode_buttons").size()
+	if hud_tools != 14 or hud_modes != 5:
+		push_error("SmokeTest: HUD buttons tools=%d modes=%d" % [hud_tools, hud_modes])
+		instance.queue_free()
+		return false
+	if str(hud.call("selected_tool_id")) != "SPAWN":
+		push_error("SmokeTest: HUD default tool != SPAWN")
+		instance.queue_free()
+		return false
+
+	instance.queue_free()
+	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/STUB + HUD 14 tools 5 modes")
+	return true
+
+func _check_predation() -> bool:
+	var predation: Script = load("res://scripts/system/Predation.gd") as Script
+	var physics: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	var cells: RefCounted = load("res://scripts/core/data/CellArray.gd").new() as RefCounted
+	cells.call("append_cell", 0, Vector2(100, 100), 1.0, 0)
+	cells.call("append_cell", 1, Vector2(104, 100), 0.6, 0)
+	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	intents[0 * 6 + 2] = 1.0
+	intents[1 * 6 + 2] = -1.0
+	cells.set("behavior_intents", intents)
+	var events: Array = predation.call("resolve_predation", cells, physics, 0.8, 0.35, 14.0, 0.25)
+	if events.size() != 1:
+		push_error("SmokeTest: predation event count = %d" % events.size())
+		return false
+	var event: Dictionary = events[0]
+	if int(event.get("predator", -1)) != 0 or int(event.get("prey", -1)) != 1:
+		push_error("SmokeTest: predation predator/prey mismatch")
+		return false
+	var gain: float = float(event.get("gain", 0.0))
+	var loss: float = float(event.get("loss_to_detritus", 0.0))
+	if absf(gain - 0.2) > 0.0001 or absf(loss - 0.05) > 0.0001:
+		push_error("SmokeTest: predation energy split gain=%.4f loss=%.4f" % [gain, loss])
+		return false
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	if absf(float(energies[0]) - 1.2) > 0.0001 or absf(float(energies[1]) - 0.35) > 0.0001:
+		push_error("SmokeTest: predation energy transfer mismatch")
+		return false
+	var events_again: Array = predation.call("resolve_predation", cells, physics, 0.8, 0.35, 14.0, 0.25)
+	if events_again.size() != 1:
+		push_error("SmokeTest: predation not repeatable")
+		return false
+	print("SmokeTest: OK predation intent->transfer gain=0.2 loss=0.05 deterministic")
+	return true
+
+func _check_energy_ledger() -> bool:
+	var ledger_script: Script = load("res://scripts/system/EnergyLedger.gd") as Script
+	var ledger: RefCounted = ledger_script.new() as RefCounted
+	ledger.call("set_balance", "E_external", 10.0)
+	ledger.call("record", "TOOL_TO_ENV", "E_external", "E_env", 2.0, "t1")
+	ledger.call("record", "ENV_TO_BIO", "E_env", "E_bio", 1.5, "t2")
+	ledger.call("record", "BIO_TO_BIO", "E_bio", "E_bio", 0.4, "t3")
+	ledger.call("record", "BIO_TO_ENV", "E_bio", "E_detritus", 0.1, "t4")
+	if absf(float(ledger.call("total")) - 10.0) > 0.000001:
+		push_error("SmokeTest: ledger total drifted")
+		return false
+	if not bool(ledger.call("assert_conservation", 0.001)):
+		push_error("SmokeTest: ledger self-consistency failed")
+		return false
+	var snap: Dictionary = ledger.call("get_snapshot")
+	if int(snap.get("entries", 0)) != 4 or int(snap.get("violations", 0)) != 0:
+		push_error("SmokeTest: ledger snapshot mismatch")
+		return false
+	print("SmokeTest: OK energy ledger E_total invariant + self-consistency")
+	return true
+
+func _check_predation_integration() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		return false
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var cells: RefCounted = manager.get("cells")
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	var a: int = int(manager.call("register_zygote", 1, 0, -1, genome, Vector2(250, 250), 1.0, 0))
+	var b: int = int(manager.call("register_zygote", 2, 1, -1, genome, Vector2(254, 250), 0.6, 0))
+	if a < 0 or b < 0 or int(cells.call("size")) != 2:
+		push_error("SmokeTest: predation integration setup failed")
+		instance.queue_free()
+		return false
+	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	intents[a * 6 + 2] = 1.0
+	intents[b * 6 + 2] = -1.0
+	cells.set("behavior_intents", intents)
+	manager.call("_apply_predation", 1.0 / 60.0)
+	var pred: Dictionary = manager.call("get_predation_diagnostics")
+	if int(pred.get("events", 0)) < 1 or float(pred.get("energy_transferred", 0.0)) <= 0.0:
+		push_error("SmokeTest: integrated predation did not fire")
+		instance.queue_free()
+		return false
+	var ledger: Dictionary = manager.call("get_energy_ledger_snapshot")
+	if int(ledger.get("entries", 0)) < 1:
+		push_error("SmokeTest: integrated ledger has no entries")
+		instance.queue_free()
+		return false
+	instance.queue_free()
+	print("SmokeTest: OK integrated predation events=%d ledger_entries=%d" % [int(pred.get("events", 0)), int(ledger.get("entries", 0))])
 	return true

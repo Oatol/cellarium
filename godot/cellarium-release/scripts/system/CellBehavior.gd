@@ -48,8 +48,9 @@ static func collect_inputs(cells: RefCounted, cell_index: int, environment: Dict
 	var energies: PackedFloat32Array = cells.get("cell_energy")
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var types: PackedByteArray = cells.get("cell_type")
+	var fields_by_cell: Array = environment.get("fields_by_cell", [])
+	var field_values: Variant = fields_by_cell[cell_index] if cell_index < fields_by_cell.size() else environment.get("fields", [])
 	for channel in range(5):
-		var field_values: Array = environment.get("fields", [])
 		if channel < field_values.size():
 			inputs[channel] = clampf(float(field_values[channel]), -1.0, 1.0)
 	var same_count: int = 0
