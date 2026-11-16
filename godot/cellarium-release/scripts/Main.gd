@@ -25,6 +25,7 @@ var dish_view: Node2D = null
 var executed_commands: int = 0
 var agent_bridge: RefCounted = null
 var dev_mode: bool = false
+var _carry_notified: bool = false
 
 func _ready() -> void:
 	tick_core = get_node_or_null(tick_core_path)
@@ -40,8 +41,12 @@ func _ready() -> void:
 	var on_cmd: Callable = Callable(self, "_on_command_executed")
 	if command_bus != null and command_bus.has_signal("command_executed") and not command_bus.is_connected("command_executed", on_cmd):
 		command_bus.connect("command_executed", on_cmd)
+	var on_carry: Callable = Callable(self, "_on_carry_changed")
+	if tick_core != null and tick_core.has_signal("carry_changed") and not tick_core.is_connected("carry_changed", on_carry):
+		tick_core.connect("carry_changed", on_carry)
 	if organism_manager != null:
 		organism_manager.set("environment_manager", environment_manager)
+		organism_manager.set("tick_core", tick_core)
 	_setup_agent_bridge()
 	if create_demo_organism and organism_manager != null and int(organism_manager.call("get_organism_count")) == 0:
 		var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
@@ -97,6 +102,14 @@ func _on_tick_advanced(tick_index: int) -> void:
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
 
+func _on_carry_changed(carry_ticks: int, lagging: bool) -> void:
+	## 模拟时间落后提示（§2.6 / T11）：只在状态切换时刷新，避免每帧刷屏。
+	if lagging and not _carry_notified:
+		_set_status("模拟时间落后 · carry=%d · 倍速 %s×" % [carry_ticks, str(tick_core.get("speed_scale")) if tick_core != null else "?"])
+	elif not lagging and _carry_notified:
+		_set_status("模拟已追平 · carry=%d" % carry_ticks)
+	_carry_notified = lagging
+
 func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 	var result: int = -1
 	if organism_manager != null:
@@ -112,6 +125,29 @@ func _unhandled_input(event: InputEvent) -> void:
 		var key_event: InputEventKey = event as InputEventKey
 		if key_event.keycode == KEY_F9:
 			toggle_dev_mode()
+			return
+		if key_event.keycode == KEY_SPACE:
+			if tick_core != null:
+				tick_core.set("running", not bool(tick_core.get("running")))
+				_set_status("暂停" if not bool(tick_core.get("running")) else "继续")
+			return
+		# 倍速快捷键（§6.5）：1/2/3 = 1×/3×/8×，Shift+3=16×，Shift+4=32×
+		var speed_value: float = -1.0
+		if key_event.shift_pressed:
+			if key_event.keycode == KEY_3:
+				speed_value = 16.0
+			elif key_event.keycode == KEY_4:
+				speed_value = 32.0
+		else:
+			match key_event.keycode:
+				KEY_1: speed_value = 1.0
+				KEY_2: speed_value = 3.0
+				KEY_3: speed_value = 8.0
+		if speed_value >= 0.0 and tick_core != null:
+			tick_core.call("apply_speed", speed_value)
+			tick_core.set("running", true)
+			tick_core.call("clear_carry")
+			_set_status("倍速 → %s× · LOD %d" % [str(speed_value), int(tick_core.call("get_lod_level"))])
 			return
 	if game_hud == null or not game_hud.has_method("world_action"):
 		return

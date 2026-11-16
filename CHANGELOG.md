@@ -4,6 +4,36 @@
 
 ---
 
+## 0.6.0 — 2026-11-16
+
+**类型**：阶段 6 倍速、LOD 与性能验证
+**触发**：v0.5.0 发布后按用户指令「继续阶段 6」
+
+### 工程（godot/cellarium-release）
+
+- **T11 倍速与 LOD 阶梯**：`TickCore.gd` 新增 1×/3×/8×/16×/32× 档位表，单帧最多执行 12 tick，余量结转 `carry_ticks` 并通过 `carry_changed` 提示「模拟时间落后」；神经按 1/1/2/4/8 tick、环境场按 1/1/1/2/4 tick 降频，32× 限制渲染 30 FPS。**倍速只改 tick 频率，不缩放 dt**，固定 1/60 步与确定性基线不变。新增 `step_once()` 供逐帧调试。
+- **性能埋点**：新增 `scripts/system/PerfProbe.gd`，分 `behavior/physics/metabolism/predation/signal/field/commit` 七阶段以 `Time.get_ticks_usec()` 计时，环形缓冲 + `averages()` + CSV 导出；`OrganismManager.advance_physics_tick()` 全段接入。
+- **关键 O(n²) 修复**：`CellPhysics` 公开 `build_spatial_hash()` 并增加 `query_neighbors_cached()`；`OrganismManager._compute_behavior_outputs()` 从「每细胞重建哈希」改为「每 tick 构建一次、所有细胞复用」。300 生物平均 tick 从 99.9ms 降至 12.4ms，1000 生物从 884.5ms 降至 60.4ms。
+- **神经 LOD 降频**：非神经更新 tick 调 `CellBehavior.apply_cached_intents()`，复用上一轮 `behavior_intents` 推进运动，不重算 8-4-6 前馈；高倍速下行为意图与物理推进解耦但仍按固定 dt。
+- **批量渲染与后处理**：新增 `CellBatchRenderer.gd`（`MultiMeshInstance2D` + per-instance color + 稳定 stride LOD 抽样上限）接管 `CellBatch` 节点，原 `CellLayer` 保留作细粒度参考；新增 `PostprocessLayer.gd`（纯叠加式暗角/扫描线，16× 以上自动关闭）。后处理只影响呈现，不写模拟状态。
+- **主场景与 HUD**：`Main.gd` 接入 carry 提示、TickCore 注入、倍速快捷键（1/2/3 = 1×/3×/8×，Shift+3 = 16×，Shift+4 = 32×，空格暂停）；`main.tscn` 移除 ext_resource UID 声明，新增 `CellBatch`/`Postprocess` 节点。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=35 FAILURES=0 EXITCODE=0`——新增 T11 档位/carry/帧上限/落后提示/`step_once`/dt invariant、PerfProbe 分阶段计时与 CSV、MultiMesh 批量实例与 LOD 上限/后处理自动关闭三项测试全过，前 5 阶段测试保持通过。
+- 主场景 headless 900 帧：`EXITCODE=0`、无解析/运行错误；`[GameHUD] ready tools=14 modes=5 substrate=8 semantic=24`。
+- `BenchTest.gd`：300 生物 120 tick / 3369.8ms / avg 12417.6us，`cpu_budget_met=true`；1000 生物 120 tick / 10047.3ms / avg 60415.2us；3000 生物 50 tick / 15205.8ms / avg 270055.8us。单档 15 秒墙钟上限生效，结果 CSV 已导出，`FAILURES=0`。
+- `T12FallbackTest.gd`：`backend=cpu hash_a=1174237790 hash_b=1174237790 FAILURES=0`——强制 CPU 回退下连续 220 tick 与「110 tick → 存档 → 读档 → 110 tick」状态哈希一致；五通道场、地形 mask、存档恢复功能完整。
+- 快照独立 SmokeTest、headless 900 帧均与源工程一致；`scripts/scenes/tools` 逐文件 SHA256 比对 `MISMATCHES=0`。
+
+### 边界
+
+- **性能预算未全达标**：§8.1 的 8ms/14ms 目标仅在 300 生物 CPU 回退下达到；1000/3000 生物仍超预算，主要耗时在行为网络（36.9ms / 165.9ms）、物理（13.6ms / 62.3ms）与代谢（7.6ms / 31.4ms）。当前策略依赖高倍速 LOD 降频与 MultiMesh 降低实际运行压力；更深层的 GDScript→GPU Compute 迁移不在本版本完成。
+- 窗口 Vulkan GPU Compute parity 未在本轮重跑；headless 验证的是 CPU 回退与解析路径。
+- 化学信号子系统仍按 v2.1 §0.5/§12.7 冻结；`INJECT_GENOME` 仍是唯一 stub。
+
+---
+
 ## 0.5.0 — 2026-11-16
 
 **类型**：阶段 5 沙盒工具与观测

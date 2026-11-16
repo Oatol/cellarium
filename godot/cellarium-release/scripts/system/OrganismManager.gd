@@ -15,11 +15,13 @@ const SPECIES_SCRIPT: Script = preload("res://scripts/system/SpeciesSystem.gd")
 const STATISTICS_SCRIPT: Script = preload("res://scripts/system/StatisticsSystem.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const SAVE_MANAGER_SCRIPT: Script = preload("res://scripts/system/SaveManager.gd")
+const PERF_PROBE_SCRIPT: Script = preload("res://scripts/system/PerfProbe.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
 var genomes: Dictionary = {}
 var environment_manager: Node = null
+var tick_core: Node = null
 
 ## 工具命令诊断计数：仅统计外部干预注入，不进入确定性 hash（干预本身是外部输入）。
 var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
@@ -33,6 +35,7 @@ var reproduce_diagnostics: Dictionary = {"attempts": 0, "success": 0, "speciatio
 ## 选择集（阶段5）：当前框选/点选的存活细胞索引，SELECT/ROTATE_SELECTION 真实写入。
 var selection: Array[int] = []
 var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
+var perf_probe: RefCounted = PERF_PROBE_SCRIPT.new() as RefCounted
 
 const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
 ## AgentBridge 写入命令与开发者命令（阶段5），均走 CommandBus → apply_command。
@@ -68,20 +71,37 @@ func _ready() -> void:
 
 func advance_physics_tick(dt: float) -> void:
 	_sim_tick += 1
-	var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
-	CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt)
+	perf_probe.call("begin_tick")
+	# LOD 神经降频（§2.6）：高倍速下按 tick_core 间隔更新神经，中间 tick 复用上次 intents。
+	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
+	perf_probe.call("begin", "behavior")
+	if update_neural:
+		var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
+		CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt)
+	else:
+		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt)
+	perf_probe.call("end", "behavior")
+	perf_probe.call("begin", "physics")
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius)
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, dish_radius, boundary_normal_damping)
+	perf_probe.call("end", "physics")
+	perf_probe.call("begin", "metabolism")
 	var rates: PackedFloat32Array = PackedFloat32Array()
 	rates.resize(int(cells.call("size")))
 	rates.fill(default_transfer_rate)
 	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt)
 	_apply_base_metabolism(dt)
 	_apply_environment_metabolism(dt)
+	perf_probe.call("end", "metabolism")
+	perf_probe.call("begin", "predation")
 	_apply_predation(dt)
+	perf_probe.call("end", "predation")
+	perf_probe.call("begin", "signal")
 	_apply_signal_secretion(dt)
+	perf_probe.call("end", "signal")
 	statistics.call("advance_tick", _species_populations())
+	perf_probe.call("end_tick")
 
 func _species_populations() -> Dictionary:
 	var populations: Dictionary = {}
@@ -95,9 +115,11 @@ func _species_populations() -> Dictionary:
 	return populations
 
 func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
+	## 一次 tick 只建一次空间哈希，所有细胞复用（避免 O(n²) 重建）。
+	var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash", cells)
 	var neighbors: Dictionary = {}
 	for cell_index in range(int(cells.call("size"))):
-		neighbors[cell_index] = CELL_PHYSICS_SCRIPT.call("query_neighbors", cells, cell_index)
+		neighbors[cell_index] = CELL_PHYSICS_SCRIPT.call("query_neighbors_cached", cells, cell_index, buckets)
 	var field_values: Array = []
 	for cell_index in range(int(cells.call("size"))):
 		if int(cells.get("cell_alive")[cell_index]) == 0:
@@ -812,13 +834,25 @@ func restore_state(snapshot: Dictionary, tick_core: Node = null) -> bool:
 	return bool(SAVE_MANAGER_SCRIPT.call("restore", snapshot, self, environment_manager, tick_core))
 
 func save_state_to_file(path: String, tick_core: Node = null) -> bool:
-	return bool(SAVE_MANAGER_SCRIPT.call("save_to_file", path, capture_state(tick_core)))
+	var start_usec: int = Time.get_ticks_usec()
+	var result: bool = bool(SAVE_MANAGER_SCRIPT.call("save_to_file", path, capture_state(tick_core)))
+	perf_probe.call("record_save", float(Time.get_ticks_usec() - start_usec) / 1000.0)
+	return result
 
 func load_state_from_file(path: String, tick_core: Node = null) -> bool:
 	var snapshot: Dictionary = SAVE_MANAGER_SCRIPT.call("load_from_file", path) as Dictionary
 	if snapshot.is_empty():
 		return false
 	return restore_state(snapshot, tick_core)
+
+func get_perf_snapshot() -> Dictionary:
+	return perf_probe.call("get_metadata") as Dictionary
+
+func export_perf_csv() -> String:
+	return str(perf_probe.call("export_csv"))
+
+func get_perf_probe() -> RefCounted:
+	return perf_probe
 
 func get_organism_count() -> int:
 	var count: int = 0

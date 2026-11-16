@@ -92,6 +92,34 @@ static func step(cells: RefCounted, dt: float) -> void:
 	cells.set("cell_prev_y", prev_y)
 	_solve_links(cells, count)
 
+## 复用已构建的空间哈希查询邻居（避免每细胞重建哈希的 O(n²)）；buckets 由 build_spatial_hash 生成。
+static func query_neighbors_cached(cells: RefCounted, cell_index: int, buckets: Dictionary) -> Array[int]:
+	var neighbors: Array[int] = []
+	if cells == null or cell_index < 0:
+		return neighbors
+	var count: int = int(cells.call("size"))
+	if cell_index >= count:
+		return neighbors
+	var alive: PackedByteArray = cells.get("cell_alive")
+	if alive[cell_index] == 0 or buckets.is_empty():
+		return neighbors
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var cell_x: int = floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			var key: Vector2i = Vector2i(cell_x + offset_x, cell_y + offset_y)
+			if not buckets.has(key):
+				continue
+			for sub_bucket in buckets[key]:
+				for neighbor_value in sub_bucket:
+					var neighbor: int = int(neighbor_value)
+					if neighbor != cell_index:
+						neighbors.append(neighbor)
+	neighbors.sort()
+	return neighbors
+
 static func query_neighbors(cells: RefCounted, cell_index: int) -> Array[int]:
 	var neighbors: Array[int] = []
 	if cells == null:
@@ -104,7 +132,7 @@ static func query_neighbors(cells: RefCounted, cell_index: int) -> Array[int]:
 		return neighbors
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
-	var buckets: Dictionary = _build_spatial_hash(cells)
+	var buckets: Dictionary = build_spatial_hash(cells)
 	var cell_x: int = floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE)
 	var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
 	for offset_y in range(-1, 2):
@@ -127,7 +155,7 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 	var count: int = int(cells.call("size"))
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
-	var buckets: Dictionary = _build_spatial_hash(cells)
+	var buckets: Dictionary = build_spatial_hash(cells)
 	for a in range(count):
 		if alive[a] == 0:
 			continue
@@ -146,7 +174,7 @@ static func build_collision_pairs(cells: RefCounted) -> Array[Vector2i]:
 						pairs.append(Vector2i(a, b))
 	return pairs
 
-static func _build_spatial_hash(cells: RefCounted) -> Dictionary:
+static func build_spatial_hash(cells: RefCounted) -> Dictionary:
 	var buckets: Dictionary = {}
 	var count: int = int(cells.call("size"))
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")

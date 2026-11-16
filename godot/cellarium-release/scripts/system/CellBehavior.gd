@@ -113,6 +113,37 @@ static func apply_outputs(cells: RefCounted, outputs: Array[PackedFloat32Array],
 	cells.set("cell_prev_y", prev_y)
 	return true
 
+## LOD 中间 tick：复用已存的 behavior_intents 推进运动，不重算神经（§2.6）。
+## 输出与 apply_outputs 一致，只是跳过神经推理，保证降频档位下运动连续。
+static func apply_cached_intents(cells: RefCounted, dt: float, max_speed: float = 12.0) -> bool:
+	if dt < 0.0:
+		return false
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
+	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
+	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	var count: int = alive.size()
+	for cell_index in range(count):
+		if alive[cell_index] == 0:
+			continue
+		var start: int = cell_index * OUTPUT_COUNT
+		if start + 1 >= intents.size():
+			continue
+		var angle: float = intents[start + 1] * PI
+		var speed: float = intents[start] * max_speed * dt
+		var movement: Vector2 = Vector2.RIGHT.rotated(angle) * speed
+		prev_x[cell_index] = pos_x[cell_index]
+		prev_y[cell_index] = pos_y[cell_index]
+		pos_x[cell_index] += movement.x
+		pos_y[cell_index] += movement.y
+	cells.set("cell_pos_x", pos_x)
+	cells.set("cell_pos_y", pos_y)
+	cells.set("cell_prev_x", prev_x)
+	cells.set("cell_prev_y", prev_y)
+	return true
+
 static func snapshot_intents(cells: RefCounted) -> PackedFloat32Array:
 	return (cells.get("behavior_intents") as PackedFloat32Array).duplicate()
 

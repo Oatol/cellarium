@@ -26,10 +26,13 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/SpeciesSystem.gd",
 	"res://scripts/system/StatisticsSystem.gd",
 	"res://scripts/system/SaveManager.gd",
+	"res://scripts/system/PerfProbe.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
 	"res://scripts/rendering/CellLayer.gd",
+	"res://scripts/rendering/CellBatchRenderer.gd",
+	"res://scripts/rendering/PostprocessLayer.gd",
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
@@ -116,6 +119,12 @@ func _initialize() -> void:
 	if not _check_terrain_and_t07():
 		failures += 1
 	if not _check_branching():
+		failures += 1
+	if not _check_t11_timing():
+		failures += 1
+	if not _check_perf_probe():
+		failures += 1
+	if not await _check_batch_renderer():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1538,3 +1547,135 @@ func _t08_world_state(manager: Node, environment: Node) -> Dictionary:
 		"ledger_total": int(round(float(ledger.call("total")) * 1000000.0)),
 		"ledger_consistent": bool(ledger.call("assert_conservation", 0.01)),
 	}
+
+## T11：倍速档位 / carry 结转 / 单帧上限 / 单步 / 不缩放 dt。
+func _check_t11_timing() -> bool:
+	var tick: Node = load("res://scripts/core/tick/TickCore.gd").new() as Node
+	if not bool(tick.call("apply_speed", 32.0)):
+		push_error("SmokeTest: T11 32x speed step rejected")
+		tick.free(); return false
+	if int(tick.call("get_neural_interval")) != 8 or int(tick.call("get_field_interval")) != 4 or int(tick.call("get_lod_level")) != 3:
+		push_error("SmokeTest: T11 32x LOD intervals mismatch")
+		tick.free(); return false
+	if not bool(tick.call("apply_speed", 16.0)) or int(tick.call("get_field_interval")) != 2:
+		push_error("SmokeTest: T11 16x field interval mismatch")
+		tick.free(); return false
+	if not bool(tick.call("apply_speed", 3.0)) or int(tick.call("get_lod_level")) != 0:
+		push_error("SmokeTest: T11 3x should be full precision")
+		tick.free(); return false
+	# 单帧上限 12：模拟 32× delta=1/60 → 理论 32 tick，实跑 12，余量结转
+	tick.call("apply_speed", 32.0)
+	var observed: Array[int] = []
+	tick.connect("tick_advanced", func(tick_index: int) -> void: observed.append(tick_index))
+	tick.call("_process", 1.0 / 60.0)
+	if observed.size() != 12:
+		push_error("SmokeTest: T11 single frame must cap at 12 ticks, got %d" % observed.size())
+		tick.free(); return false
+	if int(tick.get("carry_ticks")) < 1:
+		push_error("SmokeTest: T11 overflow must carry")
+		tick.free(); return false
+	# 落后提示：carry > 12 时 is_lagging
+	if int(tick.get("carry_ticks")) <= 12 or not bool(tick.call("is_lagging")):
+		push_error("SmokeTest: T11 lagging hint missing at 32x")
+		tick.free(); return false
+	# 后续帧继续消化 carry，不雪崩：再跑 3 帧，每帧仍 ≤12
+	for i in range(3):
+		observed.clear()
+		tick.call("_process", 1.0 / 60.0)
+		if observed.size() > 12:
+			push_error("SmokeTest: T11 later frame exceeded cap")
+			tick.free(); return false
+	# step_once 绕过累加器
+	var before_step: int = int(tick.get("tick_index"))
+	observed.clear()
+	tick.call("step_once")
+	if int(tick.get("tick_index")) != before_step + 1 or observed.size() != 1:
+		push_error("SmokeTest: T11 step_once must advance exactly one tick")
+		tick.free(); return false
+	# 倍速不改 dt：TICK_DT 恒定
+	if not is_equal_approx(float(tick.get("TICK_DT")), 1.0 / 60.0):
+		push_error("SmokeTest: T11 dt must never scale with speed")
+		tick.free(); return false
+	# 存档元数据往返
+	var timing: Dictionary = tick.call("get_timing_snapshot")
+	if int(timing.get("lod_level", -1)) != 3 or int(timing.get("neural_interval", -1)) != 8:
+		push_error("SmokeTest: T11 timing snapshot missing LOD metadata")
+		tick.free(); return false
+	tick.call("restore_timing", timing)
+	if int(tick.call("get_neural_interval")) != 8:
+		push_error("SmokeTest: T11 timing restore failed")
+		tick.free(); return false
+	tick.free()
+	print("SmokeTest: OK T11 speed steps / carry / frame cap / lag hint / step_once / dt invariant")
+	return true
+
+func _check_perf_probe() -> bool:
+	var probe_script: Script = load("res://scripts/system/PerfProbe.gd") as Script
+	var probe: RefCounted = probe_script.new() as RefCounted
+	probe.call("configure", 8)
+	for tick in range(12):
+		probe.call("begin_tick")
+		probe.call("begin", "physics")
+		var spin: int = 0
+		for i in range(100):
+			spin += i
+		probe.call("end", "physics")
+		probe.call("end_tick")
+	if int(probe.call("sample_count")) != 8:
+		push_error("SmokeTest: PerfProbe ring buffer capacity mismatch")
+		return false
+	var averages: Dictionary = probe.call("averages") as Dictionary
+	if not averages.has("physics") or float(averages["physics"]) <= 0.0:
+		push_error("SmokeTest: PerfProbe physics stage not recorded")
+		return false
+	var csv: String = str(probe.call("export_csv"))
+	if not csv.begins_with("tick,behavior,physics") or csv.split("\n").size() < 9:
+		push_error("SmokeTest: PerfProbe CSV export malformed")
+		return false
+	probe.call("record_save", 12.5)
+	if int((probe.call("get_metadata") as Dictionary).get("save_ms", 0.0)) != 12:
+		push_error("SmokeTest: PerfProbe save timing mismatch")
+		return false
+	print("SmokeTest: OK PerfProbe ring buffer / stage timing / CSV export")
+	return true
+
+func _check_batch_renderer() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", true)
+	root.add_child(instance)
+	await process_frame
+	await process_frame
+	var batch: Node = instance.get_node_or_null("DishView/CellBatch")
+	var post: Node = instance.get_node_or_null("UI/Postprocess")
+	if batch == null or post == null:
+		push_error("SmokeTest: batch renderer / postprocess nodes missing")
+		instance.queue_free(); return false
+	var instance_count: int = int(batch.call("get_instance_count"))
+	if instance_count < 1:
+		push_error("SmokeTest: CellBatchRenderer produced no instances")
+		instance.queue_free(); return false
+	# LOD 抽样上限
+	batch.call("apply_lod", 3)
+	batch.call("_rebuild")
+	if int(batch.call("get_instance_count")) > 1000:
+		push_error("SmokeTest: LOD 3 must cap instances at 1000")
+		instance.queue_free(); return false
+	# 后处理默认启用，16× 以上自动关
+	if not bool(post.call("is_effectively_enabled")):
+		push_error("SmokeTest: postprocess should be enabled at 1x")
+		instance.queue_free(); return false
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.call("apply_speed", 16.0)
+	await process_frame
+	if not bool(post.call("is_auto_disabled")):
+		push_error("SmokeTest: postprocess must auto-disable at 16x")
+		instance.queue_free(); return false
+	# CellLayer 已禁用，避免与批量层重复绘制
+	var cell_layer: Node = instance.get_node("DishView/CellLayer")
+	if bool(cell_layer.get("visible")):
+		push_error("SmokeTest: legacy CellLayer must be hidden when batch renderer active")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK MultiMesh batch instances / LOD cap / postprocess auto-disable")
+	return true
