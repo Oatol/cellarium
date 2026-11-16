@@ -4,6 +4,7 @@ extends Node
 
 signal tick_advanced(tick_index: int)
 signal carry_changed(carry_ticks: int, lagging: bool)
+signal speed_changed(speed: float, lod: int)
 
 const TICK_RATE: float = 60.0
 const TICK_DT: float = 1.0 / 60.0
@@ -70,6 +71,7 @@ func apply_speed(scale_value: float) -> bool:
 	_field_interval = maxi(1, int(matched.get("field", 1)))
 	_render_fps = maxi(0, int(matched.get("render_fps", 0)))
 	_lod_level = int(matched.get("lod", 0))
+	speed_changed.emit(speed_scale, _lod_level)
 	return true
 
 func _match_step(scale_value: float) -> Dictionary:

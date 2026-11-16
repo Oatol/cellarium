@@ -62,6 +62,8 @@ func _rebuild() -> void:
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
+	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
 	var cell_type: PackedByteArray = cells.get("cell_type")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
 	var energies: PackedFloat32Array = cells.get("cell_energy")
@@ -85,7 +87,10 @@ func _rebuild() -> void:
 		var type_id: int = 0 if cell_type.size() <= cell_index else int(cell_type[cell_index])
 		var org_id: int = 0 if org_ids.size() <= cell_index else int(org_ids[cell_index])
 		var energy: float = 0.0 if energies.size() <= cell_index else float(energies[cell_index])
-		view.call("apply_cell", Vector2(pos_x[cell_index], pos_y[cell_index]), type_id, org_id, energy)
+		var velocity: Vector2 = Vector2.ZERO
+		if prev_x.size() > cell_index and prev_y.size() > cell_index:
+			velocity = Vector2(pos_x[cell_index] - prev_x[cell_index], pos_y[cell_index] - prev_y[cell_index])
+		view.call("apply_cell", Vector2(pos_x[cell_index], pos_y[cell_index]), type_id, org_id, energy, velocity)
 	for i in range(indices.size(), _pool.size()):
 		_pool[i].visible = false
 	_active_count = indices.size()

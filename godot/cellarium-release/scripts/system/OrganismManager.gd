@@ -14,6 +14,7 @@ const MUTATION_SCRIPT: Script = preload("res://scripts/system/Mutation.gd")
 const SPECIES_SCRIPT: Script = preload("res://scripts/system/SpeciesSystem.gd")
 const STATISTICS_SCRIPT: Script = preload("res://scripts/system/StatisticsSystem.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
+const GENOME_CODEC_SCRIPT: Script = preload("res://scripts/core/data/GenomeCodec.gd")
 const SAVE_MANAGER_SCRIPT: Script = preload("res://scripts/system/SaveManager.gd")
 const PERF_PROBE_SCRIPT: Script = preload("res://scripts/system/PerfProbe.gd")
 
@@ -24,7 +25,7 @@ var environment_manager: Node = null
 var tick_core: Node = null
 
 ## 工具命令诊断计数：仅统计外部干预注入，不进入确定性 hash（干预本身是外部输入）。
-var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
+var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_GENOME": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
 var last_inspection: Dictionary = {}
 var _next_genome_id: int = 1
 var energy_ledger: RefCounted = ENERGY_LEDGER_SCRIPT.new() as RefCounted
@@ -37,7 +38,7 @@ var selection: Array[int] = []
 var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
 var perf_probe: RefCounted = PERF_PROBE_SCRIPT.new() as RefCounted
 
-const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
 ## AgentBridge 写入命令与开发者命令（阶段5），均走 CommandBus → apply_command。
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
@@ -348,6 +349,19 @@ func _default_genome() -> RefCounted:
 	genome.call("set_development_program", [])
 	return genome
 
+## 细胞编辑草案通过 CommandBus 传入二进制 GNP1；解码失败则回退默认基因组。
+func _genome_from_command(command: Dictionary) -> RefCounted:
+	if not command.has("genome_bytes"):
+		return _default_genome()
+	var bytes: PackedByteArray = command.get("genome_bytes")
+	var decoded: RefCounted = GENOME_CODEC_SCRIPT.call("decode", bytes) as RefCounted
+	if decoded == null:
+		return _default_genome()
+	return decoded
+
+func _command_type_id(command: Dictionary) -> int:
+	return clampi(int(command.get("type_id", 0)), 0, 17)
+
 ## 所有外部干预落点都钳制在皿内，保留 cell_radius 余量让细胞完整落在皿中。
 func _clamp_to_dish(position: Vector2) -> Vector2:
 	var max_radius: float = maxf(1.0, dish_radius - maxf(cell_radius, 1.0))
@@ -362,8 +376,8 @@ func _apply_tool_command(command: Dictionary) -> int:
 	var delta: Vector2 = command.get("delta", Vector2.ZERO)
 	match command_type:
 		"SPAWN":
-			var genome: RefCounted = _default_genome()
-			var org_id: int = register_zygote(_next_genome_id, 0, -1, genome, position, 0.8, 0)
+			var genome: RefCounted = _genome_from_command(command)
+			var org_id: int = register_zygote(_next_genome_id, 0, -1, genome, position, 0.8, _command_type_id(command))
 			if org_id < 0:
 				return -1
 			_next_genome_id += 1
@@ -436,6 +450,36 @@ func _apply_tool_command(command: Dictionary) -> int:
 				return -1
 			tool_diagnostics["ADHERE"] = int(tool_diagnostics["ADHERE"]) + 1
 			return b
+		"INJECT_GENOME":
+			if not command.has("genome_bytes"):
+				return -1
+			var injected: RefCounted = GENOME_CODEC_SCRIPT.call("decode", command.get("genome_bytes")) as RefCounted
+			if injected == null or not bool(injected.call("is_valid")):
+				return -1
+			var cell_index: int = _nearest_alive_cell(position, 24.0)
+			if cell_index < 0:
+				return -1
+			var target_org: int = int(cells.get("cell_org_id")[cell_index])
+			if not genomes.has(target_org):
+				return -1
+			var previous: RefCounted = genomes[target_org] as RefCounted
+			injected.set("lineage_id", int(previous.get("lineage_id")))
+			var species_id: int = int(species_system.call("classify", injected, int(previous.get("species_id")), _sim_tick))
+			injected.set("species_id", species_id)
+			genomes[target_org] = injected
+			var species_ids: PackedInt32Array = organisms.get("org_species_id")
+			if target_org < species_ids.size():
+				species_ids[target_org] = species_id
+				organisms.set("org_species_id", species_ids)
+			var type_id: int = _command_type_id(command)
+			var cell_types: PackedByteArray = cells.get("cell_type")
+			var org_ids: PackedInt32Array = cells.get("cell_org_id")
+			for i in range(org_ids.size()):
+				if int(org_ids[i]) == target_org:
+					cell_types[i] = type_id
+			cells.set("cell_type", cell_types)
+			tool_diagnostics["INJECT_GENOME"] = int(tool_diagnostics["INJECT_GENOME"]) + 1
+			return target_org
 		"INJECT_SIGNAL":
 			if environment_manager == null or not environment_manager.has_method("add_signal_source"):
 				return -1

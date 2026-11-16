@@ -4,6 +4,51 @@
 
 ---
 
+## 0.8.0 — 2026-11-16
+
+**类型**：相机控制 + 倍速直输 + 弹性细胞 + 细胞编辑闭环
+**触发**：用户要求「滚轮缩放、右键拖动视野；倍速滑条与右侧直接输入；弹性细胞参考 Cell Lab；细胞编辑与合成器闭环」
+
+### 相机控制
+
+- 新增 `scripts/rendering/CameraController.gd` 并挂到 `Camera2D`：滚轮以光标为世界锚点缩放（0.6×～8×），右键按住拖动平移，视野中心限制在培养皿附近。
+- 屏幕→世界换算用显式相机公式，不依赖 `get_canvas_transform()` 的帧内刷新时机；`Main.screen_to_world()` 的点击落点逻辑保持不变。
+- 新增 `view_changed` 信号，后续 HUD 读数可直接订阅。
+
+### 倍速滑条与数值输入
+
+- `main.tscn` 顶栏右侧新增 `SpeedPanel`：HSlider + SpinBox 双向绑定 `TickCore.speed_scale`（0～32，步进 0.25），旁边显示当前 LOD 档。
+- `TickCore` 新增 `speed_changed(speed, lod)`；HUD 订阅后同步滑块/输入框，键盘 1/2/3 快捷键与档位按钮也反向同步 UI。
+- 仍严格遵守「倍速只改 tick 频率、不缩放 dt、单帧 12 tick 上限、carry 结转」的基线。
+
+### 弹性细胞
+
+- 新增 `scripts/rendering/CellMembrane.gd`：12 控制点 + Catmull-Rom 闭合曲线（72 点）+ 3 谐波呼吸 + 沿速度轴 `scale(1+s, 1-0.65s)`；签名由 org_id/type_id 派生，同输入同轮廓，不消耗全局 RNG。
+- `CellBase.tscn` 的 `Body` 从 Sprite2D 换成 `Polygon2D`（贴 Cell Lab guide-icons，UV 映射单位圆），新增 `Outline` Line2D 描边；`OrganelleRoot` / `SignalAnchor` 挂点保留，后续细胞器继续在场景里扩展。
+- `CellView.gd` 以 20fps 刷新膜轮廓，从 SoA 的 `cell_prev_*` 取速度做拉伸；`CellSceneRenderer` 传速度，仍然只读模拟状态、不进确定性 hash。>512 细胞仍回退 MultiMesh LOD。
+- 算法参考旧工程 `CellMorphology.gd` 与 v4 UI 规格，按 v2.1 约束重新实现，不复制 APK 源码。
+
+### 细胞编辑与合成器闭环
+
+- 新增 `CellEditorPanel`（8 组型 0–255 滑块 / 呼吸方式 / 18 种类型 / 装载按钮），草案为本地 GNP1 Genome，不直接写模拟状态。
+- 「装载到合成器」自动选中 SPAWN；落点时把 GNP1 二进制经 CommandBus 传入，`OrganismManager._genome_from_command()` 解码后用于 `register_zygote`，细胞类型同步生效。
+- `INJECT_GENOME` 从 stub 变为真实命令：解码草案 → 命中细胞所属个体 → 重写基因组与物种归类 → 同步该个体细胞类型。
+- `INJECT_GENOME` 加入 `TOOL_TYPES` 与诊断计数；`ToolCatalog` 中 SPAWN / INJECT_GENOME 描述同步更新。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=41 FAILURES=0 EXITCODE=0`。新增断言：弹性膜确定性与拉伸/呼吸、CellBase 弹性节点点数、滚轮锚点与右键拖拽、倍速滑条/输入双向同步、编辑草案→合成器→基因组落地、INJECT_GENOME 真化、HUD 新控件不重叠不出界。
+- 主场景 headless 90 帧：`EXITCODE=0`，无解析/运行错误。
+- 发布快照版本 `0.8.0`。
+
+### 边界
+
+- 细胞编辑目前覆盖 8 组型 / 呼吸 / 类型；40 modes / 54 settings / 18 细胞器的完整 Cell Lab 编辑器仍未做，发育指令程序编辑未开放。
+- 弹性膜是表现层派生数据，不改变 SoA 物理形状或碰撞半径。
+- 化学信号子系统仍冻结，等待上游 v1.0 §2.2 修订。
+
+---
+
 ## 0.7.0 — 2026-11-16
 
 **类型**：阶段 7 细胞可视化 + 三个交互 BUG 修复

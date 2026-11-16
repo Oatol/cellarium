@@ -36,7 +36,10 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellVisualCatalog.gd",
 	"res://scripts/rendering/CellView.gd",
 	"res://scripts/rendering/CellSceneRenderer.gd",
+	"res://scripts/rendering/CameraController.gd",
+	"res://scripts/rendering/CellMembrane.gd",
 	"res://scripts/ui/ToolCatalog.gd",
+	"res://scripts/ui/CellEditorPanel.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
@@ -138,6 +141,10 @@ func _initialize() -> void:
 	if not await _check_batch_renderer():
 		failures += 1
 	if not await _check_cell_scene_renderer():
+		failures += 1
+	if not _check_cell_membrane():
+		failures += 1
+	if not await _check_camera_speed_editor():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1826,9 +1833,13 @@ func _check_cell_scene_renderer() -> bool:
 		push_error("SmokeTest: MultiMesh layer must hide in scene-render range")
 		instance.queue_free(); return false
 	var first_view: Node2D = layer.get_child(0) as Node2D
-	var body: Sprite2D = first_view.get_node_or_null("Body") as Sprite2D
-	if first_view == null or body == null or body.texture == null:
-		push_error("SmokeTest: CellBase.tscn instance has no textured Body")
+	var body: Polygon2D = first_view.get_node_or_null("Body") as Polygon2D
+	var outline: Line2D = first_view.get_node_or_null("Outline") as Line2D
+	if first_view == null or body == null or body.texture == null or outline == null:
+		push_error("SmokeTest: CellBase.tscn instance has no textured elastic Body/Outline")
+		instance.queue_free(); return false
+	if body.polygon.size() < 64 or int(first_view.call("get_outline_point_count")) < 64:
+		push_error("SmokeTest: elastic membrane outline not generated")
 		instance.queue_free(); return false
 	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
 	var texture_path: String = str(catalog.call("texture_path", 0))
@@ -1843,5 +1854,182 @@ func _check_cell_scene_renderer() -> bool:
 		push_error("SmokeTest: CellSceneLayer did not refresh after SPAWN")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK reusable CellBase.tscn / Cell Lab texture / scene-render refresh")
+	print("SmokeTest: OK reusable CellBase.tscn / Cell Lab texture / elastic membrane / scene-render refresh")
+	return true
+
+func _x_span(points: PackedVector2Array) -> float:
+	if points.is_empty():
+		return 0.0
+	var minimum: float = points[0].x
+	var maximum: float = points[0].x
+	for point in points:
+		minimum = minf(minimum, point.x)
+		maximum = maxf(maximum, point.x)
+	return maximum - minimum
+
+func _check_cell_membrane() -> bool:
+	var script: Script = load("res://scripts/rendering/CellMembrane.gd") as Script
+	var first: RefCounted = script.new(12345) as RefCounted
+	var same: RefCounted = script.new(12345) as RefCounted
+	var other: RefCounted = script.new(54321) as RefCounted
+	var outline_a: PackedVector2Array = first.call("outline", 0.0, 0.0)
+	var outline_same: PackedVector2Array = same.call("outline", 0.0, 0.0)
+	var outline_other: PackedVector2Array = other.call("outline", 0.0, 0.0)
+	if outline_a.size() != 72 or outline_a != outline_same:
+		push_error("SmokeTest: elastic membrane must be deterministic per signature")
+		return false
+	if outline_other == outline_a:
+		push_error("SmokeTest: different cell signatures must differ in shape")
+		return false
+	var stretched: PackedVector2Array = first.call("outline", 0.0, 0.25)
+	if _x_span(stretched) <= _x_span(outline_a) * 1.05:
+		push_error("SmokeTest: elastic membrane must stretch along motion axis")
+		return false
+	if first.call("outline", 1.3, 0.0) == outline_a:
+		push_error("SmokeTest: elastic membrane must breathe over time")
+		return false
+	print("SmokeTest: OK elastic membrane 12-point Catmull-Rom / harmonics / stretch")
+	return true
+
+func _check_camera_speed_editor() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var camera: Camera2D = instance.get_node("Camera2D") as Camera2D
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	var hud: Node = instance.get_node("UI/HUD")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var editor: Control = instance.get_node("UI/HUD/CellEditorPanel") as Control
+	if camera == null or tick_core == null or hud == null or manager == null or bus == null or editor == null:
+		push_error("SmokeTest: camera/speed/editor nodes missing")
+		instance.queue_free(); return false
+
+	# 1920x1080 下新增控件不重叠、不出界。
+	var speed_panel: Control = instance.get_node("UI/HUD/SpeedPanel") as Control
+	var editor_button: Control = instance.get_node("UI/HUD/CellEditorButton") as Control
+	var feedback: Control = instance.get_node("UI/HUD/FeedbackLabel") as Control
+	var microscope: Control = instance.get_node("UI/HUD/MicroscopePanel") as Control
+	if speed_panel == null or editor_button == null or feedback == null or microscope == null:
+		push_error("SmokeTest: HUD new panels missing")
+		instance.queue_free(); return false
+	if speed_panel.get_global_rect().intersects(editor_button.get_global_rect()):
+		push_error("SmokeTest: speed panel overlaps cell editor button")
+		instance.queue_free(); return false
+	if editor.get_global_rect().intersects(feedback.get_global_rect()) or editor.get_global_rect().intersects(microscope.get_global_rect()):
+		push_error("SmokeTest: cell editor panel overlaps feedback or microscope")
+		instance.queue_free(); return false
+	var viewport_rect: Rect2 = instance.get_viewport().get_visible_rect()
+	if not viewport_rect.encloses(speed_panel.get_global_rect()) or not viewport_rect.encloses(editor_button.get_global_rect()):
+		push_error("SmokeTest: speed/editor controls outside viewport")
+		instance.queue_free(); return false
+
+	# 滚轮缩放：光标世界锚点不动；右键拖动改变视野。
+	camera.call("reset_view")
+	var anchor: Vector2 = Vector2(700, 320)
+	var before: Vector2 = camera.call("screen_to_world", anchor)
+	camera.call("zoom_at", anchor, 1.12)
+	var after: Vector2 = camera.call("screen_to_world", anchor)
+	if camera.zoom.x <= 2.0 or before.distance_to(after) > 0.05:
+		push_error("SmokeTest: wheel zoom must keep cursor world anchor stable")
+		instance.queue_free(); return false
+	var camera_position: Vector2 = camera.position
+	camera.call("pan_screen", Vector2(40.0, 0.0))
+	if camera.position.distance_to(camera_position) < 1.0:
+		push_error("SmokeTest: right-drag pan did not move camera")
+		instance.queue_free(); return false
+	var right_press: InputEventMouseButton = InputEventMouseButton.new()
+	right_press.button_index = MOUSE_BUTTON_RIGHT
+	right_press.pressed = true
+	right_press.position = Vector2(400, 300)
+	camera.call("_unhandled_input", right_press)
+	if not bool(camera.get("dragging")):
+		push_error("SmokeTest: right mouse button did not start camera drag")
+		instance.queue_free(); return false
+	var right_release: InputEventMouseButton = InputEventMouseButton.new()
+	right_release.button_index = MOUSE_BUTTON_RIGHT
+	right_release.pressed = false
+	camera.call("_unhandled_input", right_release)
+	if bool(camera.get("dragging")):
+		push_error("SmokeTest: right mouse button did not end camera drag")
+		instance.queue_free(); return false
+
+	# 倍速滑块 / 右侧输入双向同步。
+	var slider: HSlider = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/SpeedSlider") as HSlider
+	var spin: SpinBox = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/SpeedSpin") as SpinBox
+	if slider == null or spin == null:
+		push_error("SmokeTest: speed slider/spin missing")
+		instance.queue_free(); return false
+	slider.value = 8.0
+	await process_frame
+	if not is_equal_approx(float(tick_core.get("speed_scale")), 8.0) or not is_equal_approx(float(spin.value), 8.0):
+		push_error("SmokeTest: speed slider did not drive TickCore + numeric input")
+		instance.queue_free(); return false
+	spin.value = 3.0
+	await process_frame
+	if not is_equal_approx(float(tick_core.get("speed_scale")), 3.0) or not is_equal_approx(float(slider.value), 3.0):
+		push_error("SmokeTest: numeric speed input did not drive TickCore + slider")
+		instance.queue_free(); return false
+
+	# 编辑草案 → 合成器 → CommandBus → 落地基因组与类型。
+	tick_core.set("running", false)
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var draft: RefCounted = genome_script.new() as RefCounted
+	var traits: PackedByteArray = PackedByteArray([9, 4, 7, 2, 1, 6, 3, 5])
+	draft.set("traits", traits)
+	draft.set("respiration", 1)
+	draft.set("loci", PackedByteArray())
+	draft.call("set_development_program", [])
+	if not bool(hud.call("set_draft", draft, 6)):
+		push_error("SmokeTest: HUD rejected edited genome draft")
+		instance.queue_free(); return false
+	if not bool(hud.call("has_draft")):
+		push_error("SmokeTest: HUD did not hold edited genome draft")
+		instance.queue_free(); return false
+	if not bool(hud.call("world_action", Vector2(250, 250), Vector2.ZERO)):
+		push_error("SmokeTest: synthesizer rejected draft placement")
+		instance.queue_free(); return false
+	instance.call("_flush_commands_if_paused")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var last_index: int = int(cells.call("size")) - 1
+	if last_index < 0:
+		push_error("SmokeTest: custom genome SPAWN created no cell")
+		instance.queue_free(); return false
+	var org_id: int = int(cells.get("cell_org_id")[last_index])
+	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	if stored == null or PackedByteArray(stored.get("traits")) != traits:
+		push_error("SmokeTest: synthesizer did not use edited genome")
+		instance.queue_free(); return false
+	if int(cells.get("cell_type")[last_index]) != 6:
+		push_error("SmokeTest: synthesizer did not use edited cell type")
+		instance.queue_free(); return false
+
+	# 基因组注射：把另一份草案写入该个体。
+	var injected: RefCounted = genome_script.new() as RefCounted
+	injected.set("traits", PackedByteArray([8, 8, 8, 8, 8, 8, 8, 8]))
+	injected.set("respiration", 1)
+	injected.set("loci", PackedByteArray())
+	injected.call("set_development_program", [])
+	var codec: RefCounted = load("res://scripts/core/data/GenomeCodec.gd") as RefCounted
+	bus.call("enqueue", {
+		"type": "INJECT_GENOME",
+		"position": Vector2(250, 250),
+		"delta": Vector2.ZERO,
+		"kind": "world",
+		"genome_bytes": codec.call("encode", injected),
+		"type_id": 3
+	})
+	bus.call("execute_tick_commands", 99)
+	var rewritten: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	if rewritten == null or int(rewritten.get("traits")[0]) != 8 or int(cells.get("cell_type")[last_index]) != 3:
+		push_error("SmokeTest: INJECT_GENOME did not rewrite target organism")
+		instance.queue_free(); return false
+	if int((manager.get("tool_diagnostics") as Dictionary).get("INJECT_GENOME", 0)) < 1:
+		push_error("SmokeTest: INJECT_GENOME diagnostic not incremented")
+		instance.queue_free(); return false
+
+	instance.queue_free()
+	print("SmokeTest: OK camera wheel/pan / speed slider+input / editor-synthesizer-genome-inject loop")
 	return true

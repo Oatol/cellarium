@@ -6,13 +6,13 @@ extends RefCounted
 
 static func tools() -> Array[Dictionary]:
 	return [
-		{"id":"SPAWN","key":"1","name":"细胞合成器","en":"Cell synthesizer","group":"celllab","kind":"world","mode":"点击型","desc":"在培养皿落点投放一枚细胞，沿用默认基因组。"},
+		{"id":"SPAWN","key":"1","name":"细胞合成器","en":"Cell synthesizer","group":"celllab","kind":"world","mode":"点击型","desc":"在培养皿落点投放一枚细胞；装载编辑草案后使用自定义基因组。"},
 		{"id":"REMOVE","key":"2","name":"移除细胞","en":"Cell removal","group":"celllab","kind":"world","mode":"点击型","desc":"移除落点附近最近的一枚细胞。"},
 		{"id":"DRAG","key":"3","name":"光学镊子","en":"Optical tweezers","group":"celllab","kind":"world","mode":"拖拽型","desc":"拖动落点附近细胞到新位置。"},
 		{"id":"BOOST","key":"4","name":"细胞强化","en":"Cell boost","group":"celllab","kind":"world","mode":"点击型","desc":"为落点附近细胞注入额外能量。"},
 		{"id":"INSPECT","key":"5","name":"细胞诊断","en":"Cell diagnostics","group":"celllab","kind":"world","mode":"点击型","desc":"读取落点细胞状态并显示在状态栏。"},
 		{"id":"ADHERE","key":"6","name":"黏附连接","en":"Adhesion extruder","group":"macro","kind":"world","mode":"拖拽型","desc":"在落点附近两枚细胞间建立黏附连接。"},
-		{"id":"INJECT_GENOME","key":"7","name":"基因组注射","en":"Genome injector","group":"macro","kind":"stub","mode":"点击型","desc":"写入基因组（命令已入队，底层待接入）。"},
+		{"id":"INJECT_GENOME","key":"7","name":"基因组注射","en":"Genome injector","group":"macro","kind":"world","mode":"点击型","desc":"把编辑草案写入落点细胞所属个体，并切换其表现类型。"},
 		{"id":"INJECT_SIGNAL","key":"8","name":"信号注射","en":"Signal injector","group":"macro","kind":"world","mode":"点击型","desc":"向信号通道注入化学信号 source。"},
 		{"id":"INJECT_SUBSTANCE","key":"9","name":"物质注射","en":"Substance injector","group":"macro","kind":"world","mode":"点击型","desc":"在落点注入营养物质，进入场 source。"},
 		{"id":"INJECT_COLOR","key":"0","name":"颜色注射","en":"Color injector","group":"macro","kind":"world","mode":"点击型","desc":"标记落点细胞的表现类型，用于观测分组。"},
