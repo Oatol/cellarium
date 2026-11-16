@@ -1915,6 +1915,8 @@ func _check_camera_speed_editor() -> bool:
 	if speed_panel == null or editor_button == null or feedback == null or microscope == null:
 		push_error("SmokeTest: HUD new panels missing")
 		instance.queue_free(); return false
+	editor.call("_on_default")
+	editor.call("_on_default")
 	if speed_panel.get_global_rect().intersects(editor_button.get_global_rect()):
 		push_error("SmokeTest: speed panel overlaps cell editor button")
 		instance.queue_free(); return false

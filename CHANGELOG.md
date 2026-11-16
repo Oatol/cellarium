@@ -4,6 +4,14 @@
 
 ---
 
+## 0.8.1 — 2026-11-16
+
+**类型**：v0.8.0 补丁
+- 修复 `CellEditorPanel._sync_controls()` 每次「恢复默认」都重复连接 `item_selected`，导致 Godot 报 `Signal is already connected`。连接移到 `_build_options()` 并加 `is_connected()` 守卫。
+- `SmokeTest` 新增连续两次 `_on_default()` 的回归调用；源码 `SCRIPTS=41 FAILURES=0 EXITCODE=0`，无信号错误。
+
+---
+
 ## 0.8.0 — 2026-11-16
 
 **类型**：相机控制 + 倍速直输 + 弹性细胞 + 细胞编辑闭环

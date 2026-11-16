@@ -76,6 +76,9 @@ func _build_options() -> void:
 		_respiration_option.clear()
 		for name_value in RESPIRATION:
 			_respiration_option.add_item(name_value)
+		var handler: Callable = Callable(self, "_on_respiration_selected")
+		if not _respiration_option.is_connected("item_selected", handler):
+			_respiration_option.connect("item_selected", handler)
 
 func _reset_draft_data() -> void:
 	if draft == null:
@@ -103,8 +106,6 @@ func _sync_controls() -> void:
 		_type_option.selected = 0
 	if _respiration_option != null and _respiration_option.item_count > 0:
 		_respiration_option.selected = 1
-	if _respiration_option != null:
-		_respiration_option.item_selected.connect(_on_respiration_selected)
 
 func _on_trait_changed(value: float, index: int) -> void:
 	if draft == null or index < 0 or index >= TRAITS.size():
