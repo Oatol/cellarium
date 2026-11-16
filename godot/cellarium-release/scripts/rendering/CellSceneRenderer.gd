@@ -6,6 +6,7 @@ extends Node2D
 
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 const CELL_PHYSICS: RefCounted = preload("res://scripts/system/CellPhysics.gd")
+const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd")
 
 @export var cell_scene: PackedScene = preload("res://scenes/cells/CellBase.tscn")
 @export var organism_manager_path: NodePath = ^"../../Simulation/OrganismManager"
@@ -23,6 +24,7 @@ var _active_count: int = 0
 var _last_contacts_sent: int = 0
 var _last_adhesions_sent: int = 0
 var _last_wall_contacts_sent: int = 0
+var _last_chords_sent: int = 0
 var _dirty: bool = true
 
 func _ready() -> void:
@@ -67,6 +69,9 @@ func get_last_adhesion_count() -> int:
 
 func get_last_wall_contact_count() -> int:
 	return _last_wall_contacts_sent
+
+func get_last_chord_count() -> int:
+	return _last_chords_sent
 
 func _rebuild() -> void:
 	if organism_manager == null or cell_scene == null:
@@ -115,6 +120,14 @@ func _rebuild() -> void:
 	_last_contacts_sent = 0
 	_last_adhesions_sent = 0
 	_last_wall_contacts_sent = 0
+	# 共享弦：每对细胞只算一次圆-圆相交，两个端点原样分发给双方（Cell Lab A[] 机制）。
+	var chord_lists: Dictionary = _build_shared_chords(
+		cells, indices, pos_x, pos_y, org_ids, link_a, link_b,
+		buckets, radius, dish_center, dish_radius
+	)
+	_last_chords_sent = 0
+	for key in chord_lists.keys():
+		_last_chords_sent += (chord_lists[key] as Array).size()
 	for i in range(indices.size()):
 		var cell_index: int = indices[i]
 		var view: Node2D = _pool[i]
@@ -142,6 +155,7 @@ func _rebuild() -> void:
 		_last_contacts_sent += contacts.size() + adhesions.size() + wall_contacts.size()
 		_last_adhesions_sent += adhesions.size()
 		_last_wall_contacts_sent += wall_contacts.size()
+		var chords: Array = chord_lists.get(cell_index, [])
 		view.call(
 			"apply_cell",
 			position_value,
@@ -151,11 +165,75 @@ func _rebuild() -> void:
 			velocity,
 			contacts,
 			adhesions,
-			wall_contacts
+			wall_contacts,
+			chords
 		)
 	for i in range(indices.size(), _pool.size()):
 		_pool[i].visible = false
 	_active_count = indices.size()
+
+## 每对重叠细胞只算一次圆-圆相交弦，两个端点原样发给双方。
+## 这是 Cell Lab「物理与渲染共享 A[] 共享弦端点」的核心：双方膜在接触处共边 → 精密贴合。
+## 同时为皿壁接触生成弦（皿壁视作大圆）。只读 SoA，不改变任何模拟状态。
+static func _build_shared_chords(
+	cells: RefCounted,
+	indices: Array[int],
+	pos_x: PackedFloat32Array,
+	pos_y: PackedFloat32Array,
+	org_ids: PackedInt32Array,
+	link_a: PackedInt32Array,
+	link_b: PackedInt32Array,
+	buckets: Dictionary,
+	radius: float,
+	dish_center: Vector2,
+	dish_radius: float
+) -> Dictionary:
+	var lists: Dictionary = {}
+	for cell_index in indices:
+		lists[cell_index] = []
+	var seen: Dictionary = {}
+	for cell_index in indices:
+		var neighbors: Array[int] = CELL_PHYSICS.call("query_neighbors_cached", cells, cell_index, buckets)
+		for neighbor in neighbors:
+			if not lists.has(neighbor) or neighbor == cell_index:
+				continue
+			var pair_key: String = "%d:%d" % [mini(cell_index, neighbor), maxi(cell_index, neighbor)]
+			if seen.has(pair_key):
+				continue
+			seen[pair_key] = true
+			var p0: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
+			var p1: Vector2 = Vector2(pos_x[neighbor], pos_y[neighbor])
+			var chord: Dictionary = CHORDS.call("circle_chord", p0, radius, p1, radius)
+			if not bool(chord.get("valid", false)):
+				continue
+			var adhesion: bool = (
+				cell_index < org_ids.size() and neighbor < org_ids.size()
+				and org_ids[cell_index] == org_ids[neighbor]
+				and _has_link(link_a, link_b, cell_index, neighbor)
+			)
+			var entry_self: Dictionary = {
+				"a": chord["a"], "b": chord["b"],
+				"kind": 1 if adhesion else 0, "peer": neighbor
+			}
+			var entry_peer: Dictionary = {
+				"a": chord["a"], "b": chord["b"],
+				"kind": 1 if adhesion else 0, "peer": cell_index
+			}
+			(lists[cell_index] as Array).append(entry_self)
+			(lists[neighbor] as Array).append(entry_peer)
+	# 皿壁弦：同一条弦对细胞与皿壁双方共享，这里只写细胞侧。
+	for cell_index in indices:
+		var position_value: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
+		var chord: Dictionary = CHORDS.call("wall_chord", position_value, radius, dish_center, dish_radius)
+		if bool(chord.get("valid", false)):
+			(lists[cell_index] as Array).append({
+				"a": chord["a"], "b": chord["b"], "kind": 2, "peer": -1
+			})
+	for key in lists.keys():
+		var entries: Array = lists[key]
+		if entries.size() > CHORDS.MAX_CHORDS:
+			entries.resize(CHORDS.MAX_CHORDS)
+	return lists
 
 ## 从既有空间哈希派生接触方向：同个体且已有 Link 的邻居算黏附，其余算普通碰撞。
 ## 方向是世界坐标，与 CellView 的旋转后轮廓对齐；只读，不改变连接或物理状态。

@@ -39,6 +39,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellSceneRenderer.gd",
 	"res://scripts/rendering/CameraController.gd",
 	"res://scripts/rendering/CellMembrane.gd",
+	"res://scripts/rendering/CellContactChords.gd",
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/CellEditorPanel.gd",
 	"res://scripts/ui/GameHUD.gd",
@@ -142,6 +143,8 @@ func _initialize() -> void:
 	if not await _check_batch_renderer():
 		failures += 1
 	if not await _check_cell_scene_renderer():
+		failures += 1
+	if not await _check_shared_chords():
 		failures += 1
 	if not await _check_multicellular_cooperation():
 		failures += 1
@@ -1963,6 +1966,123 @@ func _check_cell_scene_renderer() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK procedural CellBase.tscn / contact flatten / elastic membrane / scene-render refresh")
+	return true
+
+## 共享弦端点契约：几何公式正确、双方端点世界坐标一致、遮挡剔除与膜裁剪生效。
+func _check_shared_chords() -> bool:
+	var helper: RefCounted = load("res://scripts/rendering/CellContactChords.gd").new() as RefCounted
+	var radius: float = 7.0
+	var left: Vector2 = Vector2(250.0, 250.0)
+	var right: Vector2 = Vector2(258.0, 250.0)
+	var chord: Dictionary = helper.call("circle_chord", left, radius, right, radius)
+	if not bool(chord.get("valid", false)):
+		push_error("SmokeTest: overlapping cells must produce a shared chord")
+		return false
+	var endpoint_a: Vector2 = chord["a"]
+	var endpoint_b: Vector2 = chord["b"]
+	if absf(endpoint_a.x - endpoint_b.x) > 0.01:
+		push_error("SmokeTest: chord endpoints must be symmetric across center line")
+		return false
+	if absf(endpoint_a.x - 254.0) > 0.01:
+		push_error("SmokeTest: chord midpoint must sit at the radical line")
+		return false
+	# 相切 / 分离不产生弦。
+	var tangent: Dictionary = helper.call("circle_chord", Vector2.ZERO, radius, Vector2(radius * 2.0, 0.0), radius)
+	if bool(tangent.get("valid", false)):
+		push_error("SmokeTest: tangent circles must not produce a chord")
+		return false
+	# d26 遮挡判据：同一位置附近的两条弦，后一条应被判遮挡。
+	var first: Dictionary = {"local_a": Vector2(-2.0, -1.0), "local_b": Vector2(-2.0, 1.0)}
+	var second: Dictionary = {"local_a": Vector2(-1.0, -1.0), "local_b": Vector2(-1.0, 1.0)}
+	if not bool(helper.call("is_occluded", first, second)):
+		push_error("SmokeTest: occluded chord must be culled by d26 criterion")
+		return false
+	var kept: Array = helper.call("cull_occluded", [first, second])
+	if kept.size() != 1:
+		push_error("SmokeTest: cull_occluded must drop the hidden chord")
+		return false
+	# 渲染层每对细胞只算一次，双方视图收到完全相同的世界端点。
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", true)
+	root.add_child(instance)
+	await process_frame
+	await process_frame
+	var layer: Node = instance.get_node_or_null("DishView/CellSceneLayer")
+	var manager: Node = instance.get_node_or_null("Simulation/OrganismManager")
+	var tick_core: Node = instance.get_node_or_null("Simulation/TickCore")
+	if layer == null or manager == null or tick_core == null:
+		push_error("SmokeTest: shared chord scene nodes missing")
+		instance.queue_free(); return false
+	tick_core.set("running", false)
+	# 默认演示体按静息间距 2r 排布 = 相切，不应产生弦；再放一枚重叠细胞验证分发。
+	layer.call("mark_dirty")
+	await process_frame
+	if int(layer.call("get_last_chord_count")) != 0:
+		push_error("SmokeTest: tangent cells must not produce a chord")
+		instance.queue_free(); return false
+	var live_cells: RefCounted = manager.get("cells") as RefCounted
+	var base_position: Vector2 = Vector2(
+		float(live_cells.get("cell_pos_x")[0]), float(live_cells.get("cell_pos_y")[0])
+	)
+	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
+	bus.call("enqueue", {"type": "SPAWN", "position": base_position + Vector2(3.0, 0.0), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 1)
+	await process_frame
+	layer.call("mark_dirty")
+	await process_frame
+	if int(layer.call("get_last_chord_count")) <= 0:
+		push_error("SmokeTest: scene renderer did not derive shared chords")
+		instance.queue_free(); return false
+	# 取两个实例，验证弦端点在双方 chord 列表中成对出现（世界坐标完全一致）。
+	var chord_counts: Array[int] = []
+	var all_chords: Array = []
+	for index in range(int(layer.call("get_active_count"))):
+		var chord_view: Node2D = layer.get_child(index) as Node2D
+		chord_counts.append(int(chord_view.call("get_chord_count")))
+		for entry in (chord_view.get("_chords") as Array):
+			all_chords.append(entry)
+	if chord_counts.is_empty() or chord_counts.max() <= 0:
+		push_error("SmokeTest: no CellView received chord endpoints")
+		instance.queue_free(); return false
+	var shared_pair_found: bool = false
+	for i in range(all_chords.size()):
+		var entry_i: Dictionary = all_chords[i]
+		if int(entry_i.get("kind", -1)) == 2:
+			continue
+		for j in range(i + 1, all_chords.size()):
+			var entry_j: Dictionary = all_chords[j]
+			if int(entry_j.get("kind", -1)) == 2:
+				continue
+			if int(entry_i.get("peer", -2)) == int(entry_j.get("peer", -1)):
+				continue
+			var a_i: Vector2 = entry_i["a"]
+			var a_j: Vector2 = entry_j["a"]
+			var b_i: Vector2 = entry_i["b"]
+			var b_j: Vector2 = entry_j["b"]
+			if a_i.distance_to(a_j) < 0.0001 and b_i.distance_to(b_j) < 0.0001:
+				shared_pair_found = true
+				break
+		if shared_pair_found:
+			break
+	if not shared_pair_found:
+		push_error("SmokeTest: chord endpoints must be byte-identical across both touching cells")
+		instance.queue_free(); return false
+	# CellView 共享弦裁剪后仍保持足够轮廓点，且弦线段落在膜边界上。
+	var view_with_chord: Node2D = null
+	for index in range(chord_counts.size()):
+		if chord_counts[index] > 0:
+			view_with_chord = layer.get_child(index) as Node2D
+			break
+	if view_with_chord == null:
+		push_error("SmokeTest: no view with chords")
+		instance.queue_free(); return false
+	var points: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
+	if points.size() < 16:
+		push_error("SmokeTest: chord-clipped membrane lost its outline")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK shared chord geometry / culling / scene renderer distribution")
 	return true
 
 func _check_multicellular_cooperation() -> bool:

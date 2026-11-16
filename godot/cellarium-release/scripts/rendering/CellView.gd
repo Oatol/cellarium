@@ -9,6 +9,7 @@ extends Node2D
 const CATALOG: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const MEMBRANE: RefCounted = preload("res://scripts/rendering/CellMembrane.gd")
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
+const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd")
 
 @export var cell_radius: float = SHAPE.REST_RADIUS
 ## 物理碰撞半径与弹性膜静息半径同源（Cell Lab 的 Cell.d 用法）。
@@ -34,6 +35,7 @@ var _velocity: Vector2 = Vector2.ZERO
 var _contacts: Array[Vector2] = []
 var _adhesions: Array[Vector2] = []
 var _wall_contacts: Array[Vector2] = []
+var _chords: Array = []
 var _shape_time: float = 0.0
 var _accumulated: float = 0.0
 var _stretch: float = 0.0
@@ -56,13 +58,15 @@ func apply_cell(
 	velocity: Vector2 = Vector2.ZERO,
 	contacts: Array[Vector2] = [],
 	adhesions: Array[Vector2] = [],
-	wall_contacts: Array[Vector2] = []
+	wall_contacts: Array[Vector2] = [],
+	chords: Array = []
 ) -> void:
 	global_position = position
 	_velocity = velocity
 	_contacts = contacts.duplicate()
 	_adhesions = adhesions.duplicate()
 	_wall_contacts = wall_contacts.duplicate()
+	_chords = chords.duplicate()
 	if type_id != _type_id or org_id != _org_id:
 		_org_id = org_id
 		_apply_type(type_id)
@@ -108,15 +112,33 @@ func _refresh_shape() -> void:
 	_stretch += (target_stretch - _stretch) * clampf(stretch_smoothing, 0.05, 1.0)
 	var unit: PackedVector2Array = _membrane.outline(_shape_time, _stretch)
 	var angle: float = 0.0 if _stretch < 0.001 else _velocity.angle()
+	if not _chords.is_empty():
+		# 共享弦路径：弦端点由渲染层成对计算并原样下发，双方膜在接触处共边。
+		# 先剔除被遮挡的弦，再把轮廓裁到每条弦的内侧（保留细胞中心一侧）。
+		var unit_chords: Array = []
+		for chord in _chords:
+			var endpoint_a: Vector2 = chord.get("a", Vector2.ZERO)
+			var endpoint_b: Vector2 = chord.get("b", Vector2.ZERO)
+			unit_chords.append({
+				"local_a": (endpoint_a - global_position).rotated(-angle) / visual_radius,
+				"local_b": (endpoint_b - global_position).rotated(-angle) / visual_radius,
+				"kind": int(chord.get("kind", 0))
+			})
+		unit_chords = CHORDS.call("cull_occluded", unit_chords)
+		for chord in unit_chords:
+			unit = CHORDS.call("clip_keep_origin", unit, chord["local_a"], chord["local_b"])
 	var world_points: PackedVector2Array = PackedVector2Array()
 	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:
 		var rotated: Vector2 = point.rotated(angle)
-		var flattened: Vector2 = _flatten_contacts(rotated, _contacts, contact_flatten)
-		flattened = _flatten_contacts(flattened, _adhesions, adhesion_flatten)
-		flattened = _flatten_contacts(flattened, _wall_contacts, wall_flatten)
-		world_points.append(flattened * visual_radius)
-		inner_points.append(flattened * visual_radius * 0.62)
+		var shaped: Vector2 = rotated
+		if _chords.is_empty():
+			# 旧路径：仅方向可用时，按法线做浅压平（孤立细胞 / 手工测试）。
+			shaped = _flatten_contacts(shaped, _contacts, contact_flatten)
+			shaped = _flatten_contacts(shaped, _adhesions, adhesion_flatten)
+			shaped = _flatten_contacts(shaped, _wall_contacts, wall_flatten)
+		world_points.append(shaped * visual_radius)
+		inner_points.append(shaped * visual_radius * 0.62)
 	body.polygon = world_points
 	outline.points = world_points
 	if inner_ring != null:
@@ -206,3 +228,6 @@ func get_adhesion_count() -> int:
 
 func get_wall_contact_count() -> int:
 	return _wall_contacts.size()
+
+func get_chord_count() -> int:
+	return _chords.size()
