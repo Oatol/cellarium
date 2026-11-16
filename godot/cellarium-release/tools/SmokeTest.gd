@@ -22,6 +22,10 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/EnvironmentField.gd",
 	"res://scripts/system/Predation.gd",
 	"res://scripts/system/EnergyLedger.gd",
+	"res://scripts/system/Mutation.gd",
+	"res://scripts/system/SpeciesSystem.gd",
+	"res://scripts/system/StatisticsSystem.gd",
+	"res://scripts/system/SaveManager.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
@@ -93,6 +97,14 @@ func _initialize() -> void:
 	if not _check_energy_ledger():
 		failures += 1
 	if not await _check_predation_integration():
+		failures += 1
+	if not _check_mutation():
+		failures += 1
+	if not _check_species_system():
+		failures += 1
+	if not _check_statistics():
+		failures += 1
+	if not _check_save_restore():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1071,3 +1083,231 @@ func _check_predation_integration() -> bool:
 	instance.queue_free()
 	print("SmokeTest: OK integrated predation events=%d ledger_entries=%d" % [int(pred.get("events", 0)), int(ledger.get("entries", 0))])
 	return true
+
+func _check_mutation() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var mutation: Script = load("res://scripts/system/Mutation.gd") as Script
+	var base: RefCounted = genome_script.new() as RefCounted
+	base.set("traits", PackedByteArray([10, 20, 30, 40, 50, 60, 0, 1]))
+	base.set("loci", PackedByteArray([1, 2, 3, 4, 5, 6]))
+	base.call("set_development_program", [{"opcode": 0, "a": 1, "b": 2, "c": 3}])
+	var m1: RefCounted = mutation.call("mutate", base, 1, -1, 100, 1.0)
+	var m2: RefCounted = mutation.call("mutate", base, 1, -1, 100, 1.0)
+	if m1 == null or m2 == null or not bool(m1.call("is_valid")):
+		push_error("SmokeTest: mutation produced invalid genome")
+		return false
+	if m1.call("hash") != m2.call("hash"):
+		push_error("SmokeTest: mutation not deterministic for same seed")
+		return false
+	var changed_sample: RefCounted = null
+	for tick in range(500):
+		var sample: RefCounted = mutation.call("mutate", base, tick + 1, -1, 1, 1.0)
+		if sample != null and sample.call("hash") != base.call("hash"):
+			changed_sample = sample
+			break
+	if changed_sample == null:
+		push_error("SmokeTest: no mutation observed across 500 seeded trials")
+		return false
+	var d_same: float = genome_script.call("distance", base, base)
+	var d_other: float = genome_script.call("distance", base, changed_sample)
+	if d_same != 0.0 or d_other <= 0.0:
+		push_error("SmokeTest: genome distance invalid same=%.2f other=%.2f" % [d_same, d_other])
+		return false
+	var traits_before: PackedByteArray = base.get("traits")
+	if int(traits_before[0]) != 10:
+		push_error("SmokeTest: mutation mutated the source genome")
+		return false
+	print("SmokeTest: OK mutation deterministic distance(%.2f) source-immutable" % d_other)
+	return true
+
+func _check_species_system() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var species_script: Script = load("res://scripts/system/SpeciesSystem.gd") as Script
+	var sys: RefCounted = species_script.new() as RefCounted
+	sys.call("configure", 6.0, 10)
+	var base: RefCounted = genome_script.new() as RefCounted
+	base.set("traits", PackedByteArray([10, 20, 30, 40, 50, 60, 0, 1]))
+	base.set("loci", PackedByteArray([1, 2, 3, 4]))
+	base.call("set_development_program", [])
+	var founder: int = int(sys.call("register_founder", base, 0))
+	if founder != 0 or int(sys.call("species_count")) != 1:
+		push_error("SmokeTest: species founder setup failed")
+		return false
+	var near: RefCounted = genome_script.new() as RefCounted
+	near.set("traits", PackedByteArray([10, 20, 30, 40, 50, 60, 0, 2]))
+	near.set("loci", PackedByteArray([1, 2, 3, 4]))
+	near.call("set_development_program", [])
+	if int(sys.call("classify", near, 0, 5)) != 0:
+		push_error("SmokeTest: near genome should stay in founder species")
+		return false
+	var far: RefCounted = genome_script.new() as RefCounted
+	far.set("traits", PackedByteArray([1, 1, 1, 1, 1, 1, 1, 1]))
+	far.set("loci", PackedByteArray([9, 9, 9, 9, 9, 9]))
+	far.set("mutation_rate_exp", 50)
+	far.call("set_development_program", [{"opcode": 1, "a": 1, "b": 1, "c": 1}])
+	var new_species: int = int(sys.call("classify", far, 0, 5))
+	if new_species <= 0 or int(sys.call("species_count")) != 2:
+		push_error("SmokeTest: far genome should speciate from founder")
+		return false
+	var far2: RefCounted = genome_script.new() as RefCounted
+	far2.set("traits", PackedByteArray([2, 2, 2, 2, 2, 2, 2, 2]))
+	far2.set("loci", PackedByteArray([8, 8, 8, 8, 8, 8]))
+	far2.set("mutation_rate_exp", 60)
+	far2.call("set_development_program", [{"opcode": 2, "a": 2, "b": 2, "c": 2}])
+	if int(sys.call("classify", far2, 0, 8)) != new_species:
+		push_error("SmokeTest: second speciation within cooldown should be gated")
+		return false
+	sys.call("record_birth", new_species, 20)
+	sys.call("update_population", new_species, 3)
+	sys.call("record_death", new_species, 1, 30)
+	sys.call("mark_extinct", new_species, 40)
+	var archive: Dictionary = sys.call("get_archive", new_species)
+	if archive.is_empty() or int(archive.get("peak_population", 0)) != 3 or int(archive.get("main_death_cause", -1)) != 1:
+		push_error("SmokeTest: extinction archive missing data")
+		return false
+	var events: Array = sys.call("get_events")
+	if events.size() != 2:
+		push_error("SmokeTest: expected SPECIATION + EXTINCTION events")
+		return false
+	var phylogeny: Dictionary = sys.call("export_phylogeny")
+	if (phylogeny.get("nodes") as Array).size() != 2 or (phylogeny.get("edges") as Array).size() != 1 or (phylogeny.get("speciation_events") as Array).size() != 1:
+		push_error("SmokeTest: phylogeny export must contain nodes, parent edge and speciation event")
+		return false
+	print("SmokeTest: OK species founder/classify/cooldown/extinction archive + phylogeny export")
+	return true
+
+func _check_statistics() -> bool:
+	var stats_script: Script = load("res://scripts/system/StatisticsSystem.gd") as Script
+	var stats: RefCounted = stats_script.new() as RefCounted
+	stats.call("configure", 16, 10)
+	stats.call("record_birth")
+	stats.call("record_death", 3)
+	for i in range(35):
+		stats.call("advance_tick", {0: 3, 1: 1})
+	if int(stats.call("sample_count")) != 3:
+		push_error("SmokeTest: statistics sample count = %d" % int(stats.call("sample_count")))
+		return false
+	var series: Dictionary = stats.call("population_series")
+	if not series.has(0) or (series[0] as Array).size() != 3:
+		push_error("SmokeTest: population series missing species 0")
+		return false
+	var panel: Dictionary = stats.call("species_death_panel")
+	if int(panel.get("deaths", 0)) != 1 or int((panel.get("death_causes", {}) as Dictionary).get("3", 0)) != 1:
+		push_error("SmokeTest: death panel mismatch")
+		return false
+	var facts_a: Array = stats.call("generate_facts", {})
+	if facts_a.is_empty():
+		push_error("SmokeTest: no facts generated")
+		return false
+	stats.call("record_death", 1)
+	for i in range(10):
+		stats.call("advance_tick", {0: 3, 1: 1})
+	var facts_b: Array = stats.call("generate_facts", {})
+	if str(facts_a[0]) == str(facts_b[0]):
+		push_error("SmokeTest: facts not data-driven (unchanged after death data changed)")
+		return false
+	var report: Dictionary = stats.call("export_report", {})
+	if not report.has("population_series") or not report.has("facts"):
+		push_error("SmokeTest: ecology report missing products")
+		return false
+	print("SmokeTest: OK statistics ring buffer / panel / data-driven facts")
+	return true
+
+## T08（§10）：存档 → 继续跑 → 读档 → 继续跑，两条路径 1000 tick 后状态一致。
+func _check_save_restore() -> bool:
+	var save_manager: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var save_path: String = "user://cellarium_t08_roundtrip.gsave"
+	var half_ticks: int = 500
+
+	var first: Dictionary = _t08_make_world(genome_script)
+	var first_env: Node = first["environment"]
+	var first_manager: Node = first["manager"]
+	for i in range(half_ticks * 2):
+		first_manager.call("advance_physics_tick", 1.0 / 60.0)
+		first_env.call("advance_field_tick")
+	var first_state: Dictionary = _t08_world_state(first_manager, first_env)
+	first_manager.free()
+	first_env.free()
+
+	var second: Dictionary = _t08_make_world(genome_script)
+	var second_env: Node = second["environment"]
+	var second_manager: Node = second["manager"]
+	for i in range(half_ticks):
+		second_manager.call("advance_physics_tick", 1.0 / 60.0)
+		second_env.call("advance_field_tick")
+
+	if not bool(second_manager.call("save_state_to_file", save_path)):
+		push_error("SmokeTest: T08 save_state_to_file failed")
+		second_manager.free()
+		second_env.free()
+		return false
+	var loaded: Dictionary = save_manager.call("load_from_file", save_path) as Dictionary
+	if loaded.is_empty() or int(loaded.get("sim_tick", -1)) != half_ticks:
+		push_error("SmokeTest: T08 file round-trip lost sim_tick")
+		second_manager.free()
+		second_env.free()
+		return false
+	# 故意污染当前状态，确认 restore 真的写回而不是空操作
+	var live_cells: RefCounted = second_manager.get("cells") as RefCounted
+	var energy_snapshot: PackedFloat32Array = live_cells.get("cell_energy") as PackedFloat32Array
+	if energy_snapshot.size() > 0:
+		energy_snapshot[0] = 999.0
+		live_cells.set("cell_energy", energy_snapshot)
+	if not bool(second_manager.call("restore_state", loaded)):
+		push_error("SmokeTest: T08 restore_state failed")
+		second_manager.free()
+		second_env.free()
+		return false
+
+	for i in range(half_ticks):
+		second_manager.call("advance_physics_tick", 1.0 / 60.0)
+		second_env.call("advance_field_tick")
+	var second_state: Dictionary = _t08_world_state(second_manager, second_env)
+	second_manager.free()
+	second_env.free()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(save_path))
+
+	for key in first_state:
+		if str(first_state[key]) != str(second_state.get(key, "<missing>")):
+			push_error("SmokeTest: T08 divergence on %s: %s vs %s" % [key, str(first_state[key]), str(second_state.get(key, "<missing>"))])
+			return false
+	if not bool(first_state.get("ledger_consistent", false)):
+		push_error("SmokeTest: T08 ledger conservation broken after 1000 ticks")
+		return false
+	print("SmokeTest: OK T08 save/load round-trip, 1000-tick dual-path state match")
+	return true
+
+func _t08_make_world(genome_script: Script) -> Dictionary:
+	var environment: Node = load("res://scripts/system/EnvironmentManager.gd").new() as Node
+	environment.nutrient_density = 1.2
+	environment.oxygen_fraction = 0.21
+	environment._ready()
+	var manager: Node = load("res://scripts/system/OrganismManager.gd").new() as Node
+	manager.environment_manager = environment
+	manager.dish_center = Vector2.ZERO
+	manager.dish_radius = 1000.0
+	manager._ready()
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.call("set_development_program", [])
+	manager.call("register_zygote", int(genome.call("hash")), 0, -1, genome, Vector2.ZERO, 0.8, 0)
+	manager.get("species_system").call("register_founder", genome, 0)
+	manager.get("statistics").call("record_birth")
+	return {"environment": environment, "manager": manager}
+
+func _t08_world_state(manager: Node, environment: Node) -> Dictionary:
+	var species_system: RefCounted = manager.get("species_system") as RefCounted
+	var statistics: RefCounted = manager.get("statistics") as RefCounted
+	var ledger: RefCounted = manager.get("energy_ledger") as RefCounted
+	return {
+		"organism_hash": int(manager.call("get_state_hash")),
+		"field_hash": int(environment.get("field").call("get_state_hash")),
+		"sim_tick": int(manager.get("_sim_tick")),
+		"genome_count": (manager.get("genomes") as Dictionary).size(),
+		"species_count": int(species_system.call("species_count")),
+		"species_events": (species_system.call("get_events") as Array).size(),
+		"sample_count": int(statistics.call("sample_count")),
+		"ledger_total": int(round(float(ledger.call("total")) * 1000000.0)),
+		"ledger_consistent": bool(ledger.call("assert_conservation", 0.01)),
+	}

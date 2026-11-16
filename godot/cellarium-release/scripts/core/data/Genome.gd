@@ -17,6 +17,38 @@ var mutation_rate_exp: int = 0
 var loci: PackedByteArray = PackedByteArray()
 var traits: PackedByteArray = PackedByteArray()
 var dev_program: Array[Dictionary] = []
+## 运行时谱系元数据（阶段 4）：不进 GNP1 二进制编解码（格式已冻结）。
+var species_id: int = 0
+var lineage_id: int = -1
+
+## 加权基因组距离（§4.7 物种判定）：位点汉明 + 性状 L1 + 发育程序编辑距离。
+static func distance(a: RefCounted, b: RefCounted) -> float:
+	if a == null or b == null:
+		return 1.0e9
+	var locus_distance: int = 0
+	var loci_a: PackedByteArray = a.get("loci")
+	var loci_b: PackedByteArray = b.get("loci")
+	var max_loci: int = maxi(loci_a.size(), loci_b.size())
+	for i in range(max_loci):
+		var va: int = int(loci_a[i]) if i < loci_a.size() else -1
+		var vb: int = int(loci_b[i]) if i < loci_b.size() else -1
+		if va != vb:
+			locus_distance += 1
+	var trait_distance: int = 0
+	var traits_a: PackedByteArray = a.get("traits")
+	var traits_b: PackedByteArray = b.get("traits")
+	for i in range(mini(traits_a.size(), traits_b.size())):
+		trait_distance += absi(int(traits_a[i]) - int(traits_b[i]))
+	var program_a: Array = a.get("dev_program")
+	var program_b: Array = b.get("dev_program")
+	var program_distance: int = absi(program_a.size() - program_b.size())
+	for i in range(mini(program_a.size(), program_b.size())):
+		var ia: Dictionary = program_a[i]
+		var ib: Dictionary = program_b[i]
+		for key in ["opcode", "a", "b", "c"]:
+			if int(ia.get(key, -1)) != int(ib.get(key, -1)):
+				program_distance += 1
+	return float(locus_distance) * 1.0 + float(trait_distance) * 0.05 + float(program_distance) * 0.5
 
 func is_valid() -> bool:
 	if version < 1 or flags < 0 or flags > 65535 or respiration < 0 or respiration > 2:
@@ -77,4 +109,6 @@ func duplicate_genome() -> RefCounted:
 	copy.set("loci", loci.duplicate())
 	copy.set("traits", traits.duplicate())
 	copy.call("set_development_program", dev_program)
+	copy.set("species_id", species_id)
+	copy.set("lineage_id", lineage_id)
 	return copy

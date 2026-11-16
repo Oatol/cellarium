@@ -10,6 +10,11 @@ const CELL_BEHAVIOR_SCRIPT: Script = preload("res://scripts/system/CellBehavior.
 const RESPIRATION_RULES_SCRIPT: Script = preload("res://scripts/system/RespirationRules.gd")
 const PREDATION_SCRIPT: Script = preload("res://scripts/system/Predation.gd")
 const ENERGY_LEDGER_SCRIPT: Script = preload("res://scripts/system/EnergyLedger.gd")
+const MUTATION_SCRIPT: Script = preload("res://scripts/system/Mutation.gd")
+const SPECIES_SCRIPT: Script = preload("res://scripts/system/SpeciesSystem.gd")
+const STATISTICS_SCRIPT: Script = preload("res://scripts/system/StatisticsSystem.gd")
+const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
+const SAVE_MANAGER_SCRIPT: Script = preload("res://scripts/system/SaveManager.gd")
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
@@ -22,8 +27,17 @@ var last_inspection: Dictionary = {}
 var _next_genome_id: int = 1
 var energy_ledger: RefCounted = ENERGY_LEDGER_SCRIPT.new() as RefCounted
 var predation_diagnostics: Dictionary = {"events": 0, "energy_transferred": 0.0, "energy_to_detritus": 0.0, "deaths": 0}
+var species_system: RefCounted = SPECIES_SCRIPT.new() as RefCounted
+var statistics: RefCounted = STATISTICS_SCRIPT.new() as RefCounted
+var reproduce_diagnostics: Dictionary = {"attempts": 0, "success": 0, "speciations": 0}
 
 const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+
+var _sim_tick: int = 0
+
+func _ready() -> void:
+	species_system.call("configure", speciation_distance, speciation_cooldown)
+	statistics.call("configure", 7200, 30)
 
 @export var dish_center: Vector2 = Vector2.ZERO
 @export var dish_radius: float = 512.0
@@ -42,8 +56,13 @@ const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT"
 @export var predation_reach: float = 14.0
 @export var predation_max_drain: float = 0.25
 @export var decomposition_writeback_rate: float = 1.0
+@export var reproduce_energy_threshold: float = 1.2
+@export var reproduce_parent_energy_fraction: float = 0.4
+@export var speciation_distance: float = 6.0
+@export var speciation_cooldown: int = 600
 
 func advance_physics_tick(dt: float) -> void:
+	_sim_tick += 1
 	var behavior_outputs: Array[PackedFloat32Array] = _compute_behavior_outputs()
 	CELL_BEHAVIOR_SCRIPT.call("apply_outputs", cells, behavior_outputs, dt)
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
@@ -57,6 +76,18 @@ func advance_physics_tick(dt: float) -> void:
 	_apply_environment_metabolism(dt)
 	_apply_predation(dt)
 	_apply_signal_secretion(dt)
+	statistics.call("advance_tick", _species_populations())
+
+func _species_populations() -> Dictionary:
+	var populations: Dictionary = {}
+	var alive: PackedByteArray = organisms.get("org_alive")
+	var species_ids: PackedInt32Array = organisms.get("org_species_id")
+	for org_id in range(alive.size()):
+		if alive[org_id] == 0:
+			continue
+		var species_id: int = int(species_ids[org_id])
+		populations[species_id] = int(populations.get(species_id, 0)) + 1
+	return populations
 
 func _compute_behavior_outputs() -> Array[PackedFloat32Array]:
 	var neighbors: Dictionary = {}
@@ -220,11 +251,28 @@ func _apply_signal_secretion(dt: float) -> void:
 			environment_manager.call("add_signal_source", Vector2(pos_x[cell_index], pos_y[cell_index]), amount)
 
 func _remove_organism_cells(org_id: int, death_cause: int) -> void:
+	var species_id: int = int(organisms.get("org_species_id")[org_id])
 	for cell_index in range(int(cells.call("size")) - 1, -1, -1):
 		if int(cells.get("cell_org_id")[cell_index]) == org_id and int(cells.get("cell_alive")[cell_index]) != 0:
 			var energy: float = float(cells.call("remove_cell", cell_index))
 			if energy >= 0.0:
 				organisms.call("remove_cell_from_organism", org_id, death_cause)
+	if organisms.get("org_alive")[org_id] == 0:
+		species_system.call("record_death", species_id, death_cause, _sim_tick)
+		statistics.call("record_death", death_cause)
+		var remaining: int = _count_alive_organisms_of_species(species_id)
+		species_system.call("update_population", species_id, remaining)
+		if remaining == 0:
+			species_system.call("mark_extinct", species_id, _sim_tick)
+
+func _count_alive_organisms_of_species(species_id: int) -> int:
+	var count: int = 0
+	var alive: PackedByteArray = organisms.get("org_alive")
+	var species_ids: PackedInt32Array = organisms.get("org_species_id")
+	for org_id in range(alive.size()):
+		if alive[org_id] != 0 and species_ids[org_id] == species_id:
+			count += 1
+	return count
 
 func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: RefCounted, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if genome == null or not bool(genome.call("is_valid")) or genome_id < 0:
@@ -235,9 +283,17 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	var cell_index: int = int(cells.call("append_cell", org_id, position, energy, type_id))
 	if cell_index < 0:
 		return -1
-	genomes[org_id] = genome.duplicate_genome()
+	var stored_genome: RefCounted = genome.duplicate_genome()
+	stored_genome.set("species_id", species_id)
+	stored_genome.set("lineage_id", int((species_system.call("get_species", species_id) as Dictionary).get("lineage_id", -1)))
+	genomes[org_id] = stored_genome
 	CELL_BEHAVIOR_SCRIPT.call("initialize_weights", cells, cell_index, int(genome.call("hash")))
 	organisms.call("add_developed_cell", org_id, cell_index, int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome)))
+	if int(species_system.call("species_count")) == 0:
+		species_system.call("register_founder", genome, _sim_tick)
+	species_system.call("record_birth", species_id, _sim_tick)
+	species_system.call("update_population", species_id, 1)
+	statistics.call("record_birth")
 	return org_id
 
 func _nearest_alive_cell(position: Vector2, max_distance: float) -> int:
@@ -379,8 +435,56 @@ func _apply_tool_command(command: Dictionary) -> int:
 			return -2
 	return -1
 
+func _execute_reproduce(command: Dictionary) -> int:
+	## 无性繁殖（v1.0 §5.4 REPRODUCE）：亲代能量达阈值 → 突变子基因组 → 物种判定 → 新受精卵。
+	var parent_org_id: int = int(command.get("parent_org_id", command.get("org_id", -1)))
+	if parent_org_id < 0 or not genomes.has(parent_org_id):
+		return -1
+	if organisms.get("org_alive")[parent_org_id] == 0:
+		return -1
+	reproduce_diagnostics["attempts"] = int(reproduce_diagnostics["attempts"]) + 1
+	var parent_genome: RefCounted = genomes[parent_org_id]
+	var total_energy: float = cells.call("total_energy_for_org", parent_org_id)
+	if total_energy < reproduce_energy_threshold:
+		return -1
+	var child_genome: RefCounted = MUTATION_SCRIPT.call("mutate", parent_genome, _next_genome_id, parent_org_id, _sim_tick, 0.0)
+	if child_genome == null:
+		return -1
+	var parent_species_id: int = int(organisms.get("org_species_id")[parent_org_id])
+	var child_species_id: int = int(species_system.call("classify", child_genome, parent_species_id, _sim_tick))
+	if child_species_id < 0:
+		return -1
+	var origin: Vector2 = Vector2(dish_center.x, dish_center.y)
+	if int(cells.get("cell_count")[parent_org_id]) > 0:
+		origin = cells.call("get_position", int(cells.get("cell_offset")[parent_org_id]))
+	var child_energy: float = total_energy * reproduce_parent_energy_fraction
+	var new_org_id: int = register_zygote(_next_genome_id, child_species_id, parent_org_id, child_genome, origin, child_energy, 0)
+	if new_org_id < 0:
+		return -1
+	_next_genome_id += 1
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var remaining: float = total_energy - child_energy
+	var parent_cells: int = 0
+	for cell_index in range(int(cells.call("size"))):
+		if int(cells.get("cell_org_id")[cell_index]) == parent_org_id and int(cells.get("cell_alive")[cell_index]) != 0:
+			parent_cells += 1
+	if parent_cells > 0:
+		var per_cell: float = remaining / float(parent_cells)
+		for cell_index in range(int(cells.call("size"))):
+			if int(cells.get("cell_org_id")[cell_index]) == parent_org_id and int(cells.get("cell_alive")[cell_index]) != 0:
+				energies[cell_index] = per_cell
+	cells.set("cell_energy", energies)
+	species_system.call("record_birth", child_species_id, _sim_tick)
+	species_system.call("update_population", child_species_id, 1)
+	reproduce_diagnostics["success"] = int(reproduce_diagnostics["success"]) + 1
+	if child_species_id != parent_species_id:
+		reproduce_diagnostics["speciations"] = int(reproduce_diagnostics["speciations"]) + 1
+	return new_org_id
+
 func apply_command(command: Dictionary) -> int:
 	var command_type: String = str(command.get("type", ""))
+	if command_type == "REPRODUCE":
+		return _execute_reproduce(command)
 	if command_type in TOOL_TYPES:
 		return _apply_tool_command(command)
 	var org_id: int = int(command.get("org_id", -1))
@@ -489,6 +593,50 @@ func assert_energy_conservation(tolerance: float = 0.01) -> bool:
 
 func get_predation_diagnostics() -> Dictionary:
 	return predation_diagnostics.duplicate()
+
+func get_reproduce_diagnostics() -> Dictionary:
+	return reproduce_diagnostics.duplicate()
+
+func get_species_report() -> Dictionary:
+	var all_species: Dictionary = species_system.call("get_all_species") as Dictionary
+	var events: Array = species_system.call("get_events") as Array
+	return {
+		"species_count": int(species_system.call("species_count")),
+		"species": all_species,
+		"events": events,
+		"reproduction": reproduce_diagnostics.duplicate()
+	}
+
+func get_species_archive(species_id: int) -> Dictionary:
+	return species_system.call("get_archive", species_id) as Dictionary
+
+func export_phylogeny() -> Dictionary:
+	return species_system.call("export_phylogeny") as Dictionary
+
+func export_ecology_report() -> Dictionary:
+	var archives: Dictionary = {}
+	var all_species: Dictionary = species_system.call("get_all_species") as Dictionary
+	for species_id in all_species:
+		var archive: Dictionary = species_system.call("get_archive", int(species_id)) as Dictionary
+		if not archive.is_empty():
+			archives[species_id] = archive
+	return statistics.call("export_report", archives) as Dictionary
+
+## 存档接口（§3.5 / T08）：tick_core 可为空，此时不捕获 tick 调度状态。
+func capture_state(tick_core: Node = null) -> Dictionary:
+	return SAVE_MANAGER_SCRIPT.call("capture", self, environment_manager, tick_core) as Dictionary
+
+func restore_state(snapshot: Dictionary, tick_core: Node = null) -> bool:
+	return bool(SAVE_MANAGER_SCRIPT.call("restore", snapshot, self, environment_manager, tick_core))
+
+func save_state_to_file(path: String, tick_core: Node = null) -> bool:
+	return bool(SAVE_MANAGER_SCRIPT.call("save_to_file", path, capture_state(tick_core)))
+
+func load_state_from_file(path: String, tick_core: Node = null) -> bool:
+	var snapshot: Dictionary = SAVE_MANAGER_SCRIPT.call("load_from_file", path) as Dictionary
+	if snapshot.is_empty():
+		return false
+	return restore_state(snapshot, tick_core)
 
 func get_organism_count() -> int:
 	var count: int = 0

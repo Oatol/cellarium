@@ -88,5 +88,22 @@ func get_snapshot() -> Dictionary:
 		"E_external": get_balance("E_external"),
 		"total": total(),
 		"violations": _violations,
-		"entries": _entries.size()
+		"entries": _entries.size(),
+		"initial": _initial_balances.duplicate(),
+		"entry_list": _entries.duplicate(true)
 	}
+
+## 从存档恢复账本余额、初始余额与流水（§3.5）。_max_entries 是配置，不随存档改。
+func restore_snapshot(snapshot: Dictionary) -> void:
+	_balances = {
+		"E_env": float(snapshot.get("E_env", 0.0)),
+		"E_bio": float(snapshot.get("E_bio", 0.0)),
+		"E_detritus": float(snapshot.get("E_detritus", 0.0)),
+		"E_external": float(snapshot.get("E_external", 0.0))
+	}
+	_initial_balances = (snapshot.get("initial", {}) as Dictionary).duplicate()
+	_entries.clear()
+	for entry in snapshot.get("entry_list", []):
+		if entry is Dictionary:
+			_entries.append((entry as Dictionary).duplicate(true))
+	_violations = int(snapshot.get("violations", 0))

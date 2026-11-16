@@ -4,6 +4,33 @@
 
 ---
 
+## 0.4.0 — 2026-11-16
+
+**类型**：阶段 4 完整进化引擎
+**触发**：v0.3.0 推送后按用户要求推进阶段 4
+
+### 工程（godot/cellarium-release）
+
+- **五类突变**：新增 `scripts/system/Mutation.gd`——点突变 0.001 / 功能 0.0004 / 重复缺失 0.0002 / 发育 0.0005 / 元突变 0.0001，环境压力乘数上限 4.0；确定性种子由 `genome_id/parent_id/tick/salt` 派生，源基因组不可变。
+- **物种与谱系**：新增 `SpeciesSystem.gd`——`Genome.distance()` 加权距离（位点汉明 + 性状 L1×0.05 + 发育程序编辑×0.5），超过 `speciation_distance=6.0` 且距上次分化超过 `speciation_cooldown=600` tick 才新建物种；灭绝档案含寿命/峰值种群/主要死因/核心性状；`export_phylogeny()` 导出节点/父子边/分化事件。`Genome.gd` 增加运行时 `species_id`/`lineage_id`，**不进已冻结的 GNP1 二进制格式**。
+- **统计与生态报告**：新增 `StatisticsSystem.gd`——环形缓冲默认 7200 点 / 30 tick 聚合，采样种群、出生死亡、六类死因、平均体型/速度/代谢、丰富度与均匀度；三条产物为种群折线、物种与死因面板、数据驱动事实。事实全部模板生成，禁止手写死文案。
+- **存档与 T08**：新增 `SaveManager.gd`——版本化 `.gsave` 包捕获/恢复细胞与个体 SoA、基因组池、五通道场（含 pending sources）、物种谱系、统计缓冲、能量账本与 tick 调度状态；`OrganismManager` 暴露 `capture_state`/`restore_state`/`save_state_to_file`/`load_state_from_file`。
+- **繁殖闭环**：`REPRODUCE` 走 `CommandBus`，能量阈值检查 → 突变 → 物种判定 → 新受精卵注册 → 亲代扣能；死亡记录物种死亡与灭绝档案。
+- `EnergyLedger` 增加 `restore_snapshot()` 与完整流水导出，存档往返后守恒断言仍成立。
+
+### 验收
+
+- `SmokeTest.gd`：`SCRIPTS=29 FAILURES=0 EXITCODE=0`——新增突变、物种/冷却/灭绝/谱系导出、统计环形缓冲/数据驱动事实、**T08 存档往返 1000 tick 双路径状态哈希一致**。
+- 主场景 headless 900 帧：无报错、EXITCODE=0；`[GameHUD] ready tools=14 modes=5 substrate=8`。
+- 快照独立 headless 冒烟通过（无 MCP 插件依赖）。
+
+### 边界
+
+- 化学信号子系统仍按 v2.1 §0.5/§12.7 冻结，上游 v1.0 §2.2 修订前不实现。
+- 选择/旋转选区/地形笔刷仍为 stub（仅命令计数），属阶段 5 后续工作。
+
+---
+
 ## 0.3.0 — 2026-11-16
 
 **类型**：阶段 3 收尾（捕食 + 能量守恒）/ 阶段 5 UI 骨架落地
