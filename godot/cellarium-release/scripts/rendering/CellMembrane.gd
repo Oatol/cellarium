@@ -66,11 +66,19 @@ func outline(t: float, stretch: float) -> PackedVector2Array:
 			result.append(_cubic(p0, b1, b2, p1, float(sample) / float(BEZIER_SAMPLES)))
 	return result
 
-## 单位圆点 → 贴图 UV（纹理像素坐标）。
-func texture_uv(points: PackedVector2Array, texture_size: Vector2) -> PackedVector2Array:
+## 单位圆点 → 贴图 UV。uv_rect 是贴图中实际不透明内容的像素矩形，
+## 用来裁掉 guide-icon 的透明内缩，让贴图边缘正好贴合弹性膜。
+func texture_uv(points: PackedVector2Array, texture_size: Vector2, uv_rect: Rect2 = Rect2()) -> PackedVector2Array:
 	var uv: PackedVector2Array = PackedVector2Array()
+	var content: Rect2 = uv_rect
+	if content.size.x <= 0.0 or content.size.y <= 0.0:
+		content = Rect2(Vector2.ZERO, texture_size)
 	for point in points:
-		uv.append((point * 0.5 + Vector2(0.5, 0.5)) * texture_size)
+		var mapped: Vector2 = content.position + (point * 0.5 + Vector2(0.5, 0.5)) * content.size
+		# 谐波/控制点会让轮廓略超单位圆；钳制到内容区，避免采样回透明留白。
+		mapped.x = clampf(mapped.x, content.position.x, content.end.x)
+		mapped.y = clampf(mapped.y, content.position.y, content.end.y)
+		uv.append(mapped)
 	return uv
 
 static func _cubic(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:

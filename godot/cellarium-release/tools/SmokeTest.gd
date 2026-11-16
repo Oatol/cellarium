@@ -1844,6 +1844,29 @@ func _check_cell_scene_renderer() -> bool:
 	if body.polygon.size() < 64 or int(first_view.call("get_outline_point_count")) < 64:
 		push_error("SmokeTest: elastic membrane outline not generated")
 		instance.queue_free(); return false
+	# guide-icon 透明内缩必须被裁掉，UV 只能落在内容矩形内。
+	var content: Rect2 = first_view.call("get_content_rect")
+	var texture_size: Vector2 = (body.texture as Texture2D).get_size()
+	if content.size.x >= texture_size.x - 1.0 or content.size.y >= texture_size.y - 1.0:
+		push_error("SmokeTest: guide-icon transparent padding was not cropped from UV")
+		instance.queue_free(); return false
+	for uv_point in body.uv:
+		if uv_point.x < content.position.x - 0.5 or uv_point.x > content.end.x + 0.5 or uv_point.y < content.position.y - 0.5 or uv_point.y > content.end.y + 0.5:
+			push_error("SmokeTest: membrane UV outside cropped texture content")
+			instance.queue_free(); return false
+	# 极高碰撞速度下形变也必须受限，不能拉成夸张椭圆。
+	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2(1000.0, 0.0))
+	var stretch_value: float = float(first_view.call("get_stretch"))
+	var outline_points: PackedVector2Array = (first_view.get_node_or_null("Outline") as Line2D).points
+	var min_y: float = outline_points[0].y
+	var max_y: float = outline_points[0].y
+	for point in outline_points:
+		min_y = minf(min_y, point.y)
+		max_y = maxf(max_y, point.y)
+	var aspect: float = _x_span(outline_points) / maxf(0.001, max_y - min_y)
+	if stretch_value > 0.081 or aspect > 1.2:
+		push_error("SmokeTest: membrane stretch not bounded under collision velocity spike")
+		instance.queue_free(); return false
 	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
 	var texture_path: String = str(catalog.call("texture_path", 0))
 	if texture_path.is_empty() or load(texture_path) == null:
