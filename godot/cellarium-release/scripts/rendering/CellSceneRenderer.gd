@@ -2,7 +2,7 @@ extends Node2D
 ## 阶段7/8：近景细胞用可复用 CellBase.tscn 实例渲染（程序化膜 + 细胞器）。
 ## 超过 max_instances 时隐藏本层，退回 MultiMesh 色块 LOD（CellBatchRenderer）。
 ## 只读 SoA；不写模拟状态，不参与确定性 hash。
-## Cell Lab 的接触点 A[] 概念在这里派生为邻域方向，交给 CellView 局部压平膜。
+## Cell Lab 的接触点 A[] 在这里派生为三类：普通碰撞、同个体黏附连接、皿壁锚定。
 
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 const CELL_PHYSICS: RefCounted = preload("res://scripts/system/CellPhysics.gd")
@@ -21,6 +21,8 @@ var batch_renderer: CanvasItem = null
 var _pool: Array[Node2D] = []
 var _active_count: int = 0
 var _last_contacts_sent: int = 0
+var _last_adhesions_sent: int = 0
+var _last_wall_contacts_sent: int = 0
 var _dirty: bool = true
 
 func _ready() -> void:
@@ -60,6 +62,12 @@ func get_active_count() -> int:
 func get_last_contact_count() -> int:
 	return _last_contacts_sent
 
+func get_last_adhesion_count() -> int:
+	return _last_adhesions_sent
+
+func get_last_wall_contact_count() -> int:
+	return _last_wall_contacts_sent
+
 func _rebuild() -> void:
 	if organism_manager == null or cell_scene == null:
 		return
@@ -74,6 +82,8 @@ func _rebuild() -> void:
 	var cell_type: PackedByteArray = cells.get("cell_type")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
 	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var link_b: PackedInt32Array = cells.get("link_cell_b")
 	var indices: Array[int] = []
 	for cell_index in range(alive.size()):
 		if alive[cell_index] != 0:
@@ -91,9 +101,20 @@ func _rebuild() -> void:
 	var radius_value: Variant = organism_manager.get("cell_radius")
 	if radius_value != null:
 		radius = maxf(1.0, float(radius_value))
+	var dish_center: Vector2 = Vector2(250.0, 250.0)
+	var dish_radius: float = 240.0
+	var center_value: Variant = organism_manager.get("dish_center")
+	if center_value != null:
+		dish_center = center_value
+	var dish_radius_value: Variant = organism_manager.get("dish_radius")
+	if dish_radius_value != null:
+		dish_radius = maxf(1.0, float(dish_radius_value))
 	var contact_range: float = radius * 2.0 + 1.0
+	var wall_range: float = maxf(1.0, radius * 0.8)
 	var buckets: Dictionary = CELL_PHYSICS.call("build_spatial_hash", cells)
 	_last_contacts_sent = 0
+	_last_adhesions_sent = 0
+	_last_wall_contacts_sent = 0
 	for i in range(indices.size()):
 		var cell_index: int = indices[i]
 		var view: Node2D = _pool[i]
@@ -104,33 +125,52 @@ func _rebuild() -> void:
 		var velocity: Vector2 = Vector2.ZERO
 		if prev_x.size() > cell_index and prev_y.size() > cell_index:
 			velocity = Vector2(pos_x[cell_index] - prev_x[cell_index], pos_y[cell_index] - prev_y[cell_index])
-		var contacts: Array[Vector2] = _collect_contacts(
-			cells, cell_index, buckets, pos_x, pos_y, contact_range
+		var cell_contacts: Dictionary = _collect_contacts(
+			cells, cell_index, buckets, pos_x, pos_y, org_ids,
+			link_a, link_b, contact_range
 		)
-		_last_contacts_sent += contacts.size()
+		var contacts: Array[Vector2] = []
+		for direction in cell_contacts.get("contacts", []):
+			contacts.append(direction)
+		var adhesions: Array[Vector2] = []
+		for direction in cell_contacts.get("adhesions", []):
+			adhesions.append(direction)
+		var position_value: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
+		var wall_contacts: Array[Vector2] = _collect_wall_contacts(
+			position_value, dish_center, dish_radius, radius, wall_range
+		)
+		_last_contacts_sent += contacts.size() + adhesions.size() + wall_contacts.size()
+		_last_adhesions_sent += adhesions.size()
+		_last_wall_contacts_sent += wall_contacts.size()
 		view.call(
 			"apply_cell",
-			Vector2(pos_x[cell_index], pos_y[cell_index]),
+			position_value,
 			type_id,
 			org_id,
 			energy,
 			velocity,
-			contacts
+			contacts,
+			adhesions,
+			wall_contacts
 		)
 	for i in range(indices.size(), _pool.size()):
 		_pool[i].visible = false
 	_active_count = indices.size()
 
-## 从既有空间哈希派生接触方向，只取最近的 6 个；方向是世界坐标，与 CellView 的旋转后轮廓对齐。
+## 从既有空间哈希派生接触方向：同个体且已有 Link 的邻居算黏附，其余算普通碰撞。
+## 方向是世界坐标，与 CellView 的旋转后轮廓对齐；只读，不改变连接或物理状态。
 static func _collect_contacts(
 	cells: RefCounted,
 	cell_index: int,
 	buckets: Dictionary,
 	pos_x: PackedFloat32Array,
 	pos_y: PackedFloat32Array,
+	org_ids: PackedInt32Array,
+	link_a: PackedInt32Array,
+	link_b: PackedInt32Array,
 	contact_range: float
-) -> Array[Vector2]:
-	var result: Array[Vector2] = []
+) -> Dictionary:
+	var result: Dictionary = {"contacts": [], "adhesions": []}
 	if cells == null or buckets.is_empty():
 		return result
 	var alive: PackedByteArray = cells.get("cell_alive")
@@ -149,12 +189,57 @@ static func _collect_contacts(
 		var distance_squared: float = delta.length_squared()
 		if distance_squared <= 0.000001 or distance_squared > range_squared:
 			continue
-		candidates.append({"dir": delta.normalized(), "dist": distance_squared})
+		var same_org: bool = (
+			cell_index < org_ids.size()
+			and neighbor < org_ids.size()
+			and org_ids[cell_index] == org_ids[neighbor]
+		)
+		var linked: bool = same_org and _has_link(link_a, link_b, cell_index, neighbor)
+		candidates.append({
+			"dir": delta.normalized(),
+			"dist": distance_squared,
+			"adhesion": linked
+		})
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return float(a["dist"]) < float(b["dist"])
 	)
 	for candidate in candidates.slice(0, 6):
-		result.append(candidate["dir"])
+		var direction: Vector2 = candidate["dir"]
+		if bool(candidate["adhesion"]):
+			result["adhesions"].append(direction)
+		else:
+			result["contacts"].append(direction)
+	return result
+
+static func _has_link(
+	link_a: PackedInt32Array,
+	link_b: PackedInt32Array,
+	a: int,
+	b: int
+) -> bool:
+	for link_index in range(link_a.size()):
+		if link_index >= link_b.size():
+			break
+		if (link_a[link_index] == a and link_b[link_index] == b) or (link_a[link_index] == b and link_b[link_index] == a):
+			return true
+	return false
+
+## 皿壁接触方向从细胞中心指向皿外法线，只在接近皿壁时返回，供贴壁膜压平。
+static func _collect_wall_contacts(
+	position: Vector2,
+	dish_center: Vector2,
+	dish_radius: float,
+	cell_radius: float,
+	wall_range: float
+) -> Array[Vector2]:
+	var result: Array[Vector2] = []
+	var offset: Vector2 = position - dish_center
+	var distance_value: float = offset.length()
+	if distance_value <= 0.000001:
+		return result
+	var wall_radius: float = maxf(1.0, dish_radius - maxf(1.0, cell_radius))
+	if distance_value >= wall_radius - wall_range:
+		result.append(offset / distance_value)
 	return result
 
 func _ensure_pool(wanted: int) -> void:

@@ -50,3 +50,29 @@ static func color(type_id: int) -> Color:
 static func accent_color(type_id: int) -> Color:
 	var hue: float = fposmod(float(type_id) * 0.137 + 0.52, 1.0)
 	return Color.from_hsv(hue, 0.62, 0.72, 1.0)
+
+## 多细胞协作的角色配色，按 CellLab 六类角色分组：结构/运动/能量/信息/稳态/生殖。
+static func role(type_id: int) -> String:
+	if type_id == 8 or type_id == 11 or type_id == 16:
+		return "结构"
+	if type_id == 1 or type_id == 2 or type_id == 3:
+		return "运动"
+	if type_id == 4 or type_id == 6 or type_id == 7 or type_id == 9 or type_id == 17:
+		return "能量"
+	if type_id == 5 or type_id == 12 or type_id == 13:
+		return "信息"
+	if type_id == 10:
+		return "稳态"
+	if type_id == 0 or type_id == 14 or type_id == 15:
+		return "生殖"
+	return "其他"
+
+static func role_color(type_id: int) -> Color:
+	match role(type_id):
+		"结构": return Color(0.56, 0.82, 0.75, 1.0)
+		"运动": return Color(0.48, 0.72, 1.0, 1.0)
+		"能量": return Color(0.95, 0.78, 0.43, 1.0)
+		"信息": return Color(0.77, 0.61, 1.0, 1.0)
+		"稳态": return Color(0.49, 0.88, 0.63, 1.0)
+		"生殖": return Color(1.0, 0.62, 0.71, 1.0)
+		_: return color(type_id)

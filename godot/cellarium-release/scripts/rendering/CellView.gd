@@ -17,8 +17,10 @@ const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 ## 速度拉伸上限，碰撞冲量先限幅再低通，避免夸张椭圆。
 @export_range(0.0, 0.2, 0.01) var max_stretch: float = 0.08
 @export_range(0.05, 1.0, 0.05) var stretch_smoothing: float = 0.18
-## 接触点的膜压平深度（相对半径）；Cell Lab 用 (r - Cell.a) * 0.8。
-@export_range(0.0, 0.5, 0.01) var contact_flatten: float = 0.22
+## 三类接触的膜压平深度（相对半径）。普通碰撞最浅，黏附连接最平，皿壁居中。
+@export_range(0.0, 0.3, 0.01) var contact_flatten: float = 0.09
+@export_range(0.0, 0.3, 0.01) var adhesion_flatten: float = 0.15
+@export_range(0.0, 0.3, 0.01) var wall_flatten: float = 0.13
 
 @onready var body: Polygon2D = get_node_or_null("Body") as Polygon2D
 @onready var outline: Line2D = get_node_or_null("Outline") as Line2D
@@ -30,6 +32,8 @@ var _type_id: int = -1
 var _org_id: int = -1
 var _velocity: Vector2 = Vector2.ZERO
 var _contacts: Array[Vector2] = []
+var _adhesions: Array[Vector2] = []
+var _wall_contacts: Array[Vector2] = []
 var _shape_time: float = 0.0
 var _accumulated: float = 0.0
 var _stretch: float = 0.0
@@ -50,11 +54,15 @@ func apply_cell(
 	org_id: int,
 	energy: float,
 	velocity: Vector2 = Vector2.ZERO,
-	contacts: Array[Vector2] = []
+	contacts: Array[Vector2] = [],
+	adhesions: Array[Vector2] = [],
+	wall_contacts: Array[Vector2] = []
 ) -> void:
 	global_position = position
 	_velocity = velocity
 	_contacts = contacts.duplicate()
+	_adhesions = adhesions.duplicate()
+	_wall_contacts = wall_contacts.duplicate()
 	if type_id != _type_id or org_id != _org_id:
 		_org_id = org_id
 		_apply_type(type_id)
@@ -104,7 +112,9 @@ func _refresh_shape() -> void:
 	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:
 		var rotated: Vector2 = point.rotated(angle)
-		var flattened: Vector2 = _flatten_contact(rotated)
+		var flattened: Vector2 = _flatten_contacts(rotated, _contacts, contact_flatten)
+		flattened = _flatten_contacts(flattened, _adhesions, adhesion_flatten)
+		flattened = _flatten_contacts(flattened, _wall_contacts, wall_flatten)
 		world_points.append(flattened * visual_radius)
 		inner_points.append(flattened * visual_radius * 0.62)
 	body.polygon = world_points
@@ -112,18 +122,38 @@ func _refresh_shape() -> void:
 	if inner_ring != null:
 		inner_ring.points = inner_points
 
-## 接触点的膜压平：沿接触法线把轮廓顶点向内拉，仍保持连续闭合曲线。
-func _flatten_contact(point: Vector2) -> Vector2:
-	if _contacts.is_empty():
+## 接触压平：把接触弧上的顶点投影到一条切平面，形成浅而宽的接触面。
+## 旧版按角度缩放半径会得到深 V 形凹口；这里在接触核心区保留平面，边缘用 smoothstep 过渡。
+static func _flatten_contacts(
+	point: Vector2,
+	normals: Array[Vector2],
+	depth: float
+) -> Vector2:
+	var result: Vector2 = point
+	for normal in normals:
+		result = _flatten_against(result, normal, depth)
+	var length_value: float = result.length()
+	if length_value < 0.58 and length_value > 0.000001:
+		result = result / length_value * 0.58
+	return result
+
+static func _flatten_against(point: Vector2, normal: Vector2, depth: float) -> Vector2:
+	if normal.length_squared() < 0.5:
 		return point
-	var direction: Vector2 = point.normalized()
-	var depth: float = 0.0
-	for contact in _contacts:
-		var alignment: float = direction.dot(contact)
-		if alignment > 0.78:
-			var amount: float = (alignment - 0.78) / 0.22
-			depth = maxf(depth, amount * amount * contact_flatten)
-	return point * maxf(0.55, 1.0 - depth)
+	var n: Vector2 = normal.normalized()
+	var projection: float = point.dot(n)
+	var edge: float = 0.80
+	var core: float = 0.88
+	if projection <= edge:
+		return point
+	var weight: float = _smoothstep(edge, core, projection)
+	var plane: float = 1.0 - clampf(depth, 0.0, 0.3)
+	var clipped: Vector2 = point - n * maxf(0.0, projection - plane)
+	return point.lerp(clipped, weight)
+
+static func _smoothstep(edge_0: float, edge_1: float, value: float) -> float:
+	var t: float = clampf((value - edge_0) / maxf(0.0001, edge_1 - edge_0), 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
 
 func _apply_type(type_id: int) -> void:
 	_type_id = type_id
@@ -170,3 +200,9 @@ func get_stretch() -> float:
 
 func get_contact_count() -> int:
 	return _contacts.size()
+
+func get_adhesion_count() -> int:
+	return _adhesions.size()
+
+func get_wall_contact_count() -> int:
+	return _wall_contacts.size()

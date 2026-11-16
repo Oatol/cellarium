@@ -143,6 +143,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_cell_scene_renderer():
 		failures += 1
+	if not await _check_multicellular_cooperation():
+		failures += 1
 	if not _check_cell_membrane():
 		failures += 1
 	if not await _check_camera_speed_editor():
@@ -1815,9 +1817,12 @@ func _check_cell_scene_renderer() -> bool:
 	var batch: Node = instance.get_node_or_null("DishView/CellBatch")
 	var manager: Node = instance.get_node_or_null("Simulation/OrganismManager")
 	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
-	if layer == null or batch == null or manager == null or bus == null:
+	var tick_core: Node = instance.get_node_or_null("Simulation/TickCore")
+	if layer == null or batch == null or manager == null or bus == null or tick_core == null:
 		push_error("SmokeTest: CellSceneLayer nodes missing")
 		instance.queue_free(); return false
+	# 冻结发育 tick，避免测试期间自动分裂改变预期细胞数。
+	tick_core.set("running", false)
 	var cells: RefCounted = manager.get("cells") as RefCounted
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var expected: int = 0
@@ -1893,6 +1898,24 @@ func _check_cell_scene_renderer() -> bool:
 	if int(first_view.call("get_contact_count")) != 1:
 		push_error("SmokeTest: CellView did not retain contact direction")
 		instance.queue_free(); return false
+	# 接触面必须是浅而平的弧段，不是单点深 V 凹口。
+	var flat_point_count: int = 0
+	for point in flattened_points:
+		if point.x > flattened_max_x - 0.15:
+			flat_point_count += 1
+	if flat_point_count < 4 or flattened_max_x < plain_max_x - 1.5:
+		push_error("SmokeTest: contact flatten must be shallow and planar")
+		instance.queue_free(); return false
+	# 皿壁接触方向同样应该压平朝壁一侧的膜。
+	var right_wall: Array[Vector2] = [Vector2.RIGHT]
+	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2.ZERO, no_contacts, no_contacts, right_wall)
+	var wall_points: PackedVector2Array = (first_view.get_node_or_null("Outline") as Line2D).points
+	if _max_x(wall_points) >= plain_max_x - 0.2:
+		push_error("SmokeTest: dish wall contact did not flatten membrane inward")
+		instance.queue_free(); return false
+	if int(first_view.call("get_wall_contact_count")) != 1:
+		push_error("SmokeTest: CellView did not retain wall contact direction")
+		instance.queue_free(); return false
 	first_view.call("apply_cell", Vector2(250, 250), 0, 1, 1.0, Vector2.ZERO, no_contacts)
 	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
 	var color_a: Color = catalog.call("color", 0)
@@ -1914,6 +1937,72 @@ func _check_cell_scene_renderer() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK procedural CellBase.tscn / contact flatten / elastic membrane / scene-render refresh")
+	return true
+
+func _check_multicellular_cooperation() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", true)
+	root.add_child(instance)
+	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	tick_core.set("running", true)
+	tick_core.call("clear_carry")
+	# 发育程序每 tick 执行一条指令；9 条指令生成 4 细胞 + 3 条黏附连接。
+	for _frame in range(12):
+		tick_core.call("_process", 1.0 / 60.0)
+	await process_frame
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var cell_type: PackedByteArray = cells.get("cell_type")
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var alive_count: int = 0
+	var type_set: Dictionary = {}
+	for cell_index in range(alive.size()):
+		if alive[cell_index] == 0:
+			continue
+		alive_count += 1
+		type_set[int(cell_type[cell_index])] = true
+	if alive_count != 4 or link_a.size() != 3:
+		push_error("SmokeTest: demo multicellular organism did not develop 4 cells / 3 links")
+		instance.queue_free(); return false
+	if not type_set.has(2) or not type_set.has(4) or not type_set.has(5):
+		push_error("SmokeTest: demo organism must contain motion/energy/info cell roles")
+		instance.queue_free(); return false
+	var link_layer: Node = instance.get_node("DishView/LinkLayer")
+	var scene_layer: Node = instance.get_node("DishView/CellSceneLayer")
+	if int(link_layer.call("get_rendered_link_count")) != 3:
+		push_error("SmokeTest: LinkLayer did not render all adhesion bridges")
+		instance.queue_free(); return false
+	if int(scene_layer.call("get_last_adhesion_count")) <= 0:
+		push_error("SmokeTest: CellSceneLayer did not derive adhesion contacts from links")
+		instance.queue_free(); return false
+	var catalog: RefCounted = load("res://scripts/rendering/CellVisualCatalog.gd").new() as RefCounted
+	if str(catalog.call("role", 10)) != "稳态":
+		push_error("SmokeTest: nitrocyte must map to homeostasis role")
+		instance.queue_free(); return false
+	if catalog.call("role_color", 2) == catalog.call("role_color", 4):
+		push_error("SmokeTest: cooperation roles must have distinct colors")
+		instance.queue_free(); return false
+	# 把细胞推到皿壁附近，渲染层应派生出朝壁接触方向。冻结 tick 防止物理把它推回。
+	tick_core.set("running", false)
+	var dish_center: Vector2 = manager.get("dish_center")
+	var dish_radius: float = float(manager.get("dish_radius"))
+	var radius: float = float(manager.get("cell_radius"))
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	pos_x[0] = dish_center.x + dish_radius - radius - 1.0
+	pos_y[0] = dish_center.y
+	cells.set("cell_pos_x", pos_x)
+	cells.set("cell_pos_y", pos_y)
+	scene_layer.call("mark_dirty")
+	await process_frame
+	if int(scene_layer.call("get_last_wall_contact_count")) <= 0:
+		push_error("SmokeTest: CellSceneLayer did not derive dish wall contact")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK 4-cell cooperation demo / role palette / link bridges / wall contact")
 	return true
 
 func _max_x(points: PackedVector2Array) -> float:
