@@ -184,7 +184,7 @@ public final float a(int i) { return this.I[this.D].v[i]; }
 |---:|---|---|
 | `v[0]` | `−60..60` | 感知输入增益（`d(int)` 中 `v[0]·fSqrt`，clamp ±20） |
 | `v[1..4]` | `0..1` | 同类感知的颜色目标 `v[1..3]` 与半径阈值 `v[4]`（`d(int)` 的 `u[3]==0` 分支） |
-| `v[5]` | `0..√3` | 本轮未逐调用点确认，保留为未确认项 |
+| `v[5]` | `0..√3` | [证实] `CellWorld.e(double)` 在 `Gene.l` 为真、分裂后建立母女连接时执行 `float fA = cell.a(5); link.l = fA; link2.l = fA;`，即新连接长度参数；不是行为总线槽 |
 | `v[6]` | `0.5..2` | 接触刚度（`d(int)` 的 `a(6)`）+ 分裂能量修正（`e(double)`） |
 
 ### 6.2 [证实] `Cell.a(int,int)` 全索引语义 = 调制输出总线，不是简单参数表
@@ -242,28 +242,99 @@ d26 = cross(P18, v18) / cross(P17, v18)
 
 即**以原点（细胞中心）为顶点，弦 18 为对边的三角形中，射线 `O→P17` 与对边相交的参数**。数值验证 `d26` 与 `cross(P18,Q18)/cross(P17, Q18−P18)` 逐位相等。当 `0 < d26 < 1` 时，说明 `P17` 被弦 18 挡在内侧 → 标记弦 `i17` 为 `e = true`（渲染时跳过）。
 
-**等价实现要点（供 Godot 复刻）**：不需要真的构造三角形，直接用带符号面积比 `d26` 判定即可；端点已排序（`Arrays.sort(A, 0, B)`）后只需检查相邻弦，可省去 O(B²) 的两两比较；`e` 标记是渲染剔除位，`f` 标记表示该弦端点被相交截断（弧段插值时跳过）。
+**等价实现要点（供 Godot 复刻）**：不需要真的构造三角形，直接用带符号面积比 `d26` 判定即可；`e` 标记是渲染剔除位，`f` 标记表示该弦端点被相交截断（弧段插值时跳过）。第三轮确认：排序发生在这两层 O(B²) 检查之后，不能改成"排序后只查相邻弦"（见 §7.3）。
 
-## 7. [未确认] 仍需证据的边界
+## 7. [证实] 三个残留边界（2026-11-17 第三轮）
 
-- `Gene.v[5]` 的具体消费点（本轮未逐调用点追踪）。
-- `u.compareTo()` 的排序键（弦端点排序的精确角度定义），当前按"按角度排序"记录。
-- 第二层遮挡检查的 `0 < d26 < 1` 在不排序时的 O(B²) 复杂度，`Arrays.sort` 后的相邻优化需实测确认。
+### 7.1 `u.compareTo()` 的精确排序键
 
-## 8. 参考证据 ID 索引
+`com.saterskog.cell_lab.u.compareTo(u)` 方法体：
 
-（仅列工具本次返回中确实出现的 evidence_id 短前缀；完整值可由 REA 会话按前缀检索，避免凭记忆补全 64 位哈希。）
+```java
+if (this.e && uVar.e) return 0;
+if (this.e) return 1;
+if (uVar.e) return -1;
+if (uVar.b * this.b < 0.0d) return this.b > 0.0d ? -1 : 1;
+return uVar.b * this.a > this.b * uVar.a ? -1 : 1;
+```
+
+- `e=true`（遮挡剔除）的弦排到末尾。
+- 其余弦按端点 1 的 `b` 符号分组：`b>0` 在前，`b<0` 在后。
+- 同号时比较 `other.b * this.a > this.b * other.a`，即按 `a/b` 降序；等价于极角 `atan2(b,a)` 在 `[0,2π)` 升序。
+- 结论：此前"按角度排序"的记录得到证实，但精确键是 `a/b` 的交叉相乘比较 + `b` 符号分组，不是直接 `atan2` 浮点比较。
+
+### 7.2 `Gene.v[5]` 的消费点
+
+`CellWorld.e(double)` 分裂逻辑中，仅当 `Gene.l` 为真（分裂后保留母女连接）时：
+
+```java
+float fA = cell.a(5);
+link.l = fA;
+link2.l = fA;
+```
+
+因 `Cell.a(int i) = I[D].v[i]`，所以 `v[5]` 是**新连接的长度/初始间距参数**。注意 `Cell.a(5,0)` 是另一套调制输出总线，不能与 `Gene.v[5]` 混淆。
+
+### 7.3 遮挡检查不能优化为排序后相邻比较
+
+`CellWorld.a(FFFF)` 的实际顺序是：
+
+1. 第一层：对 `A[]` 两两求交并截断端点，双层循环覆盖所有 `(i, (i+k) mod B)`，是 O(B²)。
+2. 第二层：对每条未剔除弦与所有其他弦做 `0 < d26 < 1` 遮挡判断，也是 O(B²)。
+3. **之后**才执行 `Arrays.sort(cell.A, 0, cell.B)`。
+
+因此"排序后只查相邻弦"在当前代码路径中不成立；Godot 侧保留完整 O(B²) 判据才是等价复刻。B 上限 20，代价可接受。
+
+## 8. [未确认] 仍需证据的边界
+
+- `Gene.v[5]` 的取值范围 `0..√3` 是否在所有类型中都被解释为连接长度，当前只确认了 `e(double)` 这一处消费点。
+- Macro 版 `SimulationWorld` 把通道数扩到 101 后，`u.compareTo()` 是否仍用于同一套弦几何，未单独反编译 Macro APK 的对应类。
+
+## 9. 参考证据 ID 索引
+
+（仅列工具实际返回的 evidence_id；短前缀来自早期会话，完整 ID 来自本轮，避免凭记忆补全 64 位哈希。）
 
 - `ev_de5f0119d789…`：`Cell.a(int)` = `I[D].v[i]` 直读（刚度映射）
 - `ev_ac24ab6c79fd…`：`Cell.a(int,int)` 调制总线完整方法体
 - `ev_aa7d9234f915…`：`Gene.a` 内部类字段（a/b/c/d/e/f）
 - `ev_d91292889d89…`：`Cell.a()` 有效质量（LIPOCYTE 含 S）
-- `ev_0c1930e85ef1c…`：`CellWorld.d(int)` 接触物理 + 弦端点
-- `ev_c3f729586c137…`：`CellWorld.f(double)` 半径积分
-- `ev_6d733332b66d3…`：`CellWorld.e(double)` 分裂
-- `ev_058788db988c9…`：`CellWorld.g(double)` 代谢
-- `ev_1550a20c215cf…`：`CellWorld.c(double)` 速度积分
+- `ev_384d742089242f069120f68f5ac428299eae321f9f9334c3bd27a3bc5b59ae5b`：`CellWorld.d(int)` 完整方法体（接触物理 + `A[]` 弦端点 + 皿壁弦）
+- `ev_243f4ae4e394a3f49d2c8178698153c769fbfb9069aa71489617eff278e4e860`：`CellWorld.a(FFFF)` 完整方法体（相交截断 / 遮挡 / 排序 / 圆弧重建）
+- `ev_a0753dce735ed54d0887951ddd67152eed1e8a6353a5319b3240010f5606fe01`：`CellWorld.i()` 每 tick 清零 `cell.B`
+- `ev_88f4fee6465ee195389c675418c326bb3504bd6721729a29f5954f90be56961a`：`CellWorld.c(boolean,double)` 设置 `U=z` 后逐细胞 `d(i)`
+- `ev_b41aa7296d69f62d275e24d24893976cdcbbf4743c8e29da799ffa0a443628eb`：`CellWorld.a(boolean,double)` = `b(z,d)` 后 `a(d)`
+- `ev_5118658c5fb611243f0611bc4e0fb3e8257312c8b69779c21b513890c43c7fb2`：`CellWorld.b(boolean,double)` update1 阶段顺序
+- `ev_e7d7309c40f094d6c03d6dc5485664c12ebc30892397eb7d99f7c1240714e351`：`u.compareTo()` 排序键
+- `ev_22c3408b3e3c01183f81021b33dabcc438aeb2e41bce50afbf2ab074be68cf23`：`CellWorld.e(double)` 分裂与 `Gene.v[5]` 连接长度
+- `ev_54b3a424a92363d552a50794586f536de460273f9d5f3e8cdaca7d5ca1e3fed3`：`CellWorld.f(double)` 位置 / 半径积分
+- `ev_d78d513d05a3482dc97dc00e83d5eb46c4002599dfcbe154bb7f358a05dca9f4`：`CellWorld.g(double)` 代谢
+- `ev_c3f729586c137…`：`CellWorld.f(double)` 半径积分（早期证据）
+- `ev_6d733332b66d3…`：`CellWorld.e(double)` 分裂（早期证据）
+- `ev_058788db988c9…`：`CellWorld.g(double)` 代谢（早期证据）
+- `ev_1550a20c215cf…`：`CellWorld.c(double)` 速度积分（早期证据）
 - `ev_63369ac0e02d0…`：`CellWorld.i()` 受精（旁证，非四问核心）
-- `ev_2214552d56c2f…`：`CellWorld.a(FFFF)` 几何构建
-- `ev_3d3c8ccb4e4e2…`：`CellWorld.a(float[])` 绘制分发
-- 本地文件：`analysis/cell_lab_apk_extract/tmp_zh/res/raw/cell_vert.glsl`、`cell_frag.glsl`
+- `ev_2214552d56c2f…`：`CellWorld.a(FFFF)` 几何构建（早期证据）
+- `ev_3d3c8ccb4e4e2…`：`CellWorld.a(float[])` 绘制分发（早期证据）
+- 本地 shader（本轮从 APK 解压只读核对）：`res/raw/cell_vert.glsl`、`res/raw/cell_frag.glsl`。顶点只传 `vPosition.xy*50`，片元用 `discard` 做精确圆裁剪；相位 `tp` 只参与着色，不改几何。
+
+## 10. 弦抽搐：代码级归因与 Godot 修复（v0.8.9）
+
+### 10.1 Cell Lab 为什么不会抽搐
+
+- `i()` 每 tick 先 `cell.B = 0`；`c(boolean,double)` 设置 `U=z` 后调用 `d(i)`，在同一物理阶段把公共弦写入双方 `A[]`。
+- 几何构建 `a(FFFF)` 用**精确 `cell.d`** 和 `A[]` 端点生成多边形顶点；相邻端点之间的圆弧用解析圆插值。
+- `cell_vert.glsl` 只把局部偏移乘 50；`cell_frag.glsl` 以 `col.a = cell.d*50` 做片元级 `discard`。相位/呼吸量 `f24/f25` 写入 `ae[]`，经 `vTPosition` 仅影响着色，不参与顶点位置。
+- 因此 Cell Lab 的接触端点来自同一 tick 的解析几何，且没有"呼吸膜与固定弦求交"的二阶扰动。
+
+### 10.2 Godot v0.8.8 的实现偏差
+
+1. `CellView._refresh_shape()` 先生成 12 控制点 Catmull-Rom + 3 谐波 + 速度拉伸的呼吸轮廓，再用共享弦做 Sutherland-Hodgman 半平面裁剪；弦端点固定在精确圆上，轮廓却在呼吸，交点自然滑动。
+2. 裁剪按 `_chords` 的下发顺序逐个执行；邻居顺序由空间哈希给出，顺序变化会让两条相交弦的裁剪结果互换。
+3. 缺少 Cell Lab 的第一层"弦相交截断"与排序步骤，`cull_occluded()` 只做了第二层 `d26`。
+
+### 10.3 v0.8.9 修复（仅视觉层）
+
+- `CellContactChords.gd` 新增 `make_unit_chords / truncate_intersections / mark_occluded / chord_less / sort_chords / prepare_for_render / build_outline`，严格按 Cell Lab 顺序：相交截断 → 遮挡剔除 → 排序 → 端点 + 解析圆弧重建轮廓。
+- `CellView.gd` 在存在弦时直接采用重建轮廓，不再让呼吸相位参与接触边界；无弦时保留原弹性膜路径。
+- `circle_chord()` 的端点顺序改为与 Cell Lab `A[]` 的 endpoint1/endpoint2 一致（`middle - perp*h` / `middle + perp*h`）。
+- 所有改动只读 SoA；不进入 `CommandBus`，不写 tick 状态。SmokeTest 新增断言：输入顺序置换后轮廓逐点一致、呼吸相位变化后接触轮廓逐点一致、反复刷新视图前后 `OrganismManager.get_state_hash()` 不变。

@@ -1892,10 +1892,12 @@ func _check_cell_scene_renderer() -> bool:
 	if organelle_count < 5:
 		push_error("SmokeTest: procedural cell needs at least 5 organelles")
 		instance.queue_free(); return false
-	if body.polygon.size() < 64 or int(first_view.call("get_outline_point_count")) < 64:
-		push_error("SmokeTest: elastic membrane outline not generated")
+	var initial_chord_count: int = int(first_view.call("get_chord_count"))
+	var minimum_outline_points: int = 4 if initial_chord_count > 0 else 64
+	if body.polygon.size() < minimum_outline_points or int(first_view.call("get_outline_point_count")) < minimum_outline_points:
+		push_error("SmokeTest: membrane outline not generated")
 		instance.queue_free(); return false
-	if inner_ring.points.size() < 64 or nucleus.polygon.size() < 8:
+	if inner_ring.points.size() < minimum_outline_points or nucleus.polygon.size() < 8:
 		push_error("SmokeTest: inner ring / nucleus not generated")
 		instance.queue_free(); return false
 	# 极高碰撞速度下形变也必须受限，不能拉成夸张椭圆。
@@ -2001,6 +2003,42 @@ func _check_shared_chords() -> bool:
 	if kept.size() != 1:
 		push_error("SmokeTest: cull_occluded must drop the hidden chord")
 		return false
+	# 弦轮廓必须与输入顺序无关，且弦端点就是膜顶点；这是消除接触点抽搐的核心契约。
+	var left_chord: Dictionary = {"a": Vector2(-6.0, -2.0), "b": Vector2(-6.0, 2.0), "peer": 0}
+	var right_chord: Dictionary = {"a": Vector2(6.0, -2.0), "b": Vector2(6.0, 2.0), "peer": 1}
+	var unit_forward: Array = helper.call(
+		"make_unit_chords", [left_chord, right_chord], Vector2.ZERO, 0.0, 7.0
+	)
+	var prepared_forward: Array = helper.call("prepare_for_render", unit_forward)
+	var outline_forward: PackedVector2Array = helper.call("build_outline", prepared_forward, 3)
+	var unit_reverse: Array = helper.call(
+		"make_unit_chords", [right_chord, left_chord], Vector2.ZERO, 0.0, 7.0
+	)
+	var prepared_reverse: Array = helper.call("prepare_for_render", unit_reverse)
+	var outline_reverse: PackedVector2Array = helper.call("build_outline", prepared_reverse, 3)
+	if outline_forward.size() < 4 or outline_forward.size() != outline_reverse.size():
+		push_error("SmokeTest: chord outline must be stable under input permutation")
+		return false
+	for index in range(outline_forward.size()):
+		if outline_forward[index].distance_to(outline_reverse[index]) > 0.0001:
+			push_error("SmokeTest: chord outline order changed with neighbor order")
+			return false
+		if absf(outline_forward[index].length() - 1.0) > 0.001:
+			push_error("SmokeTest: chord outline vertices must lie on the unit circle")
+			return false
+	for chord_entry in prepared_forward:
+		var outline_endpoint_a: Vector2 = chord_entry.get("local_a", Vector2.ZERO)
+		var outline_endpoint_b: Vector2 = chord_entry.get("local_b", Vector2.ZERO)
+		var found_a: bool = false
+		var found_b: bool = false
+		for point in outline_forward:
+			if point.distance_to(outline_endpoint_a) < 0.0001:
+				found_a = true
+			if point.distance_to(outline_endpoint_b) < 0.0001:
+				found_b = true
+		if not found_a or not found_b:
+			push_error("SmokeTest: chord endpoints must be membrane vertices")
+			return false
 	# 渲染层每对细胞只算一次，双方视图收到完全相同的世界端点。
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var instance: Node = scene.instantiate()
@@ -2077,8 +2115,31 @@ func _check_shared_chords() -> bool:
 	if view_with_chord == null:
 		push_error("SmokeTest: no view with chords")
 		instance.queue_free(); return false
+	# 接触轮廓不得随呼吸相位变化；同一批弦重复刷新应逐点一致。
+	var outline_before: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points.duplicate()
+	view_with_chord.set("_shape_time", 1.2345)
+	view_with_chord.call("_refresh_shape")
+	var outline_after: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
+	if outline_before.size() != outline_after.size():
+		push_error("SmokeTest: contact outline changed size with membrane phase")
+		instance.queue_free(); return false
+	for index in range(outline_before.size()):
+		if outline_before[index].distance_to(outline_after[index]) > 0.001:
+			push_error("SmokeTest: contact outline twitched with membrane phase")
+			instance.queue_free(); return false
+	# 渲染只读：反复刷新视图不得改变模拟状态 hash。
+	var hash_before_render: int = int(manager.call("get_state_hash"))
+	for index in range(chord_counts.size()):
+		var refresh_view: Node2D = layer.get_child(index) as Node2D
+		if refresh_view != null:
+			refresh_view.call("_refresh_shape")
+			refresh_view.call("_refresh_shape")
+	var hash_after_render: int = int(manager.call("get_state_hash"))
+	if hash_before_render != hash_after_render:
+		push_error("SmokeTest: chord rendering must not change simulation state hash")
+		instance.queue_free(); return false
 	var points: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
-	if points.size() < 16:
+	if points.size() < 4:
 		push_error("SmokeTest: chord-clipped membrane lost its outline")
 		instance.queue_free(); return false
 	instance.queue_free()

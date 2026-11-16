@@ -113,20 +113,17 @@ func _refresh_shape() -> void:
 	var unit: PackedVector2Array = _membrane.outline(_shape_time, _stretch)
 	var angle: float = 0.0 if _stretch < 0.001 else _velocity.angle()
 	if not _chords.is_empty():
-		# 共享弦路径：弦端点由渲染层成对计算并原样下发，双方膜在接触处共边。
-		# 先剔除被遮挡的弦，再把轮廓裁到每条弦的内侧（保留细胞中心一侧）。
-		var unit_chords: Array = []
-		for chord in _chords:
-			var endpoint_a: Vector2 = chord.get("a", Vector2.ZERO)
-			var endpoint_b: Vector2 = chord.get("b", Vector2.ZERO)
-			unit_chords.append({
-				"local_a": (endpoint_a - global_position).rotated(-angle) / visual_radius,
-				"local_b": (endpoint_b - global_position).rotated(-angle) / visual_radius,
-				"kind": int(chord.get("kind", 0))
-			})
-		unit_chords = CHORDS.call("cull_occluded", unit_chords)
-		for chord in unit_chords:
-			unit = CHORDS.call("clip_keep_origin", unit, chord["local_a"], chord["local_b"])
+		# 共享弦路径按 Cell Lab a(FFFF) 的顺序：相交截断 → 遮挡剔除 → 排序 → 圆弧重建轮廓。
+		# 不再用呼吸扰动的膜做顺序相关半平面裁剪，接触点因此不会随相位或邻居顺序抽搐。
+		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, angle, visual_radius)
+		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
+		var chord_outline: PackedVector2Array = CHORDS.call("build_outline", prepared, 3)
+		if chord_outline.size() >= 3:
+			unit = chord_outline
+		else:
+			# 退化回退：保留旧半平面裁剪，避免极端几何下轮廓为空。
+			for chord in prepared:
+				unit = CHORDS.call("clip_keep_origin", unit, chord["local_a"], chord["local_b"])
 	var world_points: PackedVector2Array = PackedVector2Array()
 	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:

@@ -4,6 +4,28 @@
 
 ---
 
+## 0.8.9 — 2026-11-17
+
+**类型**：共享弦抽搐修复 + Cell Lab 视觉对齐代码级确认
+**触发**：用户反馈「使用弦裁剪后接触点的弦会抽搐」，要求查 Cell Lab 相关代码、确认物理碰撞与视觉是否对齐、不改变模拟结果或确定性 hash，并确认仍需证据的边界
+
+### 代码研究（APK 静态反编译，未执行）
+- `CellWorld.i()` 每 tick 清零 `cell.B`；`c(boolean,double)` 设置 `U=z` 后逐细胞 `d(i)`；`d(int)` 在同一相交计算里同时产生力与 `A[]` 弦端点。
+- `CellWorld.a(FFFF)` 使用精确 `cell.d` 与 `A[]` 端点构建顶点，圆弧解析插值；`cell_vert.glsl`/`cell_frag.glsl` 的相位 `tp` 只参与着色，不改几何。
+- `u.compareTo()` 排序键 = 遮挡弦置末 + `b` 符号分组 + `a/b` 降序（等价极角 `[0,2π)` 升序）。
+- `Gene.v[5]` 消费点 = `CellWorld.e(double)` 分裂建链时的 `link.l` 长度参数；不是行为总线槽。
+- 相交截断与遮挡剔除都在 `Arrays.sort()` 之前，均为 O(B²)，不能优化为排序后相邻检查。
+- 完整证据与结论见 `analysis/CellLab_细胞物理与外观_代码级分析.md` §7/§9/§10。
+
+### Godot 落地（仅视觉层）
+- `CellContactChords.gd`：新增 `make_unit_chords / truncate_intersections / mark_occluded / chord_less / sort_chords / prepare_for_render / build_outline`；端点顺序改为 Cell Lab `A[]` 的 endpoint1/endpoint2；按「相交截断 → 遮挡剔除 → 排序 → 端点+解析圆弧」重建轮廓。
+- `CellView.gd`：有弦时直接采用重建轮廓，不再用 20fps 呼吸膜做顺序相关半平面裁剪；无弦时保留原弹性膜/法线压平路径。
+- `SmokeTest.gd`：新增输入顺序置换不变、呼吸相位不变、弦端点即膜顶点、`get_state_hash()` 渲染前后不变断言；原轮廓点数阈值改为按有无弦区分。
+- 验证：源码 `SCRIPTS=43 FAILURES=0 EXITCODE=0`，连续 3 次通过。
+- 约束：所有改动只读 SoA，不经过 `CommandBus`，不写 tick 状态；物理与确定性 hash 不变。
+
+---
+
 ## 0.8.8 — 2026-11-17
 
 **类型**：Cell Lab 三项边界确认 + 共享弦端点贴合落地
