@@ -19,6 +19,17 @@ const CHANNEL_NAMES: Array[String] = ["营养0", "温度1", "氧气2", "光照3"
 const GENE_SLOT_COUNT: int = 40
 const RESPIRATION: Array[String] = ["兼性", "好氧", "厌氧"]
 
+## v0.13.0：Macro 编辑器字段作为可编辑草案展示；只改本面板 Dictionary，
+## 不进入 GNP1 编码、dev_program 或确定性 hash。控件提示保留静态反编译字段来源。
+const MACRO_FIELD_KEYS: Array[String] = [
+	"cell_type", "make_glue", "child1", "child2", "child3", "child4",
+	"child1_angle", "child2_angle", "child3_angle", "child4_angle",
+	"split_mass", "invert_split_mass", "nutrition_priority",
+	"split_angle", "split_angle2", "ratio", "ratio2",
+	"stiffness", "cell_size", "max_connections", "min_connections",
+	"stay_alive", "initial", "color_r", "color_g", "color_b",
+]
+
 @export var content_path: NodePath = ^"Panel/Content"
 
 var draft: RefCounted = null
@@ -41,6 +52,8 @@ var _type_option: OptionButton = null
 var _respiration_option: OptionButton = null
 var _status_label: Label = null
 var _gene_slot_labels: Array[Label] = []
+var _macro_draft: Dictionary = {}
+var _macro_controls: Dictionary = {}
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -60,7 +73,20 @@ func _reset_draft() -> void:
 	draft.set("loci", PackedByteArray())
 	draft.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
 	draft.call("set_development_program", default_dev_program())
+	_macro_draft = default_macro_draft()
 	_selected_instruction = 0
+
+static func default_macro_draft() -> Dictionary:
+	return {
+		"cell_type": 0, "make_glue": false,
+		"child1": 0, "child2": 0, "child3": 0, "child4": 0,
+		"child1_angle": 0.0, "child2_angle": 0.25, "child3_angle": 0.5, "child4_angle": 0.75,
+		"split_mass": 0.5, "invert_split_mass": false, "nutrition_priority": 0.5,
+		"split_angle": 0.0, "split_angle2": 0.25, "ratio": 0.5, "ratio2": 0.5,
+		"stiffness": 0.5, "cell_size": 1.0, "max_connections": 4, "min_connections": 0,
+		"stay_alive": true, "initial": false,
+		"color_r": 0.36, "color_g": 0.88, "color_b": 0.75,
+	}
 
 static func default_dev_program() -> Array[Dictionary]:
 	# 4 细胞协作模板：结构核 + 运动/能量/信息三类分化，三条 LINK 连成一体。
@@ -307,27 +333,62 @@ func _labeled_spin(label_text: String, spin: SpinBox) -> HBoxContainer:
 
 func _build_right_panel() -> Control:
 	var panel: PanelContainer = PanelContainer.new()
-	panel.custom_minimum_size = Vector2(300, 0)
+	panel.custom_minimum_size = Vector2(340, 0)
 	var margin: MarginContainer = MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 8)
 	margin.add_theme_constant_override("margin_top", 6)
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.name = "MacroReferenceScroll"
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("REFERENCE · Cell Lab 专有字段（只读证据）"))
+	box.add_child(_make_section_title("MACRO DRAFT · 发育字段草案（不写 GNP1）"))
+	var note: Label = Label.new()
+	note.text = "以下控件对应 Cell Lab Macro 的 Gene 字段与子代设置；当前仅存本页草案，Apply 不会写入冻结 GNP1 或确定性 hash。"
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	note.add_theme_font_size_override("font_size", 10)
+	box.add_child(note)
+
+	box.add_child(_make_section_title("TYPE / ADHESIN · 类型与黏附"))
+	box.add_child(_make_macro_type_option("cell_type", "细胞类型", "spinner_types → Gene.C"))
+	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E"))
+	box.add_child(_make_macro_check("stay_alive", "保持存活", "checkbox_stay_alive → Gene.H"))
+	box.add_child(_make_macro_check("initial", "初始细胞", "radio_initial → Gene.I"))
+
+	box.add_child(_make_section_title("CHILD 1–4 · 子代类型与角度"))
+	for child_index in range(1, 5):
+		var key: String = "child%d" % child_index
+		box.add_child(_make_macro_type_option(key, "子代 %d 类型" % child_index, "spinner_child%d → Gene.f778r/s/t/u" % child_index))
+		var angle_key: String = "child%d_angle" % child_index
+		box.add_child(_make_macro_slider(angle_key, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
+			"seek_child%d_angle → Gene.f771k/f772l/z/A ÷ TAU" % child_index, 2))
+
+	box.add_child(_make_section_title("SPLIT · 分裂质量 / 角度 / 优先级"))
+	box.add_child(_make_macro_slider("split_mass", "分裂质量", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)", 2))
+	box.add_child(_make_macro_check("invert_split_mass", "反转分裂质量", "check_invert_split_mass → Gene.f768h"))
+	box.add_child(_make_macro_slider("nutrition_priority", "营养优先级", 0.0, 1.0, 0.01, "seek_prio → Gene.f773m", 2))
+	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU", 2))
+	box.add_child(_make_macro_slider("split_angle2", "分裂角度 2", 0.0, 1.0, 0.01, "seek_splitangle2 → Gene.B ÷ TAU", 2))
+	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i", 2))
+	box.add_child(_make_macro_slider("ratio2", "子代比例 2", 0.0, 1.0, 0.01, "seek_ratio2 → Gene.C", 2))
+
+	box.add_child(_make_section_title("PHYSICAL / COLOR · 数值草案"))
+	box.add_child(_make_macro_slider("stiffness", "细胞骨架强度", 0.0, 1.0, 0.01, "seek_stiff → Gene.f774n", 2))
+	box.add_child(_make_macro_slider("cell_size", "细胞大小", 0.5, 2.0, 0.01, "Macro 编辑器尺寸控件；本项目半径由 CellShape 冻结", 2))
+	box.add_child(_make_macro_slider("max_connections", "最大连接数", 0.0, 16.0, 1.0, "Macro 编辑器连接控件；仅草案", 0))
+	box.add_child(_make_macro_slider("min_connections", "最小连接数", 0.0, 16.0, 1.0, "Macro 编辑器连接控件；仅草案", 0))
+	box.add_child(_make_macro_slider("color_r", "颜色 R", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
+	box.add_child(_make_macro_slider("color_g", "颜色 G", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
+	box.add_child(_make_macro_slider("color_b", "颜色 B", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
+
+	box.add_child(_make_section_title("REFERENCE · 证据边界"))
 	var reference: Label = Label.new()
 	reference.text = "\n".join([
-		"40 Gene 槽：Cell.I[40]，分裂按 Gene.i/j 重连（1/5 概率）",
-		"Child 1–4：split mass / ratio / angle",
-		"行为项：Make adhesin / Stay alive / Initial / Prioritize",
-		"接触处理：On contact(Cell/Wall/Split) / Secretion",
-		"数值控件：Cytoskeleton / Adhesin stiffness / Max connections / RGB",
-		"dev_* 规则：After N splits→M / Differentiation / Conditional",
-		"信号 lane：Add/Rename/Delete，output channel",
-		"95 突变算子：nextInt(95)，逐编号语义未展开",
-		"",
-		"以上为 APK 静态解析证据。GNP1 架构冻结，以上字段不写入本项目编码；",
-		"本编辑器以 dev_program（DIVIDE/DIFFERENTIATE/LINK）为唯一发育真相源。",
+		"40 Gene 槽：Cell.I[40]；仅前 8 槽映射 GNP1 八性状。",
+		"信号 lane / 95 突变算子：APK 静态证据，未在本页展开编辑。",
+		"On contact(Cell/Wall/Split)、Secretion：同属 Macro 专有字段。",
+		"GNP1 / dev_program 仍是本项目唯一可落地真相源。",
 	])
 	reference.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	reference.add_theme_font_size_override("font_size", 10)
@@ -340,14 +401,112 @@ func _build_right_panel() -> Control:
 	summary.add_theme_font_size_override("font_size", 10)
 	box.add_child(summary)
 	_summary_label = summary
-	margin.add_child(box)
+	scroll.add_child(box)
+	margin.add_child(scroll)
 	panel.add_child(margin)
+	_refresh_macro_controls()
 	return panel
+
+func _make_macro_section_label(text_value: String) -> Label:
+	return _make_section_title(text_value)
+
+func _make_macro_check(key: String, label_text: String, tip: String) -> CheckBox:
+	var check: CheckBox = CheckBox.new()
+	check.text = label_text
+	check.tooltip_text = tip
+	check.set_meta("macro_key", key)
+	check.toggled.connect(_on_macro_bool_changed.bind(key))
+	_macro_controls[key] = {"check": check}
+	return check
+
+func _make_macro_type_option(key: String, label_text: String, tip: String) -> HBoxContainer:
+	var row: HBoxContainer = HBoxContainer.new()
+	var label: Label = Label.new()
+	label.text = label_text
+	label.custom_minimum_size = Vector2(104, 0)
+	label.tooltip_text = tip
+	var option: OptionButton = OptionButton.new()
+	option.custom_minimum_size = Vector2(130, 0)
+	option.tooltip_text = tip
+	for entry in VISUALS.call("entries"):
+		option.add_item("%d %s" % [int(entry.get("id", 0)), str(entry.get("label", "?"))])
+	option.set_meta("macro_key", key)
+	option.item_selected.connect(_on_macro_option_changed.bind(key))
+	_macro_controls[key] = {"option": option}
+	row.add_child(label)
+	row.add_child(option)
+	return row
+
+func _make_macro_slider(key: String, label_text: String, minimum: float, maximum: float, step: float, tip: String, digits: int) -> HBoxContainer:
+	var row: HBoxContainer = HBoxContainer.new()
+	var label: Label = Label.new()
+	label.text = label_text
+	label.custom_minimum_size = Vector2(104, 0)
+	label.tooltip_text = tip
+	var slider: HSlider = HSlider.new()
+	slider.min_value = minimum
+	slider.max_value = maximum
+	slider.step = step
+	slider.custom_minimum_size = Vector2(126, 0)
+	slider.tooltip_text = tip
+	slider.set_meta("macro_key", key)
+	slider.value_changed.connect(_on_macro_value_changed.bind(key))
+	var value_label: Label = Label.new()
+	value_label.custom_minimum_size = Vector2(42, 0)
+	_macro_controls[key] = {"slider": slider, "value_label": value_label, "digits": digits}
+	row.add_child(label)
+	row.add_child(slider)
+	row.add_child(value_label)
+	return row
+
+func _refresh_macro_controls() -> void:
+	for key in MACRO_FIELD_KEYS:
+		if not _macro_draft.has(key) or not _macro_controls.has(key):
+			continue
+		var control: Dictionary = _macro_controls[key]
+		var value: Variant = _macro_draft[key]
+		if control.has("check"):
+			(control["check"] as CheckBox).set_pressed_no_signal(bool(value))
+		elif control.has("option"):
+			(control["option"] as OptionButton).select(clampi(int(value), 0, (control["option"] as OptionButton).item_count - 1))
+		elif control.has("slider"):
+			var slider: HSlider = control["slider"] as HSlider
+			slider.set_value_no_signal(float(value))
+			(control["value_label"] as Label).text = _format_macro_value(key, float(value), int(control.get("digits", 2)))
+
+func _format_macro_value(_key: String, value: float, digits: int) -> String:
+	return String.num(value, digits)
+
+func _on_macro_bool_changed(value: bool, key: String) -> void:
+	_macro_draft[key] = value
+	_set_macro_status(key)
+
+func _on_macro_option_changed(index: int, key: String) -> void:
+	_macro_draft[key] = index
+	_set_macro_status(key)
+
+func _on_macro_value_changed(value: float, key: String) -> void:
+	if key == "max_connections" or key == "min_connections":
+		_macro_draft[key] = int(round(value))
+	else:
+		_macro_draft[key] = value
+	var control: Dictionary = _macro_controls.get(key, {})
+	if control.has("value_label"):
+		(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 2)))
+	_set_macro_status(key)
+
+func _set_macro_status(key: String) -> void:
+	if _status_label != null:
+		_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / dev_program / 确定性 hash。" % key
+
+func get_macro_draft() -> Dictionary:
+	return (_macro_draft as Dictionary).duplicate(true)
 
 func _refresh_all() -> void:
 	_refresh_tree()
 	_refresh_params()
 	_refresh_traits()
+	_refresh_macro_controls()
 	_refresh_timeline()
 	_refresh_summary()
 
@@ -588,4 +747,4 @@ func get_type_id() -> int:
 ## 供 GameHUD 读取当前草案摘要（反馈用）。
 func draft_summary() -> String:
 	var program: Array = _program()
-	return "细胞编辑草案：%d 指令 · 类型 %d" % [program.size(), _type_id]
+	return "细胞编辑草案：%d 指令 · 类型 %d · Macro 草案 %d 项（不写 GNP1）" % [program.size(), _type_id, _macro_draft.size()]

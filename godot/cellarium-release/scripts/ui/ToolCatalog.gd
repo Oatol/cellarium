@@ -40,16 +40,25 @@ static func modes() -> Array[Dictionary]:
 	]
 
 static func substrate() -> Array[Dictionary]:
-	## k 对应 EnvironmentManager 的 @export；writable=false 为纯 UI 占位。
+	## v0.13.0：原「培养基」升级为「环境设置」，分组参考 Cell Lab Macro 的基质设置。
+	## k 对应 EnvironmentManager 的 @export；writable=false 为静态证据占位（不进物理）。
 	return [
-		{"n":"营养密度","k":"nutrient_density","v":1.2,"min":0.0,"max":4.0,"step":0.05,"writable":true},
-		{"n":"氧气分数","k":"oxygen_fraction","v":0.0,"min":0.0,"max":1.0,"step":0.01,"writable":true},
-		{"n":"温度","k":"temperature","v":273.0,"min":260.0,"max":320.0,"step":1.0,"writable":true},
-		{"n":"最大发育深度","k":"max_dev_depth","v":12,"min":0,"max":64,"step":1,"writable":true},
-		{"n":"光照强度","k":"light_intensity","v":0.6,"min":0.0,"max":2.0,"step":0.01,"writable":true},
-		{"n":"黏度","k":"viscosity","v":0.35,"min":0.0,"max":1.0,"step":0.01,"writable":false},
-		{"n":"重力","k":"gravity","v":0.1,"min":0.0,"max":1.0,"step":0.01,"writable":false},
-		{"n":"盐度","k":"salinity","v":0.3,"min":0.0,"max":1.0,"step":0.01,"writable":false}
+		{"n":"食物密度", "k":"nutrient_density", "v":1.2, "min":0.0, "max":4.0, "step":0.05, "writable":true, "section":"食物 · FOOD", "tip":"初始营养场浓度，对应 Macro seekBar_food"},
+		{"n":"食物投放量/tick", "k":"food_spawn_amount", "v":0.018, "min":0.0, "max":0.5, "step":0.001, "writable":true, "section":"食物 · FOOD", "tip":"确定型营养源强度，对应 Macro 食物池大小"},
+		{"n":"食物团块半径", "k":"food_lump_radius", "v":2, "min":0, "max":8, "step":1, "writable":true, "section":"食物 · FOOD", "tip":"每 tick 投放到多少格，对应 seekBar_food_lump_size"},
+		{"n":"食物层分布", "k":"food_layer", "v":0.5, "min":0.0, "max":1.0, "step":0.01, "writable":true, "section":"食物 · FOOD", "tip":"0 偏中心，1 偏皿缘，对应 seekBar_food_layer"},
+		{"n":"涂层比例", "k":"food_coated_ratio", "v":0.0, "min":0.0, "max":1.0, "step":0.01, "writable":false, "section":"食物 · FOOD", "tip":"Macro 证据字段；本项目暂无食物实体涂层"},
+		{"n":"光照强度", "k":"light_intensity", "v":0.6, "min":0.0, "max":2.0, "step":0.01, "writable":true, "section":"光照 · LIGHT", "tip":"Macro seekBar_light"},
+		{"n":"光源模式", "k":"light_source_mode", "v":1, "min":0, "max":2, "step":1, "writable":true, "section":"光照 · LIGHT", "tip":"0 全皿 / 1 边缘定向 / 2 中心点光"},
+		{"n":"光照范围", "k":"light_range", "v":1.25, "min":0.2, "max":2.0, "step":0.01, "writable":true, "section":"光照 · LIGHT", "tip":"Macro seekBar_lightRange，按皿半径归一化"},
+		{"n":"光照角度", "k":"light_angle_deg", "v":0.0, "min":0.0, "max":360.0, "step":1.0, "writable":true, "section":"光照 · LIGHT", "tip":"Macro seekBar_lightAngle，边缘点光方向"},
+		{"n":"边缘衰减", "k":"light_falloff", "v":0.55, "min":0.0, "max":1.0, "step":0.01, "writable":true, "section":"光照 · LIGHT", "tip":"Macro lightT 的派生可视化参数"},
+		{"n":"氧气分数", "k":"oxygen_fraction", "v":0.0, "min":0.0, "max":1.0, "step":0.01, "writable":true, "section":"氧气与温度 · OXYGEN", "tip":"Macro 氧气分布预览对应的场初值"},
+		{"n":"温度", "k":"temperature", "v":273.0, "min":260.0, "max":320.0, "step":1.0, "writable":true, "section":"氧气与温度 · OXYGEN", "tip":"v1.0 §2.2 温度场初值，不是 Macro 叙事温度档位"},
+		{"n":"最大发育深度", "k":"max_dev_depth", "v":12, "min":0, "max":64, "step":1, "writable":true, "section":"实验条件 · SETTINGS", "tip":"发育程序深度上限"},
+		{"n":"黏度", "k":"viscosity", "v":0.35, "min":0.0, "max":1.0, "step":0.01, "writable":false, "section":"实验条件 · SETTINGS", "tip":"Macro seekBar_viscosity；物理在 Godot 侧尚未接入"},
+		{"n":"重力", "k":"gravity", "v":0.1, "min":0.0, "max":1.0, "step":0.01, "writable":false, "section":"实验条件 · SETTINGS", "tip":"Macro seekBar_grav；静态证据"},
+		{"n":"盐度", "k":"salinity", "v":0.3, "min":0.0, "max":1.0, "step":0.01, "writable":false, "section":"实验条件 · SETTINGS", "tip":"Macro seekBar_salinity；静态证据"},
 	]
 
 static func lenses() -> Array[String]:

@@ -7,7 +7,8 @@ const CHANNEL_OXYGEN: int = 2
 const CHANNEL_LIGHT: int = 3
 const CHANNEL_SIGNAL: int = 4
 const CHANNEL_COUNT: int = 5
-const DIFFUSION: Array[float] = [0.08, 0.16, 0.12, 0.20, 0.05]
+const DIFFUSION: Array[float] = [0.08, 0.16, 0.12, 0.0, 0.05]
+## 光照是环境照明快照，不参与化学扩散；Macro 的 Environment.q() 也是空间采样而非 PDE。
 const DECAY: Array[float] = [0.004, 0.002, 0.003, 0.0, 0.02]
 const COMPUTE_SOURCE: String = """
 #version 450
@@ -272,8 +273,29 @@ func set_value(channel_index: int, x: int, y: int, value: float) -> bool:
 func fill_channel(channel_index: int, value: float) -> bool:
 	if channel_index < 0 or channel_index >= CHANNEL_COUNT or not is_finite(value) or channels.size() != CHANNEL_COUNT:
 		return false
+	if backend_name == "gpu_compute":
+		_read_gpu_state()
 	for index in range(resolution * resolution):
 		channels[channel_index][index] = value if _is_active(index) else 0.0
+	if backend_name == "gpu_compute":
+		_upload_active_buffer()
+	return true
+
+## v0.13.0：写入一个完整通道的空间分布（Macro 式光照快照）。
+## GPU 后端先回读当前场，避免用过期 CPU 镜像覆盖其他通道；采样缓存随之失效。
+func set_channel_values(channel_index: int, values: PackedFloat32Array) -> bool:
+	if channel_index < 0 or channel_index >= CHANNEL_COUNT or channels.size() != CHANNEL_COUNT:
+		return false
+	if values.size() != resolution * resolution:
+		return false
+	if backend_name == "gpu_compute":
+		_read_gpu_state()
+	for index in range(resolution * resolution):
+		if _is_active(index) and is_finite(values[index]):
+			channels[channel_index][index] = maxf(0.0, values[index])
+		else:
+			channels[channel_index][index] = 0.0
+	_sample_cache.clear()
 	if backend_name == "gpu_compute":
 		_upload_active_buffer()
 	return true

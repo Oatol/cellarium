@@ -102,7 +102,7 @@ organism_manager_path = NodePath("../../Simulation/OrganismManager")
 camera_path = NodePath("../../Camera2D")
 mode_row_path = NodePath("TopBar/Panel/ModeRow")
 tool_groups_path = NodePath("ToolDock/Panel/ToolGroups")
-substrate_rows_path = NodePath("SubstratePanel/Panel/SubstrateRows")
+substrate_rows_path = NodePath("SubstratePanel/Panel/EnvironmentScroll/SubstrateRows")
 lens_row_path = NodePath("MicroscopePanel/Panel/Content/LensRow")
 view_row_path = NodePath("MicroscopePanel/Panel/Content/ViewRow")
 
@@ -162,7 +162,7 @@ offset_right = -8.0
 offset_bottom = -8.0
 grow_horizontal = 0
 grow_vertical = 0
-tooltip_text = "培养基（* 为仅 UI 占位）"
+tooltip_text = "环境设置（* 为静态证据占位，不进物理）"
 
 [node name="Panel" type="MarginContainer" parent="UI/HUD/SubstratePanel" unique_id=481021637]
 layout_mode = 2
@@ -171,7 +171,12 @@ theme_override_constants/margin_top = 8
 theme_override_constants/margin_right = 10
 theme_override_constants/margin_bottom = 8
 
-[node name="SubstrateRows" type="VBoxContainer" parent="UI/HUD/SubstratePanel/Panel" unique_id=525396268]
+[node name="EnvironmentScroll" type="ScrollContainer" parent="UI/HUD/SubstratePanel/Panel"]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 280)
+horizontal_scroll_mode = 0
+
+[node name="SubstrateRows" type="VBoxContainer" parent="UI/HUD/SubstratePanel/Panel/EnvironmentScroll"]
 layout_mode = 2
 theme_override_constants/separation = 2
 

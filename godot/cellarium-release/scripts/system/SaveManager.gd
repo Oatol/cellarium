@@ -64,6 +64,7 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 		})
 
 	if env_manager != null:
+		snapshot["environment_settings"] = (env_manager.call("get_environment_settings") as Dictionary).duplicate(true)
 		var field: RefCounted = env_manager.get("field") as RefCounted
 		if field != null:
 			snapshot["field"] = {
@@ -155,6 +156,10 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 	org_manager.set("genomes", restored_genomes)
 	org_manager.set("_next_genome_id", int(snapshot.get("next_genome_id", 1)))
 	org_manager.set("_sim_tick", int(snapshot.get("sim_tick", 0)))
+
+	var environment_settings: Dictionary = snapshot.get("environment_settings", {}) as Dictionary
+	if env_manager != null and not environment_settings.is_empty():
+		env_manager.call("apply_environment_settings", environment_settings)
 
 	var field_data: Dictionary = snapshot.get("field", {}) as Dictionary
 	if env_manager != null and not field_data.is_empty():

@@ -19,6 +19,12 @@ const CELL_SHAPE_SCRIPT: Script = preload("res://scripts/core/data/CellShape.gd"
 const SAVE_MANAGER_SCRIPT: Script = preload("res://scripts/system/SaveManager.gd")
 const PERF_PROBE_SCRIPT: Script = preload("res://scripts/system/PerfProbe.gd")
 
+## 营养摄入类型 ID：与 CellVisualCatalog.entries() 对齐。
+## v0.13.0 修正：此前把体细胞 1 当光合、肌细胞 2 当化能，导致光合细胞不产能。
+const CELL_TYPE_ZYGOTE: int = 0
+const CELL_TYPE_PHOTOCYTE: int = 4
+const CELL_TYPE_NITROCYTE: int = 10
+
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
 var genomes: Dictionary = {}
@@ -265,17 +271,17 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 		var oxygen: float = clampf(float(field_values[2]), 0.0, 1.0)
 		var respiration: Dictionary = RESPIRATION_RULES_SCRIPT.call("evaluate", int(respiration_values[org_id]), oxygen, facultative_aerobic_efficiency)
 		var food_gain: float = 0.0
-		if types[cell_index] == 0:
+		if types[cell_index] == CELL_TYPE_ZYGOTE:
 			food_gain = maxf(0.0, float(field_values[0])) * heterotrophic_intake_rate * float(respiration.get("efficiency", 0.0)) * dt
-		elif types[cell_index] == 1:
+		elif types[cell_index] == CELL_TYPE_PHOTOCYTE:
 			food_gain = maxf(0.0, float(field_values[3])) * photosynthetic_intake_rate * dt
-		elif types[cell_index] == 2:
+		elif types[cell_index] == CELL_TYPE_NITROCYTE:
 			food_gain = maxf(0.0, float(field_values[4])) * chemotrophic_intake_rate * dt
 		if food_gain > 0.0:
 			var consumed: float = food_gain
-			if types[cell_index] == 0:
+			if types[cell_index] == CELL_TYPE_ZYGOTE:
 				consumed = float(environment_manager.call("consume_nutrient", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
-			elif types[cell_index] == 2:
+			elif types[cell_index] == CELL_TYPE_NITROCYTE:
 				consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
 			energies[cell_index] += consumed
 			if consumed > 0.0:

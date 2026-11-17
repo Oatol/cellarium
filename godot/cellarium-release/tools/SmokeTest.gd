@@ -108,6 +108,8 @@ func _initialize() -> void:
 		failures += 1
 	if not _check_environment_field():
 		failures += 1
+	if not await _check_environment_settings():
+		failures += 1
 	if not _check_gpu_sampling_api():
 		failures += 1
 	if not _check_full_tick_determinism():
@@ -917,6 +919,82 @@ func _check_environment_field() -> bool:
 	print("SmokeTest: OK five-channel CPU field / circular mask / source injection / nutrient accounting")
 	return true
 
+func _check_environment_settings() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		push_error("SmokeTest: environment settings scene missing")
+		return false
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var field: RefCounted = env.get("field") as RefCounted
+	var settings: Dictionary = env.call("get_environment_settings") as Dictionary
+	for key in ["light_source_mode", "light_range", "light_angle_deg", "light_falloff", "food_spawn_amount", "food_lump_radius", "food_layer"]:
+		if not settings.has(key):
+			push_error("SmokeTest: environment settings missing key " + key)
+			instance.queue_free(); return false
+
+	# Macro 式空间光照：边缘定向点光的近源侧必须明显亮于对侧。
+	env.set("light_source_mode", 1)
+	env.set("light_range", 1.2)
+	env.set("light_angle_deg", 0.0)
+	env.set("light_falloff", 0.5)
+	env.set("light_intensity", 1.0)
+	if not bool(env.call("apply_light_intensity")):
+		push_error("SmokeTest: spatial light settings not applied")
+		instance.queue_free(); return false
+	var bright_position: Vector2 = Vector2(250.0 + 240.0 * 0.7, 250.0)
+	var dark_position: Vector2 = Vector2(250.0 - 240.0 * 0.7, 250.0)
+	var sampling_positions: Array[Vector2] = [bright_position, dark_position]
+	env.call("begin_field_sampling", sampling_positions)
+	var bright_sample: PackedFloat32Array = env.call("sample_fields", bright_position)
+	var dark_sample: PackedFloat32Array = env.call("sample_fields", dark_position)
+	if bright_sample.size() < 4 or dark_sample.size() < 4 or bright_sample[3] <= dark_sample[3] + 0.05:
+		push_error("SmokeTest: spatial light must have near/far gradient")
+		instance.queue_free(); return false
+
+	# 确定型食物源：同一 tick 重放必须得到同一场 hash，且确实向营养场注入质量。
+	env.set("nutrient_density", 0.0)
+	env.set("food_spawn_amount", 0.05)
+	env.set("food_lump_radius", 2)
+	env.call("apply_environment_preset")
+	env.call("apply_nutrient_sources", 42)
+	var first_hash: int = int(field.call("get_state_hash"))
+	env.call("apply_environment_preset")
+	env.call("apply_nutrient_sources", 42)
+	var second_hash: int = int(field.call("get_state_hash"))
+	if first_hash != second_hash:
+		push_error("SmokeTest: nutrient sources must be deterministic")
+		instance.queue_free(); return false
+	env.call("advance_field_tick")
+	if field.call("get_total_nutrient") <= 0.0:
+		push_error("SmokeTest: nutrient sources did not add food")
+		instance.queue_free(); return false
+
+	# 环境设置页：分组标题与滚动容器存在；光场层用 shader texture 平滑绘制。
+	var rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/ChromeRoot/Panel/EnvironmentScroll/SubstrateRows") as Control
+	if rows == null or rows.get_child_count() < 16:
+		push_error("SmokeTest: environment settings rows missing")
+		instance.queue_free(); return false
+	var labels_text: String = ""
+	for child in rows.get_children():
+		if child is Label:
+			labels_text += (child as Label).text + "|"
+	if not labels_text.contains("食物") or not labels_text.contains("光照") or not labels_text.contains("氧气"):
+		push_error("SmokeTest: environment settings sections missing")
+		instance.queue_free(); return false
+	var field_layer: Node = instance.get_node_or_null("DishView/FieldLayer")
+	var field_rect: Node = field_layer.get_node_or_null("FieldRect") if field_layer != null else null
+	if field_rect == null or field_rect.get("material") == null:
+		push_error("SmokeTest: smooth field shader rect missing")
+		instance.queue_free(); return false
+
+	instance.queue_free()
+	print("SmokeTest: OK environment settings / spatial light / deterministic food sources / smooth field layer")
+	return true
+
 ## 阶段10：批量采样 API 在 CPU 回退路径必须与逐点 sample 完全一致，诊断字段齐全。
 func _check_gpu_sampling_api() -> bool:
 	var script: Script = load("res://scripts/system/EnvironmentField.gd") as Script
@@ -1190,7 +1268,7 @@ func _check_microscope_layout() -> bool:
 		push_error("SmokeTest: lens/view button count mismatch")
 		instance.queue_free()
 		return false
-	var substrate_rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/ChromeRoot/Panel/SubstrateRows") as Control
+	var substrate_rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/ChromeRoot/Panel/EnvironmentScroll/SubstrateRows") as Control
 	if substrate_rows == null or substrate_rows.get_child_count() <= 0:
 		push_error("SmokeTest: substrate rows missing")
 		instance.queue_free()
@@ -2854,6 +2932,26 @@ func _check_lifecycle_and_injectors() -> bool:
 		push_error("SmokeTest: light channel sample must be non-zero")
 		instance.queue_free(); return false
 
+	# (1b) 光合类型映射：CellVisualCatalog type_id=4 必须读取光照通道产能。
+	# v0.13.0 回归：旧实现误把体细胞 1 当光合，导致 photocyte 在光场中不增能。
+	manager.set("base_metabolic_cost", 0.0)
+	manager.set("movement_energy_cost", 0.0)
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 11)
+	var photo_index: int = int(cells.call("size")) - 1
+	bus.call("enqueue", {"type": "INJECT_COLOR", "position": Vector2(250, 250), "delta": Vector2.ZERO,
+		"kind": "world", "color_type": 4})
+	bus.call("execute_tick_commands", 12)
+	if int(cells.get("cell_type")[photo_index]) != 4:
+		push_error("SmokeTest: photocyte injection failed")
+		instance.queue_free(); return false
+	var photo_energy_before: float = float(cells.get("cell_energy")[photo_index])
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	var photo_energy_after: float = float(cells.get("cell_energy")[photo_index])
+	if photo_energy_after <= photo_energy_before + 0.00001:
+		push_error("SmokeTest: photocyte did not gain energy from light field (before=%.6f after=%.6f)" % [photo_energy_before, photo_energy_after])
+		instance.queue_free(); return false
+
 	# (2) 基础代谢：提高 base_metabolic_cost 后，固定能量细胞在若干 tick 内必须下降。
 	manager.set("base_metabolic_cost", 0.4)
 	manager.set("heterotrophic_intake_rate", 0.0)
@@ -3004,6 +3102,21 @@ func _check_dev_editor_landing() -> bool:
 	var gene_labels: Array = dev.get("_gene_slot_labels") as Array
 	if gene_labels == null or gene_labels.size() != 40 or not str((gene_labels[0] as Label).text).contains("速度"):
 		push_error("SmokeTest: Cell Lab 40 gene slots not built")
+		dev.queue_free(); return false
+	# v0.13.0：Macro 发育字段以可编辑草案展示，但不进入 GNP1 hash / dev_program。
+	var macro_draft: Dictionary = dev.call("get_macro_draft") as Dictionary
+	var macro_controls: Dictionary = dev.get("_macro_controls") as Dictionary
+	if macro_draft.size() != 26 or macro_controls.size() != 26:
+		push_error("SmokeTest: Macro draft controls incomplete")
+		dev.queue_free(); return false
+	var draft_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
+	dev.call("_on_macro_bool_changed", true, "make_glue")
+	dev.call("_on_macro_value_changed", 0.8, "split_mass")
+	if not bool((dev.call("get_macro_draft") as Dictionary).get("make_glue", false)) or absf(float((dev.call("get_macro_draft") as Dictionary).get("split_mass", 0.0)) - 0.8) > 0.001:
+		push_error("SmokeTest: Macro draft edits did not persist")
+		dev.queue_free(); return false
+	if int((dev.get("draft") as RefCounted).call("hash")) != draft_hash_before:
+		push_error("SmokeTest: Macro draft must not change GNP1 hash")
 		dev.queue_free(); return false
 	# 编辑 a/b/c → 写回 draft.dev_program（真实双向，非静态展示）。
 	dev.call("_on_tree_selected", 0)

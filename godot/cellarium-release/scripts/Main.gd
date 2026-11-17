@@ -115,6 +115,8 @@ func _on_tick_advanced(tick_index: int) -> void:
 		organism_manager.call("advance_physics_tick", 1.0 / 60.0)
 		organism_manager.call("advance_development_tick")
 	if environment_manager != null:
+		# v0.13.0：Macro 式营养源按 tick 确定型投放，再进入场扩散。
+		environment_manager.call("apply_nutrient_sources", tick_index)
 		environment_manager.call("advance_field_tick")
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]

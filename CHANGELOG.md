@@ -4,6 +4,37 @@
 
 ---
 
+## 0.13.0 — 2026-11-17
+
+**类型**：Macro 机制落地 —— 环境设置页 / 空间光照 / 食物源 / 细胞编辑 Macro 字段，并修正光合类型映射
+**触发**：用户要求「先查相关代码」，再把 Cell Lab Macro 基因组编辑字段、光照、食物/营养生成与环境设置参考落到 Godot；同时反馈光合细胞在光场中不产能、环境不生成食物。
+
+### 代码证据
+
+- 静态反编译 Macro APK 的 `GenomeEditorFragment` / `Environment` / `Environment.q()` / `EnvironmentEditorFragment` / `Food` / `SimulationWorld.<init>` / `SimulationWorld.y2(double)`，证据与字段映射写入 `analysis/CellLab_细胞物理与外观_代码级分析.md` 第 20 章。APK 未执行。
+- 确认 `Environment.q()` = 空间插值 + 64×64 分布图双线性叠加 + `min(1, …)`，用于场采样/预览/行为，不是直接产能公式；Macro 食物是定长 `Food[]` 对象池，本项目不引入第二套实体池。
+
+### 实现
+
+- **类型映射 BUG 修正**：`OrganismManager._apply_environment_metabolism_ranges()` 原把体细胞 `type_id=1` 当光合、肌细胞 `2` 当化能；改为与 `CellVisualCatalog` 一致的光合 `4`、硝化/化能 `10`，异养仍为 `0`。光合细胞现在读取光照通道并真实增能。
+- **空间光照**：`EnvironmentField` 新增 `set_channel_values()`，光照通道扩散系数改为 0（照明是静态环境快照，不是 PDE）；`EnvironmentManager` 新增 `light_source_mode / light_range / light_angle_deg / light_falloff`，支持全皿 / 边缘定向点光 / 中心点光。`FieldLayer` 改为 32×32 → 128×128 双线性上采样 + canvas shader 连续渐变，取代粗颗粒方块。
+- **食物/营养源**：`EnvironmentManager.apply_nutrient_sources(tick_index)` 按 tick + 常量盐派生确定性位置与团块，向营养通道写入 pending source；不缩放 dt、不使用全局 RNG、不引入 `Food[]`。`Main` 在每次场扩散前调用。
+- **环境设置页**：原「培养基」升级为「环境设置」，按食物 / 光照 / 氧气与温度 / 实验条件分组，共 16 行，带 Macro 控件来源 tooltip；加入 `ScrollContainer`。静态证据项（涂层比例、黏度、重力、盐度）明确标记不进物理。
+- **细胞编辑 Macro 字段**：统一「细胞编辑」右栏改为可滚动的 `MACRO DRAFT`，新增 26 个草案字段：细胞类型、生成黏附素、Child 1–4 类型与角度、分裂质量 / 角度 / 营养优先级 / 比例、骨架强度、细胞大小、最大/最小连接数、RGB、保持存活、初始细胞等。每个控件 tooltip 标明对应 Macro `Gene` 字段；这些只存面板 Dictionary，**不写 GNP1、dev_program 或确定性 hash**。
+- **存档**：`SaveManager` 版本化追加 `environment_settings`，恢复时先应用设置再恢复场通道；五通道 schema 与 `schema_version` 不变。
+
+### 边界
+
+- 逐基因刚度 / 子代质量 / 连接数 / 细胞大小仍是草案，不变成运行时物理参数；若要做必须先修订 v1.0 玩法文档并同步 v2.1 §0.3 / §11。
+- `channel_count` 可配置化、第二套 `Food` 实体池、Macro shader 变体与类型一一对应、Macro `A2()` 初始投放位置仍未落地/未确认。
+
+### 验证
+
+- `SmokeTest.gd`：新增光合类型增能、环境设置键与空间光照梯度、食物源确定性与实际注入、渐变光场层 shader、Macro 26 草案字段与「不污染 GNP1 hash」断言。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=47 FAILURES=0 EXITCODE=0`；D 盘同步保留 MCP autoload、脚本 `.uid` 与场景 `unique_id`。
+
+---
+
 ## 0.12.1 — 2026-11-17
 
 **类型**：光场可视化修复（纯视图）

@@ -552,3 +552,90 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - **修复**：路径改为 `../../DishView/...`；光场默认启用且 toggle 初值读 `FieldLayer.is_enabled()`；光场 alpha 提至 0.55，并在照亮格子的外沿按场半径画暖色细环，明确「照明覆盖范围」。
 - **边界**：FieldLayer 仍只读 `EnvironmentManager.field` 通道 3；不新增物理场、不写场数据、不改 tick 与确定性 hash。皿内光照默认值 0.6 为均匀填充，因此可见范围覆盖整个皿内区域，这与场数据一致，不伪造聚光。
 - **验收**：发布与 D 盘工程 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。
+
+## 20. Macro 编辑器 / 光照 / 基质设置补证（v0.13.0 前，2026-11-17）
+
+本节只使用静态反编译证据。目标 APK 为从已提取目录重建的 `cell_lab_macro_recon.apk`（SHA256 `abfe6022ad178e061b6bacf257af11317e6d06c0afff662dc2ed604110f077a1`），JADX 0.7.1，808 类 / 912 资源；APK 未执行。除特别说明外，证据 ID 均为 REA 本轮实际返回值。
+
+### 20.1 基因组编辑器字段：控件 → `Gene` 字段的写入链
+
+- `GenomeEditorFragment.onCreateView()`（`ev_1727c69d65eead1f7b420113a3ed49c0ad4364379c1f66850975f566fe062be2`）确认编辑器控件族：`spinner_types/cells/child1..child4`、`seek_child1..4_angle`、`seek_mass`、`seek_prio`、`seek_ratio/ratio2`、`seek_splitangle/splitangle2`、`seek_stiff`、`checkbox_make_glue/stay_alive/keep_glue1..4/mirror1..4/snap/show_split_indicators/function_signal_gate`、`check_invert_split_mass`、`radio_initial`、RGB 与 GL 预览 `GenomePreviewView`。
+- `GenomeEditorFragment.refreshControlsFromSelectedGene(boolean,boolean)`（`ev_3896a017015372230a52449ba233fdcaf267c026f0ef547286f68e74cdac85f3`）确认读取映射：
+  - `child1..4` → `Gene.f778r / s / t / u`；四个子代角度 → `f771k / f772l / z / A`，除以 `TAU`。
+  - `seek_mass` → `splitMassFraction(gene)`；反转质量 → `f768h`；营养优先级 → `log(f773m/0.1)/log(99.99999850988391)`。
+  - `seek_ratio/ratio2` → `1 - (f769i-0.1)/0.8`、`1 - (C-0.1)/0.8`；两个分裂角 → `f770j / B`，除以 `TAU`。
+  - `seek_stiff` → `f774n < 35 ? f774n/35 : 1`；`make_glue` → `E`；`stay_alive` → `H`；`keep_glue1..4` → `F/G/v/w`；`mirror1..4` → `J/K/x/y`；`initial` → `I`。
+- 预览读取环境倍率：`activeEnvironment.P0/Q0/R0` 分别对应 feeding / light / salinity 预览倍率（来自 `onCreateView()` 与 `refreshControlsFromSelectedGene()`）。
+- 边界：这些字段证明「Macro 编辑器有这些可调参数」，但本项目 `GNP1` 已冻结、`dev_program` 是唯一发育真相源。40 槽 / Child1–4 / 信号 lane / 95 算子不能写入 GNP1 编码，也不能据此改确定型 hash。
+
+### 20.2 光照调用链：`Environment.q()` 是空间场采样，不是直接产能
+
+- `Environment.q(double,double)`（本轮复核 `ev_817d7427f4b750f22bba16e14bddbd796a314ebe9ec512dc65ecfe8fd20eaf27`）：
+  ```text
+  dN = n(x, y, K0, J0, L0, M0, N0)
+  if C0 == null: d4 = 0
+  else: d4 = bilinear(C0.f490a, 64x64)
+  return min(1, dN + d4)
+  ```
+  即「空间插值/梯度 + 64×64 分布图双线性叠加 + 上限 1」。
+- `trace_android_references(Environment.q)`（`ev_8c44f454ca50cf98baf1b34a57fb613a36fdb4feabf35894e3e399618754d48f`）给出完整使用节点 5 个：`PlateDistributionPreviewView.onDraw`（预览）、`SimulationWorld.A2`、`SimulationWorld.u1`、`SimulationWorld.v1`、`v7.Q`。
+- `SimulationWorld.u1(...)`（`ev_7b72fa0a55323c6e4cf0e2518ffc17d0e32094b659dc1327dac667fa510da387`）中 `i35 == 6` 分支直接调用 `environment.q(...)`，结果经 `t0()` 限幅后写入 `cell.G[...]`（行为总线/转向意图）。这证明 `q()` 参与**感知/行为输入**，不是把光量直接加到细胞能量。
+- `SimulationWorld.v1(int)` 完整方法体已从 `ev_d374c9e008921ff0a50ad34f745854f4362eba7723f0167a7ce6ce3c1f17ba07` 逐行读取（1–1921 行，100%）：`q()` 在立体细胞/感觉细胞分支中同样用于读取空间场并写入行为力（`fQ` → `cell.G`），而食物/细胞接触在 `Q(...)` 与 `u1(...)` 中另行处理。结论：**不能声称 `q()` 就是光合产能公式**；它是「场采样 + 预览」的通用路径。
+- 本项目落地口径：把通道 3 做成可配置的空间分布（强度/范围/角度/模式），让 `FieldLayer` 按同一通道插值显示，光合类型取该通道采样值产能；不复制 Macro shader，也不把 `q()` 当成能量公式。
+
+### 20.3 食物/营养生成：`Food` 是定长对象池，营养在 `y2()` 中衰减
+
+- `Food` 类（`ev_eabf830731079bf1380e1324e3f54236e4112978fa1147020c131661a1ca3c30`）只有 6 个方法与 7 个 float 字段：位置 `f727a/f728b`、质量/半径 `f729c`、速度 `d/f730e`、涂层 `f731f`。没有 PDE 场，也没有自动生成器。
+- `Food.<init>()` 的静态引用（`ev_175682a9f9b0d3d96b57c222d5f0a80e48b2caaa182d550ff269f1406636f825`）只出现在 `SimulationWorld.<init>(Environment,boolean)`；构造函数（`ev_882a8622b3dda014f5c7badf3c99136dd213cb501dab44fa8603a61d76bc3e6c`）确认：
+  ```text
+  G2 = environment.Z
+  f1322a = new Food[G2]
+  f1324c = 0            // active count
+  ```
+  即启动时一次性分配固定食物池，非每 tick 凭空新建。
+- `Food.a(Food)` 的引用（`ev_e26fdea06239f5b51b1b6659fe4f361e046139ddf1cb6891068d595f93f824e5`）出现在 `SimulationWorld.a(SimulationWorld)`（池复制）与 `SimulationWorld.y2(double)`（食物消失/池尾交换）。
+- `SimulationWorld.y2(double)`（`ev_2c4014fe27663d7df1a80a319ee44fa26a5ca6fcbbc943a9a4cea7673693bbe8`）确认食物质量按 `f729c -= 0.006 * dt` 衰减；`<=0` 时与池尾交换并 `f1324c--`；吞噬/黏附细胞可改写 `f731f` 涂层；`environment.g0` 控制移动食物，`environment.e0` 控制触壁死亡/投影，`environment.s==0` 走圆形皿，`s==2` 走矩形皿，`N7.c(s)` 走隧道地形。
+- 边界：Macro 的 `seekBar_food` 等控件决定的是初始池规模与投放形态；本项目已有五通道营养场，不引入第二套 `Food` 实体池。落地时把「食物密度/团块/层/涂层比例/移动食物」映射为营养场源项的确定型投放参数即可，并在文档里标明这是派生实现，不是 Macro 对象池的逐行移植。`A2()` 初始投放位置未逐行展开，保留为边界。
+
+### 20.4 环境设置页控件：`EnvironmentEditorFragment`
+
+- `EnvironmentEditorFragment.onCreateView()`（`ev_e0fd8444fd47a5c78d9ad8bf4a4831c307bd46aa8480c6f1eb3c74abdd0e90c2`；类清单 `ev_306f9d92ad69be61a20e6ae902c3433fc272b0ab080b844cdb213b84bff1a45a`）确认页面分组：
+  - 食物：`seekBar_food / food_size / food_lump / food_lump_size / food_layer / food_coated_ratio`；
+  - 理化：`salinity / viscosity / fricd / frics / radiation / radiation_spectrum / radiation_wave / dens / grav / grad / nitrates`；
+  - 光照：`light / lightRange / lightAngle / lightT` + `bindLightPreview / bindLightSourceModeSpinner`；
+  - 氧气：`bindOxygenPreview / bindOxygenRangeControl / bindOxygenDistributionSpinner`；
+  - 开关：`add_random / die_edge / die_terrain / tweak / aging / adhesion_bias / mobile_food / fluid_dynamics / bacteria_layer / cell_translucency / light_dependent_vision`；
+  - 部分控件在 `K.d(0,getActivity())` 为假时隐藏，说明 Macro 对不同实验条件有 UI 级裁剪。
+- `Environment.f(Environment,boolean)`（`ev_d280626053e0d46e8b7642437e14c637723ec1c7113c84f30cb1dbdb932f38cf`）确认 `P0/Q0/R0` 与 `Y/Z`、`C0` 64×64 map、`J0/K0/L0/M0/N0` 空间模式参数一起被深拷贝，属于环境快照的一部分，不是临时 UI 数值。
+
+### 20.5 落地边界与版本化结论
+
+1. **可直接落地（不改变冻结 schema）**：环境设置页的 UI 与 `EnvironmentManager` 的运行参数；光场通道 3 的空间分布；营养源确定型投放；光合类型修正。它们只改变场初值/源项与视图，不改 `GNP1`、`dev_program`、tick 顺序或确定性规则（投放位置按 tick 派生，不使用全局 RNG）。
+2. **只做编辑器草案/证据展示**：`Gene.f77x/f78x`、`E/F/G/H/I/J/K/v/w/x/y`、40 槽、Child1–4、信号 lane、95 算子。可在统一细胞编辑里编辑草案并标注来源，但不进入 `GNP1` 编码。
+3. **需要规格修订才可做**：把 Macro 的逐基因刚度、子代质量、最小/最大连接数、细胞大小变成每个细胞真实运行的物理参数；把 `channel_count` 从 5 改成可配置；引入第二套 `Food` 实体池。这些要改 v1.0 玩法文档与 v2.1 §0.3/§11，不能藏在版本号里悄悄改。
+4. **本项目当前发现的具体错误**：`OrganismManager._apply_environment_metabolism_ranges()` 把 `cell_type == 1`（体细胞）当光合、`== 2`（肌细胞）当化能；`CellVisualCatalog` 中光合细胞是 `type_id == 4`，硝化/化能是 `10`。这解释了用户「光合细胞在光场中不产能」的现象，v0.13.0 必须修正。
+
+## 21. v0.13.0 落地记录与未决边界（2026-11-17）
+
+### 21.1 已落地
+
+1. `OrganismManager`：营养摄入类型改为 `ZYGOTE=0 / PHOTOCYTE=4 / NITROCYTE=10`，与 `CellVisualCatalog` 一致；光合读取光照通道 3，硝化/化能读取信号通道 4，异养读取营养通道 0。SmokeTest 断言光合细胞在光场中增能。
+2. `EnvironmentField`：新增 `set_channel_values()`；写整通道前在 GPU 后端先回读当前场，避免过期 CPU 镜像覆盖其他通道；光照扩散系数 `DIFFUSION[3]` 改为 0，使空间照明保持为静态环境快照。CPU/GPU 使用同一常量，不改变五通道 schema。
+3. `EnvironmentManager`：按 Macro 证据落地 `light_source_mode / light_range / light_angle_deg / light_falloff` 三种照明模式（全皿 / 边缘定向 / 中心点光）；新增 `food_spawn_amount / food_lump_radius / food_layer / food_coated_ratio`，其中 `apply_nutrient_sources(tick_index)` 用 tick 派生位置向营养场写入确定型团块源。`Main` 在 `advance_field_tick()` 前调用，不使用全局 RNG。
+4. `FieldLayer`：32×32 场双线性上采样到 128×128，再由 canvas shader 连续渐变绘制，解决粗颗粒光场；仍为纯视图层，不写模拟状态。
+5. `ToolCatalog` / `GameHUD` / `main.tscn`：原「培养基」升级为「环境设置」，16 行控件按食物 / 光照 / 氧气与温度 / 实验条件分组，带 Macro 来源 tooltip；`ScrollContainer` 防止内容溢出。
+6. `DevEditorPanel`：右栏改为 26 项 Macro 发育字段草案，覆盖用户列出的细胞类型、黏附素、Child 1–4、分裂角度/质量/营养优先级/比例、颜色、骨架强度、细胞大小、连接数等，并保留 Gene 字段来源提示。`get_macro_draft()` 可读取；SmokeTest 断言编辑这些控件不改变 `Genome.hash()` 与 `dev_program`。
+7. `SaveManager`：版本化追加 `environment_settings`，恢复顺序为「先设置 → 再恢复场通道」，避免刷新掉存档场。
+
+### 21.2 仍不是等价移植 / 未决边界
+
+- Macro 的 `Food[]` 是定长实体池；本项目仍用五通道营养场源项，不引入第二套实体池。`A2()` 初始投放位置未逐行展开。
+- Macro 的 `Environment.q()` 参与场采样/感知/预览；本项目的光照通道只作为细胞能量输入与视图显示，没有把 `q()` 直接当光合公式。
+- Macro shader 变体与 18+ 类型的对应关系未确认；本项目光场只显示全部通道强度，不模拟 Macro 的光谱/颜色效果。
+- `channel_count` 可配置化、逐基因物理参数化、连接静息长度语义不一致、单帧 >12 tick 有效倍速，仍需规格修订后再做。
+- 本次没有改 `GNP1`、`dev_program`、`schema_version`、tick 顺序或倍速规则；Macro 专有字段只作为 UI 草案存在。
+
+### 21.3 验证
+
+- 发布工程与 D 盘运行工程均 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。
+- D 盘同步 10 个脚本与 `main.tscn` 的 3 处语义改动，保留 MCP autoload、脚本 `.uid` 与场景节点 `unique_id`。

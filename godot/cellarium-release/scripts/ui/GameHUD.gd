@@ -10,6 +10,12 @@ const CODEC: RefCounted = preload("res://scripts/core/data/GenomeCodec.gd")
 const CELL_VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const PANEL_CHROME: RefCounted = preload("res://scripts/ui/PanelChrome.gd")
 
+## 这些键改动后需要重算环境场；食物投放参数只影响未来 tick 的源项。
+const ENVIRONMENT_FIELD_KEYS: Array[String] = [
+	"nutrient_density", "temperature", "oxygen_fraction",
+	"light_intensity", "light_source_mode", "light_range", "light_angle_deg", "light_falloff",
+]
+
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var environment_path: NodePath = ^"../../Simulation/EnvironmentManager"
@@ -17,7 +23,7 @@ const PANEL_CHROME: RefCounted = preload("res://scripts/ui/PanelChrome.gd")
 @export var camera_path: NodePath = ^"../../Camera2D"
 @export var mode_row_path: NodePath = ^"TopBar/ModeRow"
 @export var tool_groups_path: NodePath = ^"ToolDock/ToolGroups"
-@export var substrate_rows_path: NodePath = ^"SubstratePanel/SubstrateRows"
+@export var substrate_rows_path: NodePath = ^"SubstratePanel/Panel/EnvironmentScroll/SubstrateRows"
 @export var lens_row_path: NodePath = ^"MicroscopePanel/Panel/Content/LensRow"
 @export var view_row_path: NodePath = ^"MicroscopePanel/Panel/Content/ViewRow"
 @export var feedback_path: NodePath = ^"FeedbackLabel"
@@ -102,7 +108,7 @@ func _process(_delta: float) -> void:
 		if button != null and node != null and button.is_pressed() != node.visible:
 			button.set_pressed_no_signal(node.visible)
 
-## 光场/选区可视化层引用；field 层默认关，用户可经顶栏开关打开。
+## 光场/选区可视化层引用；光场默认可见，可在顶栏关闭。
 func _register_view_layers() -> void:
 	_field_layer = get_node_or_null("../../DishView/FieldLayer")
 	_selection_layer = get_node_or_null("../../DishView/SelectionLayer")
@@ -115,7 +121,7 @@ func _register_view_layers() -> void:
 func _build_panel_chrome() -> void:
 	var definitions: Array = [
 		["ToolDock", "工具 · TOOLS", false],
-		["SubstratePanel", "培养基 · SUBSTRATE", false],
+		["SubstratePanel", "环境设置 · ENVIRONMENT", false],
 		["MicroscopePanel", "显微镜 · MICROSCOPE", false],
 		["SpeedPanel", "倍速 · SPEED", false],
 		["CellEditorPanel", "细胞编辑 · CELL EDITOR", false],
@@ -146,7 +152,7 @@ func _build_panel_toggles() -> void:
 	row.add_child(separator)
 	var definitions: Array = [
 		["工具", "ToolDock"],
-		["培养基", "SubstratePanel"],
+		["环境设置", "SubstratePanel"],
 		["显微镜", "MicroscopePanel"],
 		["倍速", "SpeedPanel"],
 		["分析", "../AnalysisPanel"],
@@ -395,23 +401,41 @@ func _build_substrate() -> void:
 	var host: Node = get_node_or_null(substrate_rows_path)
 	if host == null:
 		return
+	var last_section: String = ""
 	for i in range(_substrate.size()):
 		var row_data: Dictionary = _substrate[i]
+		var section: String = str(row_data.get("section", ""))
+		if section != last_section and not section.is_empty():
+			var section_label: Label = Label.new()
+			section_label.text = "▸ " + section
+			section_label.add_theme_font_size_override("font_size", 12)
+			section_label.add_theme_color_override("font_color", Color(0.36, 0.88, 0.75))
+			host.add_child(section_label)
+			last_section = section
+		var tip: String = str(row_data.get("tip", ""))
 		var hbox: HBoxContainer = HBoxContainer.new()
 		var label: Label = Label.new()
 		label.text = str(row_data.get("n", "?"))
 		label.custom_minimum_size = Vector2(112, 0)
+		label.tooltip_text = tip
 		var slider: HSlider = HSlider.new()
 		slider.min_value = float(row_data.get("min", 0.0))
 		slider.max_value = float(row_data.get("max", 1.0))
 		slider.step = float(row_data.get("step", 0.01))
-		slider.value = float(row_data.get("v", 0.0))
+		var initial_value: float = float(row_data.get("v", 0.0))
+		if environment_manager != null and bool(row_data.get("writable", false)):
+			var actual: Variant = environment_manager.get(str(row_data.get("k", "")))
+			if actual != null:
+				initial_value = float(actual)
+		slider.value = initial_value
 		slider.custom_minimum_size = Vector2(180, 0)
 		slider.set_meta("index", i)
+		slider.tooltip_text = tip
 		slider.value_changed.connect(_on_substrate_changed.bind(i))
 		var value_label: Label = Label.new()
 		value_label.text = _format_value(slider.value, float(row_data.get("step", 0.01)))
 		value_label.custom_minimum_size = Vector2(56, 0)
+		value_label.tooltip_text = tip
 		if not bool(row_data.get("writable", false)):
 			value_label.text += " *"
 			slider.editable = false
@@ -601,8 +625,10 @@ func _on_substrate_changed(value: float, index: int) -> void:
 	if bool(row_data.get("writable", false)) and environment_manager != null:
 		var key: String = str(row_data.get("k", ""))
 		environment_manager.set(key, value)
-		if key == "light_intensity":
-			environment_manager.call("apply_light_intensity")
+		if ENVIRONMENT_FIELD_KEYS.has(key):
+			environment_manager.call("apply_environment_preset")
+			if _field_layer != null:
+				_field_layer.call("mark_dirty")
 
 ## 镜头滤镜：只改滤镜参数，绝不改 camera.zoom / offset / rotation（视野交给滚轮与右键）。
 ## 五个镜头参数各不相同，确保切换后画面有真实差异，而非只是换了层半透明颜色。
