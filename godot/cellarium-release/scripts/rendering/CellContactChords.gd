@@ -5,6 +5,12 @@ extends RefCounted
 
 const MAX_CHORDS: int = 20
 
+## 接触判定下限（世界单位）。碰撞把两细胞中心钳在 2r 后，float32 仍有约 ±4e-4 的
+## 逐 tick 抖动；若阈值只有 1e-6，弦会在"相切/重叠"之间反复生成与消失，膜随之闪动。
+## 阈值随半径缩放，且只影响视觉派生，不写模拟状态、不参与确定性 hash。
+static func contact_epsilon(radius: float) -> float:
+	return maxf(0.02, radius * 0.01)
+
 ## 两圆相交弦。返回世界坐标端点 a/b，以及从 p0 指向 p1 的法线。
 ## 与 Cell Lab 的 d51/d54..d56 等价：d = (s² - r1² + r0²)/(2s)，h = sqrt(r0² - d²)。
 static func circle_chord(p0: Vector2, r0: float, p1: Vector2, r1: float) -> Dictionary:
@@ -12,7 +18,7 @@ static func circle_chord(p0: Vector2, r0: float, p1: Vector2, r1: float) -> Dict
 	var s: float = delta.length()
 	if s < 0.000001:
 		return {"valid": false}
-	if s >= r0 + r1 - 0.000001:
+	if s >= r0 + r1 - contact_epsilon(minf(r0, r1)):
 		return {"valid": false}
 	if s <= absf(r0 - r1) + 0.000001:
 		return {"valid": false}
@@ -42,7 +48,7 @@ static func wall_chord(position: Vector2, radius: float, dish_center: Vector2, d
 	var s: float = delta.length()
 	if s < 0.000001 or dish_radius <= radius:
 		return {"valid": false}
-	if s + radius <= dish_radius + 0.000001:
+	if s + radius <= dish_radius + contact_epsilon(radius):
 		return {"valid": false}
 	var direction: Vector2 = delta / s
 	var d: float = (radius * radius - dish_radius * dish_radius + s * s) / (2.0 * s)

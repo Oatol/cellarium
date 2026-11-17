@@ -146,6 +146,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_shared_chords():
 		failures += 1
+	if not await _check_tangent_contact_stability():
+		failures += 1
 	if not await _check_multicellular_cooperation():
 		failures += 1
 	if not _check_cell_membrane():
@@ -1994,6 +1996,21 @@ func _check_shared_chords() -> bool:
 	if bool(tangent.get("valid", false)):
 		push_error("SmokeTest: tangent circles must not produce a chord")
 		return false
+	# 碰撞钳位后中心距有 float32 抖动；相切附近的抖动不得生成弦，否则膜会逐帧闪动。
+	for jitter in [-0.0005, -0.0001, 0.0001, 0.0005]:
+		var jittered: Dictionary = helper.call(
+			"circle_chord", Vector2.ZERO, radius, Vector2(radius * 2.0 + jitter, 0.0), radius
+		)
+		if bool(jittered.get("valid", false)):
+			push_error("SmokeTest: tangent jitter must not produce a chord")
+			return false
+	# 超过接触下限的真实重叠仍必须生成弦。
+	var shallow: Dictionary = helper.call(
+		"circle_chord", Vector2.ZERO, radius, Vector2(radius * 2.0 - 0.5, 0.0), radius
+	)
+	if not bool(shallow.get("valid", false)):
+		push_error("SmokeTest: real overlap must still produce a chord")
+		return false
 	# d26 遮挡判据：同一位置附近的两条弦，后一条应被判遮挡。
 	var first: Dictionary = {"local_a": Vector2(-2.0, -1.0), "local_b": Vector2(-2.0, 1.0)}
 	var second: Dictionary = {"local_a": Vector2(-1.0, -1.0), "local_b": Vector2(-1.0, 1.0)}
@@ -2101,6 +2118,14 @@ func _check_shared_chords() -> bool:
 	if absf((wall_chord_value["a"] as Vector2).distance_to(Vector2(16.5, 250.0)) - radius) > 0.01:
 		push_error("SmokeTest: wall chord endpoint must lie on the cell circle")
 		return false
+	# 皿壁钳位同样有抖动：正好贴壁不得生成弦，真实越界才生成。
+	for wall_jitter in [-0.0005, 0.0005]:
+		var wall_tangent: Dictionary = helper.call(
+			"wall_chord", Vector2(17.0 + wall_jitter, 250.0), radius, Vector2(250.0, 250.0), 240.0
+		)
+		if bool(wall_tangent.get("valid", false)):
+			push_error("SmokeTest: tangent wall jitter must not produce a chord")
+			return false
 	# 渲染层每对细胞只算一次，双方视图收到完全相同的世界端点。
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var instance: Node = scene.instantiate()
@@ -2242,6 +2267,42 @@ func _check_shared_chords() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK shared chord geometry / culling / scene renderer distribution")
+	return true
+
+## 默认演示体：碰撞钳位后的中心距在 2r 附近抖动，膜不得在整圆与切平多边形间闪动。
+func _check_tangent_contact_stability() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node_or_null("Simulation/OrganismManager")
+	var renderer: Node = instance.get_node_or_null("DishView/CellSceneLayer")
+	var tick_core: Node = instance.get_node_or_null("Simulation/TickCore")
+	if manager == null or renderer == null or tick_core == null:
+		push_error("SmokeTest: tangent stability scene missing nodes")
+		instance.queue_free(); return false
+	tick_core.set("running", false)
+	var cells: RefCounted = manager.get("cells")
+	var diameter: float = 14.0
+	for tick in range(60):
+		manager.call("advance_development_tick")
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		renderer.call("_rebuild")
+		var closest: float = 1e9
+		var count: int = int(cells.call("size"))
+		for a in range(count):
+			if int(cells.get("cell_alive")[a]) == 0:
+				continue
+			for b in range(a + 1, count):
+				if int(cells.get("cell_alive")[b]) == 0:
+					continue
+				var distance: float = cells.call("get_position", a).distance_to(cells.call("get_position", b))
+				closest = minf(closest, distance)
+		if closest >= diameter - 0.01 and int(renderer.call("get_last_chord_count")) != 0:
+			push_error("SmokeTest: tangent cells must not derive flickering chords")
+			instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK tangent contact stability / no chord flicker")
 	return true
 
 func _check_multicellular_cooperation() -> bool:

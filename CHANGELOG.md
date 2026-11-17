@@ -4,6 +4,28 @@
 
 ---
 
+## 0.8.13 — 2026-11-17
+
+**类型**：接触弦阈值抖动导致的持续闪动修复（纯视觉层）
+**触发**：用户反馈 v0.8.12 之后多细胞簇「一直在闪动」，两张截图分别显示有弦切平与无弦整圆交替出现
+
+### 根因定位（程序化诊断，非推测）
+
+- 临时场景诊断脚本逐 tick 调用真实的 `advance_development_tick()` → `advance_physics_tick()` → `CellSceneRenderer._rebuild()`，记录默认 4 细胞协作体 180 tick：
+  - 细胞中心最近距离始终在 `13.9998 … 14.0000` 之间（float32 抖动约 ±4e-4）；
+  - 共享弦数量却在 `0 / 2 / 4 / 6` 之间切换 **84 次**。
+- `CellContactChords.circle_chord()` / `wall_chord()` 原阈值是 `s < r0+r1−1e-6` / `s+r > R+1e-6`。碰撞把中心钳在恰好相切处，1e-6 的阈值远小于数值抖动，于是弦逐 tick 生成/消失；`CellView` 随即在「64 点整圆 + 浅压平」与「弦裁剪多边形」之间跳变。这就是截图中的闪动，而不是膜路径或物理碰撞本身。
+
+### Godot 落地（不改物理 / 不改确定性 hash）
+
+- `CellContactChords.gd`：新增 `contact_epsilon(radius) = maxf(0.02, radius * 0.01)`；圆-圆与皿壁弦改用该下限判定接触。半径 7 时阈值 0.07，约为实测抖动的 175 倍；真实重叠 > 0.07 仍正常生成弦。
+- 贴壁细胞在阈值内不生成壁弦，改由既有浅接触压平提供稳定形变；真正越过皿壁才切平。
+- `SmokeTest.gd`：新增相切抖动（±1e-4 / ±5e-4）不得生成圆弦与壁弦、真实重叠 0.5 必须生成弦的断言；新增 60 tick 场景级断言——最近距离 ≥ 2r−0.01 时弦数量必须为 0。
+- 验证：修复前同一诊断 `chord_switch=84`，修复后 `chord_switch=0`；发布工程 `SCRIPTS=43 FAILURES=0`、退出码 0。
+- 同步：`CellContactChords.gd` / `SmokeTest.gd` 已复制到 `D:\Tools\Godot_v4.7.2\project\cellarium`；保留其 UID 与 MCP 插件配置，未覆盖 `project.godot` / `main.tscn`。
+
+---
+
 ## 0.8.12 — 2026-11-17
 
 **类型**：接触轮廓循环多边形化 / 消失的根因修复（视觉层）

@@ -372,6 +372,26 @@ link2.l = fA;
 
 实现：`unit_circle(64)` 作为唯一外膜基底；有弦时按「规范顺序 → 相交截断 → 遮挡剔除 → 排序 → 半平面裁剪」处理，无弦时只做浅接触压平；`clip_keep_origin()` 退化返回空数组，`clip_unit_circle()` 跳过退化弦。内膜按外膜同轮廓缩放，避免穿出压平边界。速度拉伸状态保留给 API/测试但不再施加到共享边界，以确保双方共边。SmokeTest 新增弦/无弦点集不切换、无弦轮廓 ≥64 点且面积非零断言。发布工程与用户运行工程均 `SCRIPTS=43 FAILURES=0 EXITCODE=0`。
 
+### 10.7 v0.8.13：接触阈值抖动才是持续闪动的直接原因
+
+v0.8.12 统一膜路径后用户仍看到「一直在闪动」，两张连续截图分别是有弦切平与无弦整圆。用临时无头诊断走真实场景链路（默认演示体，`advance_development_tick` → `advance_physics_tick` → `CellSceneRenderer._rebuild`），180 tick 结果：
+
+- 最近邻中心距始终在 `13.999812 … 14.000039`（float32 抖动约 ±4e-4），远小于 `2r = 14` 的有效变化；
+- 共享弦数量却在 `0/2/4/6` 间切换 **84 次**。
+
+因此根因不是弹性膜路径、不是弦几何顺序，而是接触判定的数值阈值：
+
+```text
+circle_chord:  s >= r0 + r1 - 1e-6  → invalid
+wall_chord:    s + radius <= dish_radius + 1e-6  → invalid
+```
+
+碰撞 `resolve_collisions()` / `project_to_dish()` 把中心钳在恰好相切处，1e-6 的阈值比抖动小 2–3 个数量级，于是弦在相邻 tick 间随机开关；视图随之切换「弦裁剪多边形」与「整圆 + 浅压平」，视觉上就是持续闪动。Cell Lab 不存在这个阈值问题：它用片元 `discard` 做圆裁剪，接触点来自物理阶段的 `A[]`，渲染阶段不再对「是否接触」做几何阈值判断。
+
+修复：`contact_epsilon(radius) = maxf(0.02, radius * 0.01)`，圆弦与壁弦共用；半径 7 时阈值 0.07，约为实测抖动的 175 倍。真正重叠超过 0.07 仍生成弦并保持 Cell Lab 的共享端点机制；阈值内的相切由既有浅压平提供稳定形变。SmokeTest 加入相切抖动、真实重叠、皿壁抖动与 60 tick 场景级断言。同一诊断修复后 `chord_switch=0`。
+
+**边界**：此修复只改视觉派生，不改物理碰撞、tick 顺序、`CommandBus` 或 `get_state_hash()`；也不改变连接静息长度。另观察到 `ADHERE` 工具写死 `link_cells(a, b, 8.0)`、`DevelopmentRules` 的 `LINK` 可写入 `< 14` 的静息长度，这与碰撞最小中心距 14 在语义上不一致；但它不会造成上述闪动（渲染看到的是碰撞后的位置），若将来要修正属于物理/存档 schema 变更，必须单独版本化并重新核对确定性 hash。
+
 ## 11. Macro APK 边界确认（v0.8.11）
 
 样本：`C:\Users\安\Downloads\cell-lab-macro-beta-latest.apk`，SHA256 `9d0f3509c871ef4afbcf5547dd4125adbf5745059faf94e74d5d8b3e8aa48a1a`，包名/入口类 `com.saterskog.cell_lab_enzymeglv.*`。全部为静态反编译与 APK 只读解包，APK 未执行。
