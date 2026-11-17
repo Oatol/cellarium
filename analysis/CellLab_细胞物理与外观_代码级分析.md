@@ -392,6 +392,10 @@ wall_chord:    s + radius <= dish_radius + 1e-6  → invalid
 
 **边界**：此修复只改视觉派生，不改物理碰撞、tick 顺序、`CommandBus` 或 `get_state_hash()`；也不改变连接静息长度。另观察到 `ADHERE` 工具写死 `link_cells(a, b, 8.0)`、`DevelopmentRules` 的 `LINK` 可写入 `< 14` 的静息长度，这与碰撞最小中心距 14 在语义上不一致；但它不会造成上述闪动（渲染看到的是碰撞后的位置），若将来要修正属于物理/存档 schema 变更，必须单独版本化并重新核对确定性 hash。
 
+### 10.8 v0.8.14：接触前提前变形
+
+用户反馈密集碰撞时细胞膜在尚未接触时就变形。视觉层原因：`CellSceneRenderer` 原用 `contact_range = 2r + 1`、`wall_range = 0.8r` 触发浅压平，半径 7 时分别相当于 gap=1 与 gap=5.6 就开始压平，远大于真实接触边界。无头诊断（默认演示体 600 tick、8 枚强制重叠细胞 180 tick）确认物理层均能在一 tick 内分离到 ≥2r，无残留重叠，因此只收紧视觉范围至 `2r + contact_epsilon(r)` 与 `contact_epsilon(r)`。SmokeTest 加入 gap=1 不压平、真实接触/贴壁才压平的断言。仍然不改物理与 hash。
+
 ## 11. Macro APK 边界确认（v0.8.11）
 
 样本：`C:\Users\安\Downloads\cell-lab-macro-beta-latest.apk`，SHA256 `9d0f3509c871ef4afbcf5547dd4125adbf5745059faf94e74d5d8b3e8aa48a1a`，包名/入口类 `com.saterskog.cell_lab_enzymeglv.*`。全部为静态反编译与 APK 只读解包，APK 未执行。

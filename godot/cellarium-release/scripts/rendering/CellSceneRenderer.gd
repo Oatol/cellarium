@@ -114,8 +114,9 @@ func _rebuild() -> void:
 	var dish_radius_value: Variant = organism_manager.get("dish_radius")
 	if dish_radius_value != null:
 		dish_radius = maxf(1.0, float(dish_radius_value))
-	var contact_range: float = radius * 2.0 + 1.0
-	var wall_range: float = maxf(1.0, radius * 0.8)
+	# 接触范围必须贴近真实接触：此前 2r+1 / 0.8r 让相隔 1~5.6 世界单位的细胞提前压平。
+	var contact_range: float = radius * 2.0 + CHORDS.contact_epsilon(radius)
+	var wall_range: float = CHORDS.contact_epsilon(radius)
 	var buckets: Dictionary = CELL_PHYSICS.call("build_spatial_hash", cells)
 	_last_contacts_sent = 0
 	_last_adhesions_sent = 0

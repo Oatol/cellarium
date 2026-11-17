@@ -148,6 +148,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_tangent_contact_stability():
 		failures += 1
+	if not _check_no_precontact_flatten():
+		failures += 1
 	if not await _check_multicellular_cooperation():
 		failures += 1
 	if not _check_cell_membrane():
@@ -2305,6 +2307,49 @@ func _check_tangent_contact_stability() -> bool:
 	print("SmokeTest: OK tangent contact stability / no chord flicker")
 	return true
 
+## 细胞尚未接触（含皿壁）时不得按接触法线提前压平细胞膜。
+func _check_no_precontact_flatten() -> bool:
+	var cell_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
+	var physics_script: Script = load("res://scripts/system/CellPhysics.gd") as Script
+	var chords_script: Script = load("res://scripts/rendering/CellContactChords.gd") as Script
+	var renderer_script: Script = load("res://scripts/rendering/CellSceneRenderer.gd") as Script
+	var renderer: Node = renderer_script.new() as Node
+	var cells: RefCounted = cell_script.new() as RefCounted
+	cells.call("append_cell", 0, Vector2(250.0, 250.0), 1.0, 0)
+	cells.call("append_cell", 0, Vector2(265.0, 250.0), 1.0, 0) # gap = 1
+	var radius: float = 7.0
+	var contact_range: float = radius * 2.0 + float(chords_script.call("contact_epsilon", radius))
+	var no_links: PackedInt32Array = PackedInt32Array()
+	var result: Dictionary = renderer.call(
+		"_collect_contacts", cells, 0, physics_script.call("build_spatial_hash", cells),
+		cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_org_id"),
+		no_links, no_links, contact_range
+	)
+	if (result.get("contacts", []) as Array).size() != 0:
+		push_error("SmokeTest: cell must not flatten before touching")
+		renderer.free(); return false
+	cells.call("set_position", 1, Vector2(264.0, 250.0)) # gap = 0
+	result = renderer.call(
+		"_collect_contacts", cells, 0, physics_script.call("build_spatial_hash", cells),
+		cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_org_id"),
+		no_links, no_links, contact_range
+	)
+	if (result.get("contacts", []) as Array).size() <= 0:
+		push_error("SmokeTest: touching cells must still derive contact direction")
+		renderer.free(); return false
+	var wall_range: float = float(chords_script.call("contact_epsilon", radius))
+	if (renderer.call("_collect_wall_contacts", Vector2(250.0 + 240.0 - radius - 1.0, 250.0),
+		Vector2(250.0, 250.0), 240.0, radius, wall_range) as Array).size() != 0:
+		push_error("SmokeTest: dish wall must not flatten cell before touching")
+		renderer.free(); return false
+	if (renderer.call("_collect_wall_contacts", Vector2(250.0 + 240.0 - radius, 250.0),
+		Vector2(250.0, 250.0), 240.0, radius, wall_range) as Array).size() <= 0:
+		push_error("SmokeTest: touching wall must derive contact direction")
+		renderer.free(); return false
+	renderer.free()
+	print("SmokeTest: OK no pre-contact cell / wall flatten")
+	return true
+
 func _check_multicellular_cooperation() -> bool:
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var instance: Node = scene.instantiate()
@@ -2356,7 +2401,7 @@ func _check_multicellular_cooperation() -> bool:
 	if catalog.call("role_color", 2) == catalog.call("role_color", 4):
 		push_error("SmokeTest: cooperation roles must have distinct colors")
 		instance.queue_free(); return false
-	# 把细胞推到皿壁附近，渲染层应派生出朝壁接触方向。冻结 tick 防止物理把它推回。
+	# 把细胞推到皿壁附近：gap=1.0 时不得提前压平，真正贴壁时才派生接触方向。
 	tick_core.set("running", false)
 	var dish_center: Vector2 = manager.get("dish_center")
 	var dish_radius: float = float(manager.get("dish_radius"))
@@ -2367,6 +2412,14 @@ func _check_multicellular_cooperation() -> bool:
 	pos_y[0] = dish_center.y
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
+	scene_layer.call("mark_dirty")
+	await process_frame
+	if int(scene_layer.call("get_last_wall_contact_count")) != 0:
+		push_error("SmokeTest: dish wall contact must not appear before touching")
+		instance.queue_free(); return false
+	pos_x = cells.get("cell_pos_x")
+	pos_x[0] = dish_center.x + dish_radius - radius
+	cells.set("cell_pos_x", pos_x)
 	scene_layer.call("mark_dirty")
 	await process_frame
 	if int(scene_layer.call("get_last_wall_contact_count")) <= 0:
