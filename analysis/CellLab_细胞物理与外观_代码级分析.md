@@ -285,10 +285,11 @@ link2.l = fA;
 
 因此"排序后只查相邻弦"在当前代码路径中不成立；Godot 侧保留完整 O(B²) 判据才是等价复刻。B 上限 20，代价可接受。
 
-## 8. [未确认] 仍需证据的边界
+## 8. [部分未确认] 仍需证据的边界
 
-- `Gene.v[5]` 的取值范围 `0..√3` 是否在所有类型中都被解释为连接长度，当前只确认了 `e(double)` 这一处消费点。
-- Macro 版 `SimulationWorld` 把通道数扩到 101 后，`u.compareTo()` 是否仍用于同一套弦几何，未单独反编译 Macro APK 的对应类。
+- `Gene.v[5]` 的取值范围 `0..√3` 是否在所有类型中都被解释为连接长度：官方版已确认 `CellWorld.e(double)` 一处、Macro 版已确认 `SimulationWorld.f1(double)` 一处，且两处调用点均无类型分支；但未逐一展开 `Cell.f` 的其余 5 个上游调用点，因此仍保留为「已确认主要消费点、非穷尽」。
+- ~~Macro 版 `SimulationWorld` 把通道数扩到 101 后，`u.compareTo()` 是否仍用于同一套弦几何，未单独反编译 Macro APK 的对应类。~~ **v0.8.11 已确认**：Macro `Y8.compareTo()` 与官方 `u.compareTo()` 同构，`SimulationWorld.x()` 仍按「相交截断 → 遮挡剔除 → `Arrays.sort()` → 端点+圆弧」流程使用同一套共享弦几何。详见 §11。
+- Macro shader 与官方版**不完全同构**：主体细胞片元着色器保留 `dot(p,p) > col.a² → discard` 的解析圆裁剪，但 Macro 额外扩展了 texture atlas / 光照 / 培养皿形状 / 多套细胞类型变体。只保留机制结论，不移植其资源或完整 shader。
 
 ## 9. 参考证据 ID 索引
 
@@ -350,3 +351,58 @@ link2.l = fA;
 5. **符号复核**：`d17 = cross(v16, Q14−P16)` 与 `d26 = cross(P18,v18)/cross(P17,v18) ∈ (0,1)`（此处 `v18 = P18−Q18`）在 Godot 实现中原式正确，本轮未改；此前怀疑的符号反向是对反编译变量方向的误读。
 
 所有改动仍只在视觉派生层：不写模拟状态、不经过 `CommandBus`、不改变 `get_state_hash()`。SmokeTest 新增多接触顺序置换、深重叠非退化、皿壁弦有效性和连续 30 tick 轮廓闭合断言，`SCRIPTS=43 FAILURES=0 EXITCODE=0`。
+
+### 10.5 v0.8.11：少量接触时轮廓多边形化的残留修复
+
+用户反馈 v0.8.10 后细胞膜仍会变成多边形。用临时几何诊断脚本量化后确认：这不是弦求交错误，而是**采样密度不足**：
+
+- 2 条接触弦时 `build_outline()` 只产出 10 点（面积 2.8396），3 条弦时 15 点（面积 2.8681）；同一组弦用 `clip_unit_circle()` 分别得到 48 点（面积 2.9906）和 39 点（面积 2.8919）。
+- Cell Lab 不存在这个问题：它的 `cell_frag.glsl` 用片元级 `discard(ds > cell.d*50²)` 做圆裁剪，顶点稀疏也不会露出多边形边。Godot 的 `Polygon2D` / `Line2D` 没有等价片元圆裁剪，必须在几何层解析采样。
+- 修复：`CellView.gd` 在有弦时以 `clip_unit_circle(prepared, 64)` 作为主路径，对解析单位圆做半平面裁剪；`build_outline()` 不再作为主路径。顺序规范化、相交截断、遮挡剔除仍由 `prepare_for_render()` 完成，Cell Lab 的几何顺序不变。无弦时仍保留原弹性膜路径。
+- SmokeTest 新增「接触轮廓点数 ≥ 24」断言，并把相切测试改成显式两细胞场景以消除发育时序 flake；连续两次 `SCRIPTS=43 FAILURES=0 EXITCODE=0`。
+- 边界：仅视觉层；物理、tick 顺序、`get_state_hash()` 均不变。
+
+## 11. Macro APK 边界确认（v0.8.11）
+
+样本：`C:\Users\安\Downloads\cell-lab-macro-beta-latest.apk`，SHA256 `9d0f3509c871ef4afbcf5547dd4125adbf5745059faf94e74d5d8b3e8aa48a1a`，包名/入口类 `com.saterskog.cell_lab_enzymeglv.*`。全部为静态反编译与 APK 只读解包，APK 未执行。
+
+### 11.1 通道数
+
+`J8.<clinit>` 依次构造 `new J8(1)`、`new J8(0x65)`、`new H8(v1, 0)`，确认通道数为 **101**（`0x65`）；`H8.<init>(int,int)` 自带 `channelCount must be positive` 校验。证据 `ev_baaebfb812cccc31d89ae9e07416377da11f57acf64146bcf38803e792d2c32f`。对 Godot 的约束不变：`channel_count` 必须可配置，不能写死 4。
+
+### 11.2 共享弦几何与排序
+
+- `SimulationWorld.x(float,float,float,float)` 完整方法体共 1662 行 / 99,036 字符，`source.status = complete`、`body_status = available`。已用脚本对全部 1662 行逐行扫描，并抽取命中语句上下文；不是只看关键字片段。证据 `ev_22344a878059ddd47baa707160b4ca070b759dc94f8f8f5e85ea39ffe94fe387`。
+- 相交截断：对 `Cell.f583j`（`Y8[]`）两两取 `(i, (i+k) mod B)`，命中时写回双方端点 `f1547c/f1545a` 与 `f1546b/d`，并置 `f1549f`（对应官方 `u.f` 截断标记）。
+- 遮挡剔除：`if ((y.f1545a * y.d) - (y.f1546b * y.f1547c) < 0.0d) y.f1548e = true;`；第二层用 `0 < d26 < 1` 判遮挡，与官方判据同构。
+- 排序：`Arrays.sort(cell9.f583j, 0, i63)`，位于两层 O(B²) 检查**之后**；`Y8.compareTo()` 的键为「遮挡置末 + b 符号分组 + a/b 降序」，与官方 `u.compareTo()` 同构（证据 `ev_e7bd831b4c3da629024bafa6259c458ad61a5471d6b3bc8044a93e6b700f3d70`）。
+- 渲染：遍历 `f583j` 时跳过 `f1548e` 弦，端点送入顶点缓冲；仅 `f1549f == false` 的弦做解析圆弧插值。皿壁/地形壁弦写 `g = -1`，与官方一致。
+- 结论：101 通道扩展**没有**改变共享弦几何拓扑与顺序要求；v0.8.8–v0.8.11 的 Godot 视觉层实现顺序仍然适用。
+
+### 11.3 `r0[5]` / `Cell.f(5)` 的消费点
+
+- `Cell.f(int)` = `this.s[this.f586m].r0[i2]`，即 Macro 把基因参数数组从官方 `v[]` 改名为 `r0[]`（证据 `ev_cacf0005ab42e57adf4ad251bcbe95f88fd9148a799c4092d60521065dba96c1`）。
+- `Cell.f` 的静态调用者共 6 个（证据 `ev_5f971c734ece2f656c8774867adfe4168825cc9b5d91d323e69fd33e9d98403a`）：`SimulationWorld.f1/p1/t1/v1/w1/x1`。
+- `SimulationWorld.f1(double)` 方法体 8517 行 / 166,000 字符（smali，`source.status = complete`，证据 `ev_38e6dfbad3eb74de3272c163a1db948796bd6635e4b0bd3992e8b2ba3f8888ce`）。在约第 4944–4959 行出现无条件序列：
+  ```smali
+  const/4 v4, 0x5
+  invoke-virtual {v3, v4}, Lcom/saterskog/cell_lab_enzymeglv/Cell;->f(I)F
+  move-result v4
+  iput v4, v1, Lcom/saterskog/cell_lab_enzymeglv/AdhesinLink;->l:F
+  iput v4, v2, Lcom/saterskog/cell_lab_enzymeglv/AdhesinLink;->l:F
+  ```
+  即 `r0[5]` → 分裂后两条 `AdhesinLink.l`（连接长度 / 初始间距），与官方 `CellWorld.e(double)` 的 `Gene.v[5]` 消费点一致，且此处无按细胞类型的分支。
+- 旁证：`w1(...)` 与 `x1(...)` 均使用 `cell.f(6)` 乘皿壁/地形壁接触面积，说明 Macro 的 `r0[6]` 仍是接触刚度（证据 `ev_f02585fbd7030cdc37198b695db5b64a3fcd923e543382d8ac195ec61a85a5b7`、`ev_8369ea18c52025fa1ae919ae80cc96ae8421d449252e78619a048105f71f9ba2`）。
+- 边界：`Cell.f` 的另外三个调用点 `p1/t1/v1` 未逐一展开常量索引，故「所有类型 / 全部调用点」仍按 §8 保留为部分未确认。
+
+### 11.4 shader 对照
+
+- 官方 `cell-lab-zh.apk` 的 `res/raw/cell_vert.glsl` 用 `vPosition.xy*50` 传局部偏移；`cell_frag.glsl` 用 `dot(p,p) > col.a*col.a → discard` 做片元级圆裁剪，相位 `tp` 只参与着色。
+- Macro 的 shader 文件名被混淆（`res/-n.glsl`、`res/Mb.glsl` 等），但主体细胞变体保留同一判据；例如 `res/Mb.glsl` 含 `if(ds>col.a*col.a)discard;`，`res/-n.glsl` 等十余个变体同样包含该式。Macro 另增 `outsidePlate(worldPosition)` 裁剪、texture atlas、光照与类型专属变体。
+- 结论：**圆裁剪机制沿用，实现不完全同构**；Godot 侧继续用解析圆弧采样近似片元裁剪即可，不引入 Macro 资源或 shader。
+
+### 11.5 对工程的影响
+
+- 无需改代码：`CellContactChords.gd` 的「规范顺序 → 相交截断 → 遮挡剔除 → 排序 → 解析圆弧」流程在两种 APK 上都成立。
+- 配置约束：`channel_count` 保持可配置（Macro 101 / 官方 4）。
+- 待办边界：`p1/t1/v1` 的 `Cell.f` 常量索引穷尽检查；Macro 各 shader 变体与细胞类型的一一对应关系（不影响当前视觉层实现）。

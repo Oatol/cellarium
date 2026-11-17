@@ -2104,7 +2104,7 @@ func _check_shared_chords() -> bool:
 	# 渲染层每对细胞只算一次，双方视图收到完全相同的世界端点。
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var instance: Node = scene.instantiate()
-	instance.set("create_demo_organism", true)
+	instance.set("create_demo_organism", false)
 	root.add_child(instance)
 	await process_frame
 	await process_frame
@@ -2115,17 +2115,19 @@ func _check_shared_chords() -> bool:
 		push_error("SmokeTest: shared chord scene nodes missing")
 		instance.queue_free(); return false
 	tick_core.set("running", false)
-	# 默认演示体按静息间距 2r 排布 = 相切，不应产生弦；再放一枚重叠细胞验证分发。
+	# 显式放两枚相切细胞（间距 2r），避免演示体发育时序影响断言。
+	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
+	var base_position: Vector2 = Vector2(250.0, 250.0)
+	bus.call("enqueue", {"type": "SPAWN", "position": base_position, "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("enqueue", {"type": "SPAWN", "position": base_position + Vector2(14.0, 0.0), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 1)
+	await process_frame
 	layer.call("mark_dirty")
 	await process_frame
 	if int(layer.call("get_last_chord_count")) != 0:
 		push_error("SmokeTest: tangent cells must not produce a chord")
 		instance.queue_free(); return false
 	var live_cells: RefCounted = manager.get("cells") as RefCounted
-	var base_position: Vector2 = Vector2(
-		float(live_cells.get("cell_pos_x")[0]), float(live_cells.get("cell_pos_y")[0])
-	)
-	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
 	bus.call("enqueue", {"type": "SPAWN", "position": base_position + Vector2(3.0, 0.0), "delta": Vector2.ZERO, "kind": "world"})
 	bus.call("execute_tick_commands", 1)
 	await process_frame
@@ -2179,6 +2181,9 @@ func _check_shared_chords() -> bool:
 		instance.queue_free(); return false
 	# 接触轮廓不得随呼吸相位变化；同一批弦重复刷新应逐点一致。
 	var outline_before: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points.duplicate()
+	if outline_before.size() < 24:
+		push_error("SmokeTest: contact outline must stay analytically smooth, points=%d" % outline_before.size())
+		instance.queue_free(); return false
 	view_with_chord.set("_shape_time", 1.2345)
 	view_with_chord.call("_refresh_shape")
 	var outline_after: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points

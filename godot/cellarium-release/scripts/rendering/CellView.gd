@@ -113,17 +113,14 @@ func _refresh_shape() -> void:
 	var unit: PackedVector2Array = _membrane.outline(_shape_time, _stretch)
 	var angle: float = 0.0 if _stretch < 0.001 else _velocity.angle()
 	if not _chords.is_empty():
-		# 共享弦路径按 Cell Lab a(FFFF) 的顺序：相交截断 → 遮挡剔除 → 排序 → 圆弧重建轮廓。
-		# 不再用呼吸扰动的膜做顺序相关半平面裁剪，接触点因此不会随相位或邻居顺序抽搐。
+		# 共享弦路径：先按 Cell Lab 顺序规范化截断/遮挡，再对解析单位圆做半平面裁剪。
+		# 不再用 12 点呼吸膜或端点直线重建轮廓：后者在被截断弦处会退化成可见多边形，
+		# 而 Cell Lab 的片元级圆裁剪在 Godot 侧由这里的解析圆弧采样承担。
 		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, angle, visual_radius)
 		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
-		var chord_outline: PackedVector2Array = CHORDS.call("build_outline", prepared, 3)
+		var chord_outline: PackedVector2Array = CHORDS.call("clip_unit_circle", prepared, 64)
 		if chord_outline.size() >= 3:
 			unit = chord_outline
-		else:
-			# 退化回退：保留旧半平面裁剪，避免极端几何下轮廓为空。
-			for chord in prepared:
-				unit = CHORDS.call("clip_keep_origin", unit, chord["local_a"], chord["local_b"])
 	var world_points: PackedVector2Array = PackedVector2Array()
 	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:

@@ -4,6 +4,32 @@
 
 ---
 
+## 0.8.11 — 2026-11-17
+
+**类型**：接触轮廓多边形化残留修复（视觉层）
+**触发**：用户反馈 v0.8.10 之后「bug 还在」，截图中细胞膜仍呈可见多边形
+
+### 根因定位
+- 几何诊断（`tools/OutlineDiag.gd`，验证后已删除）显示：2 条接触弦时 `build_outline()` 只产出 10 点、3 条时 15 点；同场景 `clip_unit_circle()` 产出 48 / 39 点，面积更接近解析圆。
+- v0.8.10 把 `clip_unit_circle()` 仅作为退化回退，主路径仍走「弦端点 + 解析圆弧」。接触数少时采样点过于稀疏，视觉上就是六边形/多边形，并非弦几何本身错误。
+
+### Godot 落地（仅视觉层）
+- `CellView.gd`：有弦时主路径改为 `make_unit_chords()` → `prepare_for_render()` → `clip_unit_circle(..., 64)`，对解析单位圆做半平面裁剪，保证接触轮廓始终有 39–64 点平滑圆弧；不再用呼吸膜或稀疏端点直线重建。无弦时保留原弹性膜 / 法线压平路径。
+- `SmokeTest.gd`：新增接触轮廓点数 ≥ 24 断言；相切场景改为显式 SPAWN 两枚间距 2r 的细胞（`create_demo_organism = false`），消除演示体发育时序导致的 flake。
+- 验证：源码连续 2 次 `SCRIPTS=43 FAILURES=0 EXITCODE=0`。
+- 约束：只改视觉派生；不写 tick 状态、不改物理、不改确定性 hash。
+
+### 附：Macro APK 边界确认（同期完成，仅文档）
+
+- APK `cell-lab-macro-beta-latest.apk`（SHA256 `9d0f3509…8a1a`）静态反编译，未执行：
+  - 通道数 `0x65 = 101`，`H8` 构造校验保留，故 `channel_count` 必须可配置。
+  - `SimulationWorld.x()` 完整 1662 行逐行扫描：共享弦相交截断 → `0 < d26 < 1` 遮挡剔除 → `Arrays.sort()` → 端点+圆弧重建，与官方版同构；`Y8.compareTo()` 排序键同构；皿壁/地形壁弦 `g = -1`。
+  - `Cell.f(5)` = `Gene.r0[5]` 在 `SimulationWorld.f1(double)` 中无条件写入两条 `AdhesinLink.l`；`w1/x1` 的 `f(6)` 仍为接触刚度。
+  - 主体细胞 shader 保留 `dot(p,p) > col.a² → discard` 圆裁剪，但 Macro 扩展了纹理/光照/培养皿形状变体，**不完全同构**，不移植资源。
+- 结论写入 `analysis/CellLab_细胞物理与外观_代码级分析.md` §8 / §11；工程代码无需改动。
+
+---
+
 ## 0.8.10 — 2026-11-17
 
 **类型**：细胞膜多边形化 / 消失回归修复（视觉层）
