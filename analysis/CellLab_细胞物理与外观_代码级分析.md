@@ -338,3 +338,15 @@ link2.l = fA;
 - `CellView.gd` 在存在弦时直接采用重建轮廓，不再让呼吸相位参与接触边界；无弦时保留原弹性膜路径。
 - `circle_chord()` 的端点顺序改为与 Cell Lab `A[]` 的 endpoint1/endpoint2 一致（`middle - perp*h` / `middle + perp*h`）。
 - 所有改动只读 SoA；不进入 `CommandBus`，不写 tick 状态。SmokeTest 新增断言：输入顺序置换后轮廓逐点一致、呼吸相位变化后接触轮廓逐点一致、反复刷新视图前后 `OrganismManager.get_state_hash()` 不变。
+
+### 10.4 v0.8.10：轮廓多边形化 / 消失的代码级再核对与修复
+
+用户连续截图反馈细胞膜在几帧内由圆变多边形甚至完全消失。重新静态读取 `CellWorld.a(float,float,float,float)` 完整方法体（证据 `ev_23d9c8549e5a334ce01f02b6089fe546b100e25bd25dd54a2f17cd0128abd32f`，APK SHA256 与 §0 一致），逐项对照后确认：
+
+1. **`A[]` 输入顺序**：Cell Lab 的 `d(int)` 按邻居 cell 索引升序追加 `A[]`；Godot 直接消费空间哈希邻居顺序。`truncate_intersections()` 会原地改写两弦端点，因此顺序变化会改变最终结果。诊断脚本显示 5–6 接触时逆序输入会让轮廓点数从 19 变 17、顶点最大偏移 >1（单位圆），即截图中的“快速变换”。修复：`prepare_for_render()` 先按 `(kind, peer)` 排序，再执行 Cell Lab 的原顺序流程。
+2. **`f` 标记**：Cell Lab 在输出顶点后检查 `if (!cell5.A[i24].f)` 才做圆弧插值；被截断弦只保留端点。Godot v0.8.9 记录了 `truncated` 但未消费，导致截断端点之间仍插出交叉圆弧。修复：`build_outline()` 遇到 `truncated` 不再插弧，直接连到下一端点以保持 `Polygon2D` 闭合。
+3. **退化保护**：3 个中心距 ≈ r 的深重叠接触会让所有弦端点被截成同一点；Cell Lab 用中心三角扇仍可渲染，Godot 的 `Polygon2D` 则塌缩为 2 点。修复：`build_outline()` 检测点数/面积/中心包含，退化时回退到解析单位圆半平面裁剪 `clip_unit_circle()`；过滤零长度弦。
+4. **皿壁弦**：`wall_chord()` 原为 `circle_chord()` 的薄封装，其 `s <= |r0−r1|` 包含判据把“小圆在大圆内”当作无交，贴壁时几乎不产弦。修复：改用内侧相交式 `d = (r² − R² + s²)/(2s)`，`s > R − r` 才有效。
+5. **符号复核**：`d17 = cross(v16, Q14−P16)` 与 `d26 = cross(P18,v18)/cross(P17,v18) ∈ (0,1)`（此处 `v18 = P18−Q18`）在 Godot 实现中原式正确，本轮未改；此前怀疑的符号反向是对反编译变量方向的误读。
+
+所有改动仍只在视觉派生层：不写模拟状态、不经过 `CommandBus`、不改变 `get_state_hash()`。SmokeTest 新增多接触顺序置换、深重叠非退化、皿壁弦有效性和连续 30 tick 轮廓闭合断言，`SCRIPTS=43 FAILURES=0 EXITCODE=0`。

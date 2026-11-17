@@ -34,9 +34,31 @@ static func circle_chord(p0: Vector2, r0: float, p1: Vector2, r1: float) -> Dict
 		"distance": s
 	}
 
-## 皿壁接触：把皿壁视作半径 dish_radius 的大圆，取与细胞圆的相交弦。
+## 皿壁接触：把皿壁视作半径 dish_radius 的大圆，取细胞圆在大圆内侧的相交弦。
+## 小圆在包含它的大圆内部时，普通 circle_chord() 的 containment 检查会误判为无交，
+## 这里单独推导：d = (r² − R² + s²)/(2s)，s > R − r 才接触。
 static func wall_chord(position: Vector2, radius: float, dish_center: Vector2, dish_radius: float) -> Dictionary:
-	return circle_chord(position, radius, dish_center, dish_radius)
+	var delta: Vector2 = dish_center - position
+	var s: float = delta.length()
+	if s < 0.000001 or dish_radius <= radius:
+		return {"valid": false}
+	if s + radius <= dish_radius + 0.000001:
+		return {"valid": false}
+	var direction: Vector2 = delta / s
+	var d: float = (radius * radius - dish_radius * dish_radius + s * s) / (2.0 * s)
+	var h_squared: float = radius * radius - d * d
+	if h_squared <= 0.0:
+		return {"valid": false}
+	var middle: Vector2 = position + direction * d
+	var perpendicular: Vector2 = Vector2(-direction.y, direction.x)
+	var h: float = sqrt(h_squared)
+	return {
+		"valid": true,
+		"a": middle - perpendicular * h,
+		"b": middle + perpendicular * h,
+		"normal": -direction,
+		"distance": s
+	}
 
 static func cross2(a: Vector2, b: Vector2) -> float:
 	return a.x * b.y - a.y * b.x
@@ -77,7 +99,9 @@ static func clip_keep_origin(
 	return result
 
 ## 弦遮挡剔除（Cell Lab a(FFFF) 的 d26 判据）：
-## d26 = cross(P18, v18) / cross(P17, v18)；0 < d26 < 1 表示弦 17 被弦 18 挡住。
+## d22 = P17.x，d23 = P18.x − Q18.x = −v.x，d24 = P17.y，d25 = P18.y − Q18.y = −v.y；
+## d26 = (d25·P18.x − d23·P18.y)/(d22·d25 − d24·d23)
+##     = cross(P18, v) / cross(P17, v)，0 < d26 < 1 表示弦 17 被弦 18 挡住。
 static func is_occluded(chord: Dictionary, other: Dictionary) -> bool:
 	var p_a: Vector2 = chord.get("local_a", Vector2.ZERO)
 	var p_b: Vector2 = chord.get("local_b", Vector2.ZERO)
@@ -163,6 +187,7 @@ static func truncate_intersections(chords: Array) -> void:
 			if t <= 0.0 or t >= 1.0 or s <= 0.0 or s >= 1.0:
 				continue
 			var intersection: Vector2 = p_i + v_i * t
+			# CellLab d17 = cross(v16, Q14−P16)，与原实现同号，条件 d17 < 0 保留 Cell Lab 分支。
 			var d17: float = cross2(v_j, q_i - p_j)
 			if d17 < 0.0:
 				current["local_b"] = intersection
@@ -194,12 +219,14 @@ static func mark_occluded(chords: Array) -> void:
 				continue
 			var p_j: Vector2 = other.get("local_a", Vector2.ZERO)
 			var q_j: Vector2 = other.get("local_b", Vector2.ZERO)
-			if (p_i == q_j and q_i == p_j) or (p_i == p_j and q_i == q_j):
+			# Cell Lab 的端点重合条件：P17 == Q18 或 Q17 == P18；任一成立就跳过该对。
+			if p_i == q_j or q_i == p_j:
 				continue
 			var v_j: Vector2 = q_j - p_j
 			var denominator: float = cross2(p_i, v_j)
 			if absf(denominator) < 0.000000001:
 				continue
+			# CellLab d26 = cross(P18, v18)/cross(P17, v18)，有效区间 (0, 1)。
 			var d26: float = cross2(p_j, v_j) / denominator
 			if d26 > 0.0 and d26 < 1.0:
 				current["occluded"] = true
@@ -236,15 +263,97 @@ static func sort_chords(chords: Array) -> Array:
 		sorted_chords[cursor + 1] = value
 	return sorted_chords
 
-## 按 Cell Lab 的固定顺序：相交截断 → 遮挡剔除 → 排序。
+## 按 Cell Lab 的固定顺序：规范输入顺序 → 相交截断 → 遮挡剔除 → 排序。
+## Cell Lab 的 A[] 按邻居索引升序写入；这里把空间哈希给出的邻居顺序规范到
+## (kind, peer) 升序，避免邻居遍历顺序改变截断结果。
 static func prepare_for_render(chords: Array) -> Array:
-	truncate_intersections(chords)
-	mark_occluded(chords)
+	var ordered: Array = chords.duplicate()
+	for index in range(1, ordered.size()):
+		var value: Dictionary = ordered[index]
+		var cursor: int = index - 1
+		while cursor >= 0:
+			var previous: Dictionary = ordered[cursor]
+			if not _input_less(value, previous):
+				break
+			ordered[cursor + 1] = previous
+			cursor -= 1
+		ordered[cursor + 1] = value
+	truncate_intersections(ordered)
+	mark_occluded(ordered)
 	var kept: Array = []
-	for chord in chords:
-		if not bool(chord.get("occluded", false)):
-			kept.append(chord)
+	for chord in ordered:
+		if bool(chord.get("occluded", false)):
+			continue
+		var endpoint_a: Vector2 = chord.get("local_a", Vector2.ZERO)
+		var endpoint_b: Vector2 = chord.get("local_b", Vector2.ZERO)
+		if endpoint_a.distance_squared_to(endpoint_b) < 0.0000000001:
+			continue
+		kept.append(chord)
 	return sort_chords(kept)
+
+static func _input_less(left: Dictionary, right: Dictionary) -> bool:
+	var left_kind: int = int(left.get("kind", 0))
+	var right_kind: int = int(right.get("kind", 0))
+	if left_kind != right_kind:
+		return left_kind < right_kind
+	return int(left.get("peer", -1)) < int(right.get("peer", -1))
+
+static func polygon_area(points: PackedVector2Array) -> float:
+	var count: int = points.size()
+	if count < 3:
+		return 0.0
+	var total: float = 0.0
+	for index in range(count):
+		var current: Vector2 = points[index]
+		var following: Vector2 = points[(index + 1) % count]
+		total += current.x * following.y - following.x * current.y
+	return absf(total) * 0.5
+
+static func contains_origin(points: PackedVector2Array) -> bool:
+	var count: int = points.size()
+	var inside: bool = false
+	for index in range(count):
+		var current: Vector2 = points[index]
+		var following: Vector2 = points[(index + 1) % count]
+		if ((current.y > 0.0) != (following.y > 0.0)) and (
+			0.0 < (following.x - current.x) * (0.0 - current.y) / (following.y - current.y) + current.x
+		):
+			inside = not inside
+	return inside
+
+static func canonicalize_points(points: PackedVector2Array) -> PackedVector2Array:
+	var unique: Array[Vector2] = []
+	for point in points:
+		var duplicate: bool = false
+		for existing in unique:
+			if point.distance_squared_to(existing) < 0.0000000001:
+				duplicate = true
+				break
+		if not duplicate:
+			unique.append(point)
+	unique.sort_custom(func(a: Vector2, b: Vector2) -> bool:
+		var angle_a: float = atan2(a.y, a.x)
+		var angle_b: float = atan2(b.y, b.x)
+		if absf(angle_a - angle_b) < 0.0000001:
+			return a.length_squared() < b.length_squared()
+		return angle_a < angle_b
+	)
+	var result: PackedVector2Array = PackedVector2Array()
+	for point in unique:
+		result.append(point)
+	return result
+
+## 退化保护：用解析单位圆作为基底逐条半平面裁剪，结果再按极角规范化。
+## 只在端点 + 圆弧重建退化时启用，保证"圆 → 多边形 → 消失"不会出现。
+static func clip_unit_circle(chords: Array, segments: int = 96) -> PackedVector2Array:
+	var count: int = maxi(12, segments)
+	var unit: PackedVector2Array = PackedVector2Array()
+	for index in range(count):
+		var angle_value: float = TAU * float(index) / float(count)
+		unit.append(Vector2(cos(angle_value), sin(angle_value)))
+	for chord in chords:
+		unit = clip_keep_origin(unit, chord.get("local_a", Vector2.ZERO), chord.get("local_b", Vector2.ZERO))
+	return canonicalize_points(unit)
 
 ## 用弦端点 + 单位圆弧重建轮廓，替代「呼吸膜 + 顺序相关半平面裁剪」。
 ## 弦段本身作为边界，非截断弦之后补解析圆弧，因此接触点不会随相位或裁剪顺序跳动。
@@ -260,6 +369,10 @@ static func build_outline(chords: Array, arc_steps: int = 3) -> PackedVector2Arr
 		var endpoint_b: Vector2 = current.get("local_b", Vector2.ZERO)
 		result.append(endpoint_a)
 		result.append(endpoint_b)
+		# Cell Lab 用 A[i].f 标记被截断的弦并跳过其圆弧插值；
+		# 这里改为直线连到下一端点，Polygon2D/Line2D 才能保持闭合轮廓。
+		if bool(current.get("truncated", false)):
+			continue
 		var next: Dictionary = chords[(index + 1) % count]
 		var next_a: Vector2 = next.get("local_a", Vector2.ZERO)
 		if endpoint_b.distance_squared_to(next_a) < 0.0000000001:
@@ -275,4 +388,8 @@ static func build_outline(chords: Array, arc_steps: int = 3) -> PackedVector2Arr
 			var ratio: float = float(step) / float(arc_count + 1)
 			var angle_value: float = start_angle + span * ratio
 			result.append(Vector2(cos(angle_value), sin(angle_value)))
+	# 多接触深度重叠时，Cell Lab 的 f 标记会让所有圆弧被跳过；其三角形扇仍可渲染，
+	# 但 Polygon2D 需要闭合顶点。这里检测退化并回退到解析圆半平面裁剪。
+	if result.size() < 3 or polygon_area(result) < 0.02 or not contains_origin(result):
+		return clip_unit_circle(chords)
 	return result

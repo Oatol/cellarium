@@ -356,7 +356,8 @@ func _check_scene_visualization() -> bool:
 	var link_layer: Node = instance.get_node("DishView/LinkLayer")
 	var cell_layer: Node = instance.get_node("DishView/CellLayer")
 	var cells: RefCounted = manager.get("cells") as RefCounted
-	if int(manager.call("get_organism_count")) != 1 or int(cells.call("size")) != 1:
+	# 演示体按发育程序逐 tick 展开，断言时可能为 1~4 个细胞，但只能有一个个体。
+	if int(manager.call("get_organism_count")) != 1 or int(cells.call("size")) < 1 or int(cells.call("size")) > 4:
 		push_error("SmokeTest: main scene must create a demonstration organism")
 		instance.queue_free()
 		return false
@@ -2039,6 +2040,67 @@ func _check_shared_chords() -> bool:
 		if not found_a or not found_b:
 			push_error("SmokeTest: chord endpoints must be membrane vertices")
 			return false
+	# 多接触 / 深度重叠：邻居顺序不得改变轮廓，且轮廓永不退化为线段或消失。
+	var multi_world: Array = []
+	for index in range(5):
+		var angle_value: float = deg_to_rad(float(index) * 72.0)
+		var peer_position: Vector2 = Vector2(cos(angle_value), sin(angle_value)) * 12.0
+		var entry: Dictionary = helper.call("circle_chord", Vector2.ZERO, radius, peer_position, radius)
+		if bool(entry.get("valid", false)):
+			entry["peer"] = index
+			entry["kind"] = 0
+			multi_world.append(entry)
+	var multi_forward: Array = helper.call("make_unit_chords", multi_world, Vector2.ZERO, 0.0, radius)
+	var reversed_world: Array = multi_world.duplicate()
+	reversed_world.reverse()
+	var multi_reverse: Array = helper.call("make_unit_chords", reversed_world, Vector2.ZERO, 0.0, radius)
+	var multi_outline_forward: PackedVector2Array = helper.call(
+		"build_outline", helper.call("prepare_for_render", multi_forward), 3
+	)
+	var multi_outline_reverse: PackedVector2Array = helper.call(
+		"build_outline", helper.call("prepare_for_render", multi_reverse), 3
+	)
+	if multi_outline_forward.size() < 4 or multi_outline_forward.size() != multi_outline_reverse.size():
+		push_error("SmokeTest: multi-contact outline must be stable under neighbor permutation")
+		return false
+	for index in range(multi_outline_forward.size()):
+		if multi_outline_forward[index].distance_to(multi_outline_reverse[index]) > 0.0001:
+			push_error("SmokeTest: multi-contact outline changed with neighbor order")
+			return false
+	if float(helper.call("polygon_area", multi_outline_forward)) < 0.5:
+		push_error("SmokeTest: multi-contact outline collapsed")
+		return false
+	if not bool(helper.call("contains_origin", multi_outline_forward)):
+		push_error("SmokeTest: multi-contact outline must contain the cell center")
+		return false
+	var deep_world: Array = []
+	for index in range(3):
+		var deep_angle: float = deg_to_rad(float(index) * 120.0)
+		var deep_peer: Vector2 = Vector2(cos(deep_angle), sin(deep_angle)) * radius
+		var deep_entry: Dictionary = helper.call("circle_chord", Vector2.ZERO, radius, deep_peer, radius)
+		if bool(deep_entry.get("valid", false)):
+			deep_entry["peer"] = index
+			deep_world.append(deep_entry)
+	var deep_prepared: Array = helper.call(
+		"prepare_for_render", helper.call("make_unit_chords", deep_world, Vector2.ZERO, 0.0, radius)
+	)
+	var deep_outline: PackedVector2Array = helper.call("build_outline", deep_prepared, 3)
+	if deep_outline.size() < 3 or float(helper.call("polygon_area", deep_outline)) < 0.5:
+		push_error("SmokeTest: deeply overlapped cell outline must not disappear")
+		return false
+	if not bool(helper.call("contains_origin", deep_outline)):
+		push_error("SmokeTest: deeply overlapped outline must contain the cell center")
+		return false
+	# 皿壁弦：细胞外缘越过皿壁时必须生成，且端点仍在细胞圆上。
+	var wall_chord_value: Dictionary = helper.call(
+		"wall_chord", Vector2(16.5, 250.0), radius, Vector2(250.0, 250.0), 240.0
+	)
+	if not bool(wall_chord_value.get("valid", false)):
+		push_error("SmokeTest: wall overlap must produce a dish chord")
+		return false
+	if absf((wall_chord_value["a"] as Vector2).distance_to(Vector2(16.5, 250.0)) - radius) > 0.01:
+		push_error("SmokeTest: wall chord endpoint must lie on the cell circle")
+		return false
 	# 渲染层每对细胞只算一次，双方视图收到完全相同的世界端点。
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var instance: Node = scene.instantiate()
@@ -2138,6 +2200,20 @@ func _check_shared_chords() -> bool:
 	if hash_before_render != hash_after_render:
 		push_error("SmokeTest: chord rendering must not change simulation state hash")
 		instance.queue_free(); return false
+	# 连续推进 tick：每帧所有可见膜都必须是闭合且非退化的多边形。
+	tick_core.set("running", true)
+	for step in range(30):
+		tick_core.call("_process", 1.0 / 60.0)
+		await process_frame
+		for view_index in range(int(layer.call("get_active_count"))):
+			var dynamic_view: Node2D = layer.get_child(view_index) as Node2D
+			if dynamic_view == null:
+				continue
+			var dynamic_outline: PackedVector2Array = (dynamic_view.get_node_or_null("Outline") as Line2D).points
+			if dynamic_outline.size() < 3 or float(helper.call("polygon_area", dynamic_outline)) < 5.0:
+				push_error("SmokeTest: membrane outline degenerated during live ticks")
+				instance.queue_free(); return false
+	tick_core.set("running", false)
 	var points: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
 	if points.size() < 4:
 		push_error("SmokeTest: chord-clipped membrane lost its outline")
