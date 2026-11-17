@@ -34,6 +34,7 @@ var _param_hint: Label = null
 var _trait_sliders: Array[HSlider] = []
 var _trait_labels: Array[Label] = []
 var _timeline_rows: HBoxContainer = null
+var _summary_label: Label = null
 var _type_option: OptionButton = null
 var _status_label: Label = null
 
@@ -276,6 +277,7 @@ func _build_right_panel() -> Control:
 	summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	summary.add_theme_font_size_override("font_size", 10)
 	box.add_child(summary)
+	_summary_label = summary
 	margin.add_child(box)
 	panel.add_child(margin)
 	return panel
@@ -375,7 +377,7 @@ func _refresh_timeline() -> void:
 		_timeline_rows.add_child(button)
 
 func _refresh_summary() -> void:
-	var summary: Label = get_node_or_null("Panel/Content/RuleSummary") as Label
+	var summary: Label = _summary_label
 	if summary == null:
 		summary = _find_label_by_name("RuleSummary")
 	if summary == null:

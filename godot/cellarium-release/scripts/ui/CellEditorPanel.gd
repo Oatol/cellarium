@@ -40,6 +40,14 @@ func _ready() -> void:
 	_respiration_option = get_node_or_null(respiration_option_path) as OptionButton
 	_dev_rows = get_node_or_null(dev_rows_path) as VBoxContainer
 	_dev_preview = get_node_or_null(dev_preview_path) as Label
+	# 分工说明：本页保留"快速 dev 程序"编辑，完整可视化在「发育编辑」页。
+	var dev_title: Label = get_node_or_null(^"Panel/Scroll/Content/DevTitle") as Label
+	if dev_title != null:
+		dev_title.text = "发育程序（快速表）· 完整可视化请用顶栏「发育编辑」"
+		dev_title.tooltip_text = "此处是 dev_program 的紧凑条目列表：DIVIDE 分裂 / DIFFERENTIATE 分化 / LINK 连接。\n三列 a/b/c 的含义随 opcode 变化；与「发育编辑」页编辑的是同一份草案。"
+	var main_title: Label = get_node_or_null(^"Panel/Scroll/Content/Title") as Label
+	if main_title != null:
+		main_title.text = "CELL EDITOR · 单细胞组型 / 呼吸 / 类型"
 	_build_traits()
 	_build_options()
 	_build_dev_actions()

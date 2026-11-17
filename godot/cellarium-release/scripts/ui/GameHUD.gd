@@ -8,6 +8,7 @@ const CATALOG: RefCounted = preload("res://scripts/ui/ToolCatalog.gd")
 const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 const CODEC: RefCounted = preload("res://scripts/core/data/GenomeCodec.gd")
 const CELL_VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
+const PANEL_CHROME: RefCounted = preload("res://scripts/ui/PanelChrome.gd")
 
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
@@ -59,6 +60,13 @@ var _draft_genome: RefCounted = null
 var _draft_type_id: int = 0
 var _syncing_speed: bool = false
 var _speed_capped: bool = false
+## 面板装饰与顶栏开关：每个面板一个 chrome + 一个 toggle，关闭后可重新打开。
+var _panel_chromes: Dictionary = {}
+var _panel_toggles: Dictionary = {}
+var _panel_default_visible: Dictionary = {}
+## 光场可视化层（阶段 UI 调整）。
+var _field_layer: Node = null
+var _selection_layer: Node = null
 
 func _ready() -> void:
 	command_bus = get_node_or_null(command_bus_path)
@@ -81,11 +89,109 @@ func _ready() -> void:
 	_register_speed_controls()
 	_register_cell_editor()
 	_register_dev_editor()
+	_register_view_layers()
+	_build_panel_chrome()
+	_build_panel_toggles()
 	_register_semantic_ids()
 	_apply_mode(_selected_mode)
 	print("[GameHUD] ready tools=", _tools.size(), " modes=", _modes.size(), " substrate=", _substrate.size(), " semantic=", SEMANTIC.call("count"))
 
-## 把可交互控件注册到语义注册表（§3.6 / §6.9），供 Agent ui.click 无坐标访问。
+func _process(_delta: float) -> void:
+	## 顶栏开关与各面板内部关闭按钮（编辑器 Apply/关闭）状态对账，避免失配。
+	for target_path in _panel_toggles:
+		if target_path == "@field":
+			continue
+		var button: Button = _panel_toggles[target_path] as Button
+		var node: Node = get_node_or_null(target_path)
+		if button != null and node != null and button.is_pressed() != node.visible:
+			button.set_pressed_no_signal(node.visible)
+
+## 光场/选区可视化层引用；field 层默认关，用户可经顶栏开关打开。
+func _register_view_layers() -> void:
+	_field_layer = get_node_or_null("../DishView/FieldLayer")
+	_selection_layer = get_node_or_null("../DishView/SelectionLayer")
+	if _field_layer != null and _field_layer.has_method("set_enabled"):
+		_field_layer.call("set_enabled", false)
+
+## 面板装饰系统：给每个面板加可拖动标题栏 + 图钉（可选）+ 关闭按钮。
+## 面板自身 _ready 已缓存其子节点引用，这里重挂内容节点不会影响它们。
+func _build_panel_chrome() -> void:
+	var definitions: Array = [
+		["ToolDock", "工具 · TOOLS", false],
+		["SubstratePanel", "培养基 · SUBSTRATE", false],
+		["MicroscopePanel", "显微镜 · MICROSCOPE", false],
+		["SpeedPanel", "倍速 · SPEED", false],
+		["CellEditorPanel", "细胞编辑 · CELL EDITOR", false],
+		["DevEditorPanel", "发育编辑 · DEV EDITOR", false],
+		["../AnalysisPanel", "报告/诊断 · ANALYSIS", true],
+		["../Minimap", "小地图 · MINIMAP", false],
+	]
+	for definition in definitions:
+		var node_path: String = str(definition[0])
+		var node: Node = get_node_or_null(node_path)
+		if node == null or not (node is PanelContainer):
+			continue
+		var panel: PanelContainer = node as PanelContainer
+		var chrome: RefCounted = (PANEL_CHROME as RefCounted).new(panel, str(definition[1]), bool(definition[2]))
+		if not bool(chrome.call("install")):
+			continue
+		_panel_chromes[node_path] = chrome
+		_panel_default_visible[node_path] = panel.visible
+		var on_close: Callable = Callable(self, "_on_panel_close").bind(node_path)
+		chrome.connect("close_requested", on_close)
+
+func _build_panel_toggles() -> void:
+	var row: Node = get_node_or_null(mode_row_path)
+	if row == null:
+		return
+	var separator: Label = Label.new()
+	separator.text = "│ 面板"
+	separator.add_theme_font_size_override("font_size", 11)
+	row.add_child(separator)
+	var definitions: Array = [
+		["工具", "ToolDock"],
+		["培养基", "SubstratePanel"],
+		["显微镜", "MicroscopePanel"],
+		["倍速", "SpeedPanel"],
+		["分析", "../AnalysisPanel"],
+		["小地图", "../Minimap"],
+		["细胞编辑", "CellEditorPanel"],
+		["发育编辑", "DevEditorPanel"],
+		["光场", "@field"],
+	]
+	for definition in definitions:
+		var button: Button = _make_button(str(definition[0]), "开/关面板 · " + str(definition[1]))
+		button.toggle_mode = true
+		button.custom_minimum_size = Vector2(66, 26)
+		button.set_meta("target", str(definition[1]))
+		button.toggled.connect(Callable(self, "_on_panel_toggle").bind(button))
+		var target_path: String = str(definition[1])
+		var target: Node = get_node_or_null(target_path)
+		button.set_pressed_no_signal(target != null and target.visible)
+		_panel_toggles[target_path] = button
+		row.add_child(button)
+
+func _on_panel_toggle(pressed: bool, button: Button) -> void:
+	var target_path: String = str(button.get_meta("target", ""))
+	if target_path == "@field":
+		if _field_layer != null and _field_layer.has_method("set_enabled"):
+			_field_layer.call("set_enabled", pressed)
+			_set_feedback("光场可视化 · " + ("开" if pressed else "关") + " · 直接显示光照场强度")
+		return
+	var node: Node = get_node_or_null(target_path)
+	if node == null:
+		return
+	node.visible = pressed
+	# 生态报告等面板有 _visible_state 内部状态，保持同步避免 R 键/图钉逻辑失配。
+	if node.has_method("set_visible_state"):
+		node.call("set_visible_state", pressed)
+
+func _on_panel_close(panel_path: String) -> void:
+	var button: Button = _panel_toggles.get(panel_path, null) as Button
+	if button != null:
+		button.set_pressed_no_signal(false)
+	_set_feedback("面板已关闭 · 可用顶栏开关重新打开")
+
 func _register_semantic_ids() -> void:
 	# 场景可能被测试/热重载反复实例化：先清掉本实例命名空间下的旧注册再重注册。
 	SEMANTIC.call("clear_prefix", "ui://sim/")
@@ -158,7 +264,13 @@ func _on_dev_editor_toggle() -> void:
 	_dev_editor.visible = not _dev_editor.visible
 	if _dev_editor.visible:
 		_dev_editor.call("move_to_front")
+	_sync_toggle_for("DevEditorPanel", _dev_editor.visible)
 	_set_feedback("发育编辑器 · " + ("打开" if _dev_editor.visible else "关闭") + " · 编辑 dev_program，Apply 后装载合成器")
+
+func _sync_toggle_for(panel_path: String, value: bool) -> void:
+	var button: Button = _panel_toggles.get(panel_path, null) as Button
+	if button != null:
+		button.set_pressed_no_signal(value)
 
 func sync_speed_ui() -> void:
 	if tick_core == null or _syncing_speed:
@@ -215,6 +327,7 @@ func _on_cell_editor_toggle() -> void:
 	_cell_editor.visible = not _cell_editor.visible
 	if _cell_editor.visible:
 		_cell_editor.call("move_to_front")
+	_sync_toggle_for("CellEditorPanel", _cell_editor.visible)
 	_set_feedback("细胞编辑 · " + ("打开" if _cell_editor.visible else "关闭"))
 
 func set_draft(genome: RefCounted, type_id: int) -> bool:
@@ -352,10 +465,34 @@ func _build_view_buttons() -> void:
 
 func _build_tint() -> void:
 	_tint = ColorRect.new()
+	_tint.name = "LensFilter"
 	_tint.color = Color(0, 0, 0, 0)
 	_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_tint.z_index = -1
+	# 真正的滤镜：canvas_item shader 对屏幕做色相/对比/扫描线叠加，各镜头参数不同。
+	# 只是视图呈现，不改 camera 变换、不改 dt、不写模拟。
+	var shader: Shader = Shader.new()
+	shader.code = """
+shader_type canvas_item;
+render_mode unshaded;
+uniform vec4 filter_color : source_color = vec4(0.0);
+uniform float strength : hint_range(0.0, 1.0) = 0.0;
+uniform float scanline : hint_range(0.0, 1.0) = 0.0;
+uniform vec2 resolution = vec2(1920.0, 1080.0);
+void fragment() {
+	float scan = scanline * (0.5 + 0.5 * sin(UV.y * resolution.y * 3.14159));
+	float a = clamp(filter_color.a * strength + scan, 0.0, 1.0);
+	COLOR = vec4(filter_color.rgb, a);
+}
+"""
+	var material: ShaderMaterial = ShaderMaterial.new()
+	material.shader = shader
+	material.set_shader_parameter("filter_color", Color(0, 0, 0, 0))
+	material.set_shader_parameter("strength", 0.0)
+	material.set_shader_parameter("scanline", 0.0)
+	material.set_shader_parameter("resolution", Vector2(1920, 1080))
+	_tint.material = material
 	add_child(_tint)
 
 ## 注射参数行：颜色注射选细胞类型、信号注射选场通道 + 注入量。
@@ -487,27 +624,50 @@ func _on_substrate_changed(value: float, index: int) -> void:
 		if key == "light_intensity":
 			environment_manager.call("apply_light_intensity")
 
+## 镜头滤镜：只改滤镜参数，绝不改 camera.zoom / offset / rotation（视野交给滚轮与右键）。
+## 五个镜头参数各不相同，确保切换后画面有真实差异，而非只是换了层半透明颜色。
 func _on_lens_pressed(index: int) -> void:
 	_selected_lens = index
 	for i in range(_lens_buttons.size()):
 		_lens_buttons[i].set_pressed_no_signal(i == index)
 	var name_value: String = _lenses[index]
-	var tint: Color = Color(0, 0, 0, 0)
-	var zoom: float = 2.0
+	# filter_color = RGB 染色 + A 基础不透明度；strength 放大染色；scanline 扫描线密度。
+	var filter_color: Color = Color(0, 0, 0, 0)
+	var strength: float = 0.0
+	var scanline: float = 0.02
+	var note: String = ""
 	match name_value:
+		"默认":
+			strength = 0.0
+			note = "无滤镜 · 原始画面"
 		"视野":
-			zoom = 1.2
+			filter_color = Color(0.05, 0.12, 0.10, 0.05)
+			strength = 0.30
+			scanline = 0.0
+			note = "宽视野 · 轻微冷调、无扫描线"
 		"目镜":
-			zoom = 3.0
+			filter_color = Color(0.02, 0.06, 0.10, 0.10)
+			strength = 0.75
+			scanline = 0.09
+			note = "高倍目镜 · 深冷调 + 明显扫描线"
 		"融合镜":
-			tint = Color(0.36, 0.88, 0.75, 0.10)
+			filter_color = Color(0.18, 0.72, 0.60, 0.16)
+			strength = 0.85
+			scanline = 0.03
+			note = "融合镜 · 青绿色通道叠加"
 		"偏振镜":
-			tint = Color(1.0, 0.54, 0.24, 0.10)
+			filter_color = Color(0.92, 0.52, 0.22, 0.18)
+			strength = 0.90
+			scanline = 0.06
+			note = "偏振镜 · 暖橙色通道 + 偏振纹"
 	if _tint != null:
-		_tint.color = tint
-	if camera != null:
-		camera.zoom = Vector2(zoom, zoom)
-	_set_feedback("镜头 → %s · 仅视图，不改 dt" % name_value)
+		_tint.color = filter_color
+		var material: ShaderMaterial = _tint.material as ShaderMaterial
+		if material != null:
+			material.set_shader_parameter("filter_color", filter_color)
+			material.set_shader_parameter("strength", strength)
+			material.set_shader_parameter("scanline", scanline)
+	_set_feedback("镜头 → %s · %s · 视野不变" % [name_value, note])
 
 func _on_view_pressed(name_value: String) -> void:
 	if camera == null:

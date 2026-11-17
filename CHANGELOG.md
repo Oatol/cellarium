@@ -4,6 +4,41 @@
 
 ---
 
+## 0.11.0 — 2026-11-17
+
+**类型**：UI 调整批次（纯表现层 / 编辑器体验，不改模拟与确定性 hash）
+**触发**：用户反馈诊断不会选中细胞、生态报告不实时且不能固定、各面板不能拖动/关闭/重开、发育编辑半透明难读、看不到光场、切换镜头改变视野且各镜头只有颜色差别；询问细胞编辑下方选项用途
+
+### 面板 chrome 与顶栏开关
+
+- 新增 `scripts/ui/PanelChrome.gd`：给任意 `PanelContainer` 注入统一标题栏（拖动把手 + 图钉 + 关闭按钮），把原有内容节点重挂到 `ChromeRoot` 下，不改脚本逻辑。信号 `close_requested()` / `pin_toggled(pinned)`。
+- `GameHUD.gd`：新增 `_build_panel_chrome()` 为 ToolDock / SubstratePanel / MicroscopePanel / SpeedPanel / CellEditorPanel / DevEditorPanel / AnalysisPanel / Minimap 安装 chrome；`_build_panel_toggles()` 在顶栏生成对应开关，关闭后可重新打开；`_on_panel_close()` 同步复位开关；新增 `_process()` 与面板 `visible` 对账，避免编辑器内部「关闭/Apply」按钮与顶栏 toggle 失配。
+- `AnalysisPanel.gd`：图钉固定后 `R` 键不再关闭，仍可点标题栏关闭按钮；`set_visible_state()` 与顶栏开关共用状态。
+- `scenes/ui/DevEditorPanel.tscn`：加不透明 `StyleBoxFlat`（深青底 + 青色描边），替换原先半透明底，解决阅读吃力。
+- `SmokeTest.gd` 深层路径随 `ChromeRoot` 更新（GameHUD 内部引用在 `_ready()` 已缓存，不受重挂影响）。
+
+### 诊断选中 / 报告实时 / 光场可见
+
+- `OrganismManager.gd`：`INSPECT` 命中后写 `selection = [index]`（视图侧派生，不改模拟）。新增 `scripts/rendering/SelectionLayer.gd` 读 `selection` 画圆环 + 四向刻度，监听 `tick_advanced` / `command_executed` 刷新。
+- `AnalysisPanel.gd`：每 30 tick 刷新一次生态报告，仅在可见时刷新；诊断段每次刷新读取最新 `get_last_inspection()`。`scenes/main.tscn` 新增 `SelectionLayer` 节点。
+- 新增 `scripts/rendering/FieldLayer.gd`：只读 `EnvironmentManager.field` 通道 3，按格画半透明暖色格阵；默认关闭，顶栏「光场」开关可开可关，不改场数据。
+
+### 镜头滤镜（只改滤镜、不改视野）
+
+- `GameHUD.gd`：`_build_tint()` 改为 `canvas_item` + `unshaded` shader（`filter_color` / `strength` / `scanline`），挂为视口滤镜。
+- `_on_lens_pressed()` 不再写 `camera.zoom` / 位置；默认 / 宽视野 / 高倍目镜 / 融合镜 / 偏振镜各有不同颜色、强度与扫描线参数，切换保持当前平移缩放。SmokeTest 断言「切换镜头 zoom 不变、参数互不相同」。
+
+### 编辑器分工说明
+
+- `CellEditorPanel.gd`：标题改为「单细胞组型 / 呼吸 / 类型」，并给下方 `DEVELOPMENT · 多细胞发育程序` 加 tooltip：该区是 `dev_program` 的紧凑表（DIVIDE 子代类型/角度/间距、DIFFERENTIATE 索引/目标类型、LINK 两端/静息长度），与顶栏「发育编辑」编辑同一份草案；完整可视化集中在发育编辑页。
+
+### 验证与同步
+
+- `SmokeTest.gd`：3 个新脚本加入 SCRIPT_MANIFEST，新增 `_check_ui_chrome_and_filters()`（chrome 存在、图钉 meta、开关关/开、关闭按钮复位 toggle、INSPECT 写 selection、FieldLayer 默认关闭且通道 3、镜头不 zoom 且参数不同）。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=48 FAILURES=0 EXITCODE=0`。D 盘同步保留 MCP autoload，并把 15 个 `ext_resource uid` 与 30 个节点 `unique_id` 从原场景回填到新版场景。
+
+---
+
 ## 0.10.0 — 2026-11-17
 
 **类型**：阶段 11 — 生命周期可见化 + 工具闭环 + 发育编辑器 Godot 落地

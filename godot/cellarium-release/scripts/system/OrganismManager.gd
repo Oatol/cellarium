@@ -516,6 +516,8 @@ func _apply_tool_command(command: Dictionary) -> int:
 			if index < 0:
 				last_tool_message = "细胞诊断：点击位置附近没有细胞"
 				return -1
+			# 诊断即选中：写入 selection，SelectionLayer 会画圆环高亮（纯视图，不改模拟）。
+			selection = [index]
 			var org_id: int = int(cells.get("cell_org_id")[index])
 			var sampled: PackedFloat32Array = PackedFloat32Array()
 			if environment_manager != null:

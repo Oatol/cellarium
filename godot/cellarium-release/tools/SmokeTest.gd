@@ -43,6 +43,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/CellEditorPanel.gd",
 	"res://scripts/ui/DevEditorPanel.gd",
+	"res://scripts/ui/PanelChrome.gd",
+	"res://scripts/rendering/FieldLayer.gd",
+	"res://scripts/rendering/SelectionLayer.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
@@ -167,6 +170,8 @@ func _initialize() -> void:
 	if not await _check_lifecycle_and_injectors():
 		failures += 1
 	if not await _check_dev_editor_landing():
+		failures += 1
+	if not await _check_ui_chrome_and_filters():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1175,8 +1180,8 @@ func _check_microscope_layout() -> bool:
 	await process_frame
 	await process_frame
 	var panel: Control = instance.get_node_or_null("UI/HUD/MicroscopePanel") as Control
-	var lens: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/Panel/Content/LensRow") as HBoxContainer
-	var view: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/Panel/Content/ViewRow") as HBoxContainer
+	var lens: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/ChromeRoot/Panel/Content/LensRow") as HBoxContainer
+	var view: HBoxContainer = instance.get_node_or_null("UI/HUD/MicroscopePanel/ChromeRoot/Panel/Content/ViewRow") as HBoxContainer
 	var status: Control = instance.get_node_or_null("UI/HUD/StatusBar") as Control
 	if panel == null or lens == null or view == null or status == null:
 		push_error("SmokeTest: microscope layout nodes missing")
@@ -1186,12 +1191,12 @@ func _check_microscope_layout() -> bool:
 		push_error("SmokeTest: lens/view button count mismatch")
 		instance.queue_free()
 		return false
-	var substrate_rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/Panel/SubstrateRows") as Control
+	var substrate_rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/ChromeRoot/Panel/SubstrateRows") as Control
 	if substrate_rows == null or substrate_rows.get_child_count() <= 0:
 		push_error("SmokeTest: substrate rows missing")
 		instance.queue_free()
 		return false
-	if instance.get_node_or_null("UI/HUD/SubstratePanel/Panel/Title") != null:
+	if instance.get_node_or_null("UI/HUD/SubstratePanel/ChromeRoot/Panel/Title") != null:
 		push_error("SmokeTest: substrate title must not overlap rows in MarginContainer")
 		instance.queue_free()
 		return false
@@ -2606,8 +2611,8 @@ func _check_camera_speed_editor() -> bool:
 		instance.queue_free(); return false
 
 	# 倍速滑块 / 右侧输入双向同步。
-	var slider: HSlider = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/SpeedSlider") as HSlider
-	var spin: SpinBox = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/SpeedSpin") as SpinBox
+	var slider: HSlider = instance.get_node("UI/HUD/SpeedPanel/ChromeRoot/Panel/SpeedRow/SpeedSlider") as HSlider
+	var spin: SpinBox = instance.get_node("UI/HUD/SpeedPanel/ChromeRoot/Panel/SpeedRow/SpeedSpin") as SpinBox
 	if slider == null or spin == null:
 		push_error("SmokeTest: speed slider/spin missing")
 		instance.queue_free(); return false
@@ -2624,7 +2629,7 @@ func _check_camera_speed_editor() -> bool:
 	spin.value = 30.0
 	for _frame in range(10):
 		tick_core.call("_process", 1.0 / 60.0)
-	var lod_label: Label = instance.get_node("UI/HUD/SpeedPanel/Panel/SpeedRow/LodLabel") as Label
+	var lod_label: Label = instance.get_node("UI/HUD/SpeedPanel/ChromeRoot/Panel/SpeedRow/LodLabel") as Label
 	if lod_label == null or not lod_label.text.contains("上限") or int(tick_core.get("carry_ticks")) <= 0:
 		push_error("SmokeTest: saturated speed must surface frame-cap hint in UI")
 		instance.queue_free(); return false
@@ -3049,4 +3054,133 @@ func _check_dev_editor_landing() -> bool:
 		main_instance.queue_free(); return false
 	main_instance.queue_free()
 	print("SmokeTest: OK dev editor Godot landing (skeleton/three-pane/dev_program edit/Apply/main wiring)")
+	return true
+
+## UI 调整验收：面板 chrome（拖动/图钉/关闭/顶栏开关）、诊断选中、光场层、镜头滤镜不改视野。
+func _check_ui_chrome_and_filters() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		push_error("SmokeTest: ui chrome scene missing")
+		return false
+	var instance: Node = scene.instantiate()
+	root.add_child(instance)
+	await process_frame
+	var hud: Node = instance.get_node_or_null("UI/HUD")
+	if hud == null:
+		push_error("SmokeTest: HUD missing")
+		instance.queue_free(); return false
+
+	# (1) 面板 chrome：每个目标面板下有 ChromeHandle + 关闭按钮；报告面板额外有图钉。
+	var panel_paths: Array[String] = [
+		"UI/HUD/ToolDock", "UI/HUD/SubstratePanel", "UI/HUD/MicroscopePanel",
+		"UI/HUD/SpeedPanel", "UI/HUD/CellEditorPanel", "UI/HUD/DevEditorPanel",
+		"UI/AnalysisPanel", "UI/Minimap",
+	]
+	for panel_path in panel_paths:
+		var panel: Node = instance.get_node_or_null(panel_path)
+		if panel == null or panel.get_node_or_null("ChromeRoot/ChromeHandle") == null:
+			push_error("SmokeTest: panel chrome missing " + panel_path)
+			instance.queue_free(); return false
+	var report_panel: Node = instance.get_node_or_null("UI/AnalysisPanel")
+	if report_panel == null or bool(report_panel.get_meta("chrome_pinned", true)) != false:
+		push_error("SmokeTest: report panel chrome pin meta not initialized")
+		instance.queue_free(); return false
+
+	# (2) 顶栏开关按钮：每个面板/光场均有 toggle；关闭 → 重开闭环。
+	var toggles: Dictionary = hud.get("_panel_toggles") as Dictionary
+	if toggles.size() < 9:
+		push_error("SmokeTest: panel toggles not built, size=%d" % toggles.size())
+		instance.queue_free(); return false
+	var speed_panel: Node = instance.get_node_or_null("UI/HUD/SpeedPanel")
+	var speed_toggle: Button = toggles.get("SpeedPanel", null) as Button
+	if speed_panel == null or speed_toggle == null:
+		push_error("SmokeTest: speed panel toggle missing")
+		instance.queue_free(); return false
+	speed_panel.visible = false
+	speed_toggle.set_pressed_no_signal(false)
+	speed_toggle.set_pressed(true)
+	if not speed_panel.visible:
+		push_error("SmokeTest: toggle did not reopen panel")
+		instance.queue_free(); return false
+
+	# (3) 关闭按钮 → 面板隐藏 + 对应 toggle 复位。
+	var chrome_map: Dictionary = hud.get("_panel_chromes") as Dictionary
+	var speed_chrome: RefCounted = chrome_map.get("SpeedPanel", null) as RefCounted
+	if speed_chrome == null or speed_chrome.get_close_button() == null:
+		push_error("SmokeTest: speed panel close button missing")
+		instance.queue_free(); return false
+	speed_chrome.get_close_button().pressed.emit()
+	if speed_panel.visible or speed_toggle.is_pressed():
+		push_error("SmokeTest: close button did not hide panel/reset toggle")
+		instance.queue_free(); return false
+
+	# (4) 图钉切换：固定后 meta=true，R 键不关闭（这里验证 meta 与按钮文字）。
+	var report_chrome: RefCounted = chrome_map.get("../AnalysisPanel", null) as RefCounted
+	if report_chrome == null or report_chrome.get_pin_button() == null:
+		push_error("SmokeTest: report pin button missing")
+		instance.queue_free(); return false
+	report_chrome.get_pin_button().set_pressed(true)
+	if not bool(report_panel.get_meta("chrome_pinned", false)):
+		push_error("SmokeTest: pin did not set chrome_pinned meta")
+		instance.queue_free(); return false
+
+	# (5) 诊断选中：INSPECT 写 selection，SelectionLayer 存在。
+	var selection_layer: Node = instance.get_node_or_null("DishView/SelectionLayer")
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	if selection_layer == null or not selection_layer.has_method("mark_dirty"):
+		push_error("SmokeTest: SelectionLayer missing")
+		instance.queue_free(); return false
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 1)
+	var spawned: int = int(cells.call("size")) - 1
+	bus.call("enqueue", {"type": "INSPECT", "position": cells.call("get_position", spawned), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 2)
+	var selection: Array = manager.get("selection") as Array
+	if selection.size() != 1 or int(selection[0]) != spawned:
+		push_error("SmokeTest: INSPECT did not select cell")
+		instance.queue_free(); return false
+
+	# (6) 光场层：存在、默认关闭、可开、通道=3、有 set_channel。
+	var field_layer: Node = instance.get_node_or_null("DishView/FieldLayer")
+	if field_layer == null or not field_layer.has_method("set_enabled") or not field_layer.has_method("set_channel"):
+		push_error("SmokeTest: FieldLayer view API missing")
+		instance.queue_free(); return false
+	if bool(field_layer.call("is_enabled")):
+		push_error("SmokeTest: FieldLayer should default off")
+		instance.queue_free(); return false
+	field_layer.call("set_enabled", true)
+	field_layer.call("set_channel", 3)
+	if not bool(field_layer.call("is_enabled")) or int(field_layer.get("channel_index")) != 3:
+		push_error("SmokeTest: FieldLayer enable/channel failed")
+		instance.queue_free(); return false
+
+	# (7) 镜头滤镜：切换镜头不改 camera.zoom；各镜头滤镜参数不同。
+	var camera: Node = instance.get_node("Camera2D")
+	var zoom_before: Vector2 = camera.get("zoom")
+	var lens_defs: Array = hud.get("_lenses") as Array
+	var lens_idx: int = lens_defs.find("目镜")
+	if lens_idx < 0:
+		push_error("SmokeTest: eyepiece lens missing")
+		instance.queue_free(); return false
+	hud.call("_on_lens_pressed", lens_idx)
+	if not is_equal_approx((camera.get("zoom") as Vector2).x, zoom_before.x):
+		push_error("SmokeTest: lens must not change camera zoom")
+		instance.queue_free(); return false
+	var tint: ColorRect = hud.get("_tint") as ColorRect
+	var material: ShaderMaterial = tint.material as ShaderMaterial
+	if material == null or float(material.get_shader_parameter("strength")) <= 0.0:
+		push_error("SmokeTest: lens filter strength not applied")
+		instance.queue_free(); return false
+	var strength_eyepiece: float = float(material.get_shader_parameter("strength"))
+	var fusion_idx: int = lens_defs.find("融合镜")
+	hud.call("_on_lens_pressed", fusion_idx)
+	var strength_fusion: float = float(material.get_shader_parameter("strength"))
+	if is_equal_approx(strength_eyepiece, strength_fusion):
+		push_error("SmokeTest: lenses must produce distinct filter params")
+		instance.queue_free(); return false
+
+	instance.queue_free()
+	print("SmokeTest: OK UI chrome/pin/toggle + inspect-select + field layer + lens filter (no zoom)")
 	return true

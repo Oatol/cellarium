@@ -17,6 +17,43 @@ var _text: Label = null
 var _inspect_title: Label = null
 var _inspect_text: Label = null
 var _visible_state: bool = false
+var _tick_since_refresh: int = 0
+
+func _on_tick_for_refresh(tick_index: int) -> void:
+	_tick_since_refresh += 1
+	if not visible:
+		return
+	# 每 30 tick 刷新；诊断快照则每次都跟（成本低）。
+	if _tick_since_refresh >= 30:
+		_tick_since_refresh = 0
+		_refresh()
+	elif organism_manager != null and organism_manager.has_method("get_last_inspection"):
+		_refresh_inspection()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if (event as InputEventKey).keycode == KEY_R:
+			# 图钉固定后 R 键不关闭面板。
+			if bool(get_meta("chrome_pinned", false)) and _visible_state:
+				return
+			_set_visible(not _visible_state)
+
+## 供 Agent ui.click("ui://report/panel") 调用：切换面板。
+func act() -> void:
+	_set_visible(not _visible_state)
+
+## 供顶栏开关同步内部可见状态（避免 R 键/图钉逻辑失配）。
+func set_visible_state(value: bool) -> void:
+	_visible_state = value
+	visible = value
+	if value:
+		_refresh()
+
+func _set_visible(value: bool) -> void:
+	_visible_state = value
+	visible = value
+	if value:
+		_refresh()
 
 func _ready() -> void:
 	organism_manager = get_node_or_null(organism_manager_path)
@@ -24,6 +61,11 @@ func _ready() -> void:
 	# 场景可能被反复实例化（测试/热重载）：先清本命名空间旧注册再注册。
 	SEMANTIC.call("clear_prefix", "ui://report/")
 	SEMANTIC.call("register", "ui://report/panel", self)
+	# 生态报告实时更新：每 30 tick 刷新一次（面板可见时才刷新，无 tick 的冻结档也定期刷新）。
+	if tick_core != null and tick_core.has_signal("tick_advanced"):
+		var on_tick: Callable = Callable(self, "_on_tick_for_refresh")
+		if not tick_core.is_connected("tick_advanced", on_tick):
+			tick_core.connect("tick_advanced", on_tick)
 	_body = VBoxContainer.new()
 	var title: Label = Label.new()
 	title.text = "生态报告 · R 关闭"
@@ -44,21 +86,6 @@ func _ready() -> void:
 	add_child(_body)
 	visible = false
 	_refresh()
-
-func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventKey and event.pressed and not event.echo:
-		if (event as InputEventKey).keycode == KEY_R:
-			_set_visible(not _visible_state)
-
-## 供 Agent ui.click("ui://report/panel") 调用：切换面板。
-func act() -> void:
-	_set_visible(not _visible_state)
-
-func _set_visible(value: bool) -> void:
-	_visible_state = value
-	visible = value
-	if value:
-		_refresh()
 
 func _refresh() -> void:
 	if organism_manager == null or _text == null:

@@ -523,3 +523,15 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - **配套修复**（用户同批反馈）：生命周期可见化（基础代谢 0.006、光照通道 0.6、成熟个体按能量 cooldown 分裂、饥饿死亡）；工具闭环（光学镊子连续拖拽、INSPECT 诊断弹窗、ADHERE 双击建链、颜色/信号注射可选）。
 - **行为边界**：自主分裂设「首次资格 cooldown 宽限期」，避免发育程序 9 指令→4 细胞/3 连接的确定性快照被成熟当 tick 分裂破坏；所有干预不进确定性 hash。
 - **验收**：发布工程与 D 盘运行工程均 `SCRIPTS=45 FAILURES=0 EXITCODE=0`；新增生命周期与发育编辑器两组 SmokeTest。临时诊断脚本未发布。
+
+## 17. v0.11.0 — UI 调整批次结论（2026-11-17）
+
+本批全部是表现层/编辑器体验，未改 tick 顺序、物理、Chem 通道或 GNP1 编码，确定性 hash 不受影响。
+
+- **面板 chrome**：`PanelChrome.gd` 统一注入标题栏（拖动/图钉/关闭），内容重挂 `ChromeRoot`；注意这会使外部深层节点路径变化，SmokeTest 与新代码都要按新路径取节点，脚本内部 `_ready()` 缓存不受影响。
+- **顶栏开关**：每个面板有可复位 toggle；编辑器内部关闭按钮与顶栏状态由 `GameHUD._process()` 对账。AnalysisPanel 图钉固定后 `R` 不关闭。
+- **诊断/报告**：INSPECT 命中写 `selection`，由 `SelectionLayer.gd` 画圆环；生态报告每 30 tick（可见时）刷新，属观察便利，不改快照。
+- **光场**：`FieldLayer.gd` 只读通道 3 画格阵，是场的可视化而非新物理场；Cell Lab 的光照可见效果在本项目以同一通道数据呈现。
+- **镜头**：切换到 `canvas_item` shader 滤镜，不再动相机；五镜头参数不同但仍只是滤镜，不声称还原 Cell Lab 的光学系统。
+- **编辑器分工**：`CellEditorPanel` 下方 `dev_program` 快速表 = `dev ...` 指令紧凑编辑；`DevEditorPanel` 是同一草案的完整可视化。两者共享真相源，不重复写模拟。
+- **验收**：发布与 D 盘工程 `SCRIPTS=48 FAILURES=0 EXITCODE=0`；D 盘同步回填 15 个脚本 uid + 30 个节点 unique_id，MCP autoload 保留。
