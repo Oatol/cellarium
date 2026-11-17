@@ -1894,7 +1894,7 @@ func _check_cell_scene_renderer() -> bool:
 		push_error("SmokeTest: procedural cell needs at least 5 organelles")
 		instance.queue_free(); return false
 	var initial_chord_count: int = int(first_view.call("get_chord_count"))
-	var minimum_outline_points: int = 4 if initial_chord_count > 0 else 64
+	var minimum_outline_points: int = 48 if initial_chord_count > 0 else 64
 	if body.polygon.size() < minimum_outline_points or int(first_view.call("get_outline_point_count")) < minimum_outline_points:
 		push_error("SmokeTest: membrane outline not generated")
 		instance.queue_free(); return false
@@ -2194,6 +2194,23 @@ func _check_shared_chords() -> bool:
 		if outline_before[index].distance_to(outline_after[index]) > 0.001:
 			push_error("SmokeTest: contact outline twitched with membrane phase")
 			instance.queue_free(); return false
+	# 新增：移除/恢复弦时不得切换点集，外膜始终是同一套解析圆采样。
+	var cached_chords: Array = view_with_chord.get("_chords")
+	view_with_chord.set("_chords", [])
+	view_with_chord.call("_refresh_shape")
+	var no_chord_outline: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
+	if no_chord_outline.size() < 64:
+		push_error("SmokeTest: no-chord outline must stay analytic circle, points=%d" % no_chord_outline.size())
+		instance.queue_free(); return false
+	if helper.call("polygon_area", no_chord_outline) <= 1.0:
+		push_error("SmokeTest: no-chord outline collapsed")
+		instance.queue_free(); return false
+	view_with_chord.set("_chords", cached_chords)
+	view_with_chord.call("_refresh_shape")
+	var restored_outline: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
+	if restored_outline.size() != outline_before.size():
+		push_error("SmokeTest: chord/no-chord path switched point count")
+		instance.queue_free(); return false
 	# 渲染只读：反复刷新视图不得改变模拟状态 hash。
 	var hash_before_render: int = int(manager.call("get_state_hash"))
 	for index in range(chord_counts.size()):

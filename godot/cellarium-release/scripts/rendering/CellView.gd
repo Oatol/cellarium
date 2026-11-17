@@ -4,7 +4,8 @@ extends Node2D
 ##
 ## Cell Lab 没有"细胞贴图"：细胞由 *_vert.glsl / *_frag.glsl + 顶点缓冲程序化绘制，
 ## guide-icons 只是类型图鉴。本项目同样用场景节点程序化画膜、内膜、核与细胞器，
-## 并按接触点把膜局部压平（Cell Lab 的 A[] 接触点 → 膜压平概念）。
+## 并按共享弦把接触处切平（Cell Lab 的 A[] 接触点 → 膜压平概念）。
+## 外膜统一用解析圆 + 共享弦裁剪，不叠加独立呼吸膜，避免两套轮廓互相切换。
 
 const CATALOG: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const MEMBRANE: RefCounted = preload("res://scripts/rendering/CellMembrane.gd")
@@ -105,18 +106,18 @@ func _process(delta: float) -> void:
 	_refresh_shape()
 
 func _refresh_shape() -> void:
-	if body == null or outline == null or _membrane == null:
+	if body == null or outline == null:
 		return
+	# 只保留速度/相位状态供 API 与旧测试读取；外膜不再由呼吸膜生成。
+	# Cell Lab 的细胞外形来自物理半径与共享弦，呼吸相位只用于着色。
 	var velocity_limit: float = maxf(1.0, visual_radius * 0.5)
 	var target_stretch: float = clampf(_velocity.length() / velocity_limit, 0.0, 1.0) * max_stretch
 	_stretch += (target_stretch - _stretch) * clampf(stretch_smoothing, 0.05, 1.0)
-	var unit: PackedVector2Array = _membrane.outline(_shape_time, _stretch)
-	var angle: float = 0.0 if _stretch < 0.001 else _velocity.angle()
+	# 统一基底：所有细胞外膜都是同一套 64 点解析圆。
+	# 有弦时裁剪，无弦时仅按接触法线浅压平；绝不在呼吸膜与弦膜之间切换点集。
+	var unit: PackedVector2Array = CHORDS.call("unit_circle", 64)
 	if not _chords.is_empty():
-		# 共享弦路径：先按 Cell Lab 顺序规范化截断/遮挡，再对解析单位圆做半平面裁剪。
-		# 不再用 12 点呼吸膜或端点直线重建轮廓：后者在被截断弦处会退化成可见多边形，
-		# 而 Cell Lab 的片元级圆裁剪在 Godot 侧由这里的解析圆弧采样承担。
-		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, angle, visual_radius)
+		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, 0.0, visual_radius)
 		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
 		var chord_outline: PackedVector2Array = CHORDS.call("clip_unit_circle", prepared, 64)
 		if chord_outline.size() >= 3:
@@ -124,10 +125,9 @@ func _refresh_shape() -> void:
 	var world_points: PackedVector2Array = PackedVector2Array()
 	var inner_points: PackedVector2Array = PackedVector2Array()
 	for point in unit:
-		var rotated: Vector2 = point.rotated(angle)
-		var shaped: Vector2 = rotated
+		var shaped: Vector2 = point
 		if _chords.is_empty():
-			# 旧路径：仅方向可用时，按法线做浅压平（孤立细胞 / 手工测试）。
+			# 无弦时保留浅压平，供手动测试/未进入弦派发的视图使用。
 			shaped = _flatten_contacts(shaped, _contacts, contact_flatten)
 			shaped = _flatten_contacts(shaped, _adhesions, adhesion_flatten)
 			shaped = _flatten_contacts(shaped, _wall_contacts, wall_flatten)

@@ -95,7 +95,9 @@ static func clip_keep_origin(
 		previous = current
 		previous_distance = current_distance
 	if result.size() < 3:
-		return points
+		# 退化时返回空多边形，而不是"未裁剪输入"：后者会让轮廓在下一帧突然
+		# 跳回整圆，形成"多边形→消失→重建"的视觉循环。调用方负责跳过该弦。
+		return PackedVector2Array()
 	return result
 
 ## 弦遮挡剔除（Cell Lab a(FFFF) 的 d26 判据）：
@@ -343,16 +345,26 @@ static func canonicalize_points(points: PackedVector2Array) -> PackedVector2Arra
 		result.append(point)
 	return result
 
-## 退化保护：用解析单位圆作为基底逐条半平面裁剪，结果再按极角规范化。
-## 只在端点 + 圆弧重建退化时启用，保证"圆 → 多边形 → 消失"不会出现。
-static func clip_unit_circle(chords: Array, segments: int = 96) -> PackedVector2Array:
+## 解析单位圆：作为所有细胞外膜的统一基底，避免与 12 点呼吸膜互相切换。
+static func unit_circle(segments: int = 64) -> PackedVector2Array:
 	var count: int = maxi(12, segments)
 	var unit: PackedVector2Array = PackedVector2Array()
 	for index in range(count):
 		var angle_value: float = TAU * float(index) / float(count)
 		unit.append(Vector2(cos(angle_value), sin(angle_value)))
+	return unit
+
+## 退化保护：用解析单位圆作为基底逐条半平面裁剪，结果再按极角规范化。
+## 不再在弦端点被截成同一点时回退到另一套点集，保证轮廓点数与拓扑稳定。
+static func clip_unit_circle(chords: Array, segments: int = 64) -> PackedVector2Array:
+	var unit: PackedVector2Array = unit_circle(segments)
 	for chord in chords:
-		unit = clip_keep_origin(unit, chord.get("local_a", Vector2.ZERO), chord.get("local_b", Vector2.ZERO))
+		var clipped: PackedVector2Array = clip_keep_origin(
+			unit, chord.get("local_a", Vector2.ZERO), chord.get("local_b", Vector2.ZERO)
+		)
+		# 数值退化弦直接跳过，保持上一帧有效的凸多边形；空轮廓绝不写回视图。
+		if clipped.size() >= 3:
+			unit = clipped
 	return canonicalize_points(unit)
 
 ## 用弦端点 + 单位圆弧重建轮廓，替代「呼吸膜 + 顺序相关半平面裁剪」。

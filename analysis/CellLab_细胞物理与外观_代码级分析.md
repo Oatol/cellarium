@@ -362,6 +362,16 @@ link2.l = fA;
 - SmokeTest 新增「接触轮廓点数 ≥ 24」断言，并把相切测试改成显式两细胞场景以消除发育时序 flake；连续两次 `SCRIPTS=43 FAILURES=0 EXITCODE=0`。
 - 边界：仅视觉层；物理、tick 顺序、`get_state_hash()` 均不变。
 
+### 10.6 v0.8.12：统一解析圆路径，消除弹性膜 / 弦膜循环
+
+用户连续截图反馈「细胞一接触就 多边形化 → 消失 → 重建 → 多边形化」循环，并提出两个方案。代码级定位结果：
+
+1. **运行副本版本落后**：用户打开的 `D:\Tools\Godot_v4.7.2\project\cellarium` 仍是 v0.8.10，`CellView.gd` 主路径为 `build_outline(prepared, 3)`，`CellContactChords.gd` 没有 `clip_unit_circle()`，且 `clip_keep_origin()` 在结果少于 3 点时返回未裁剪输入。少量接触时轮廓只有 5–15 点，退化时 `Polygon2D` 不可见而只留下细胞核/细胞器点；弦一消失又切回 72 点呼吸膜，构成截图循环。
+2. **发布版 v0.8.11 仍有路径切换**：有弦 64 点解析圆、无弦 72 点呼吸膜，两套点集在接触边界跳变；`clip_keep_origin()` 的退化回退会让轮廓突然跳回整圆。
+3. **Cell Lab 对照**：`cell_vert.glsl` / `cell_frag.glsl` 的相位 `tp` 只参与着色，外膜几何来自物理半径与 `A[]` 共享弦；不存在独立呼吸轮廓。方案①（同一细胞内混用弹性弧与弦段）会重新引入相位/端点不一致，故采用方案②的严格版本：统一解析圆。
+
+实现：`unit_circle(64)` 作为唯一外膜基底；有弦时按「规范顺序 → 相交截断 → 遮挡剔除 → 排序 → 半平面裁剪」处理，无弦时只做浅接触压平；`clip_keep_origin()` 退化返回空数组，`clip_unit_circle()` 跳过退化弦。内膜按外膜同轮廓缩放，避免穿出压平边界。速度拉伸状态保留给 API/测试但不再施加到共享边界，以确保双方共边。SmokeTest 新增弦/无弦点集不切换、无弦轮廓 ≥64 点且面积非零断言。发布工程与用户运行工程均 `SCRIPTS=43 FAILURES=0 EXITCODE=0`。
+
 ## 11. Macro APK 边界确认（v0.8.11）
 
 样本：`C:\Users\安\Downloads\cell-lab-macro-beta-latest.apk`，SHA256 `9d0f3509c871ef4afbcf5547dd4125adbf5745059faf94e74d5d8b3e8aa48a1a`，包名/入口类 `com.saterskog.cell_lab_enzymeglv.*`。全部为静态反编译与 APK 只读解包，APK 未执行。
