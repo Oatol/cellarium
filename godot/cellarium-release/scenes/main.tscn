@@ -154,6 +154,7 @@ offset_right = -8.0
 offset_bottom = -8.0
 grow_horizontal = 0
 grow_vertical = 0
+tooltip_text = "培养基（* 为仅 UI 占位）"
 
 [node name="Panel" type="MarginContainer" parent="UI/HUD/SubstratePanel" unique_id=481021637]
 layout_mode = 2
@@ -161,10 +162,6 @@ theme_override_constants/margin_left = 10
 theme_override_constants/margin_top = 8
 theme_override_constants/margin_right = 10
 theme_override_constants/margin_bottom = 8
-
-[node name="Title" type="Label" parent="UI/HUD/SubstratePanel/Panel" unique_id=691909427]
-layout_mode = 2
-text = "SUBSTRATE · 培养基（* 为仅 UI 占位）"
 
 [node name="SubstrateRows" type="VBoxContainer" parent="UI/HUD/SubstratePanel/Panel" unique_id=525396268]
 layout_mode = 2

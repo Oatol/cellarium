@@ -4,6 +4,21 @@
 
 ---
 
+## 0.9.1 — 2026-11-17
+
+**类型**：UI 布局修复 + 发育编辑器规格稿（文档/前端，不改模拟）
+**触发**：用户反馈 SubstratePanel 的 Title 与培养基 UI 重叠；要求参考 Cell Lab Macro 先做发育编辑器 HTML/SVG
+
+### 落地
+
+- `scenes/main.tscn`：移除 `SubstratePanel/Panel/Title` 节点。原 `PanelContainer > MarginContainer` 下同时放 Title 与 SubstrateRows，两个子节点被 MarginContainer 叠在同一区域，导致文字与控件重叠；原说明改为 SubstratePanel 的 `tooltip_text`。
+- `SmokeTest.gd`：新增「SubstrateRows 存在且有子节点、Title 节点不得存在」断言。发布工程与 D 盘运行工程均 `SCRIPTS=44 FAILURES=0`。
+- 新增 `preview/dev_editor_preview.html`：单文件 HTML + 内联 SVG 的发育编辑器 UI 规格稿。包含 40 Gene 槽/分化树、Gene 参数（Child 1–4、on-contact、数值滑块、RGB）、dev_* 发育规则、信号 lane、GNP1 八性状、0–48h 时间轴与证据抽屉。
+- 该稿明确标注：四标签页划分是提案；Cell Lab 原生快捷键未确认；40 modes（UI）≠ 40 Gene 槽（运行时）；时间轴只表达 dev_program，不缩放 dt。
+- `analysis/CellLab_细胞物理与外观_代码级分析.md` 新增 §13 界面证据与规格稿差距、§14 待确认边界、§15 后续阶段路线（11–16）。
+
+---
+
 ## 0.9.0 — 2026-11-17
 
 **类型**：阶段 10 — 完全 GPU 采样迁移（架构变更）

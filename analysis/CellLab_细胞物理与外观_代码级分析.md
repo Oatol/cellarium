@@ -470,8 +470,45 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - `readback_bytes` 现在报告真实每 tick 回读量（4 细胞 = 80 B），`legacy_full_field_bytes` 保留旧全量方案作对照。
 - Cell Lab 对照：官方版同样不把全量场搬到 CPU 做逐细胞采样；其顶点缓冲由 GPU 端场/参数直接生成。本次迁移只改变宿主侧数据搬运，不改变 §5–§11 的场数学与共享弦视觉机制。
 
-## 13. 待确认边界（沿用）
+## 13. 发育编辑器界面证据与规格稿（v0.9.1）
+
+规格稿：`preview/dev_editor_preview.html`（单文件 HTML + 内联 SVG，纯 UI，不是实现）。
+
+### 13.1 有证据的界面元素
+
+- 40 Gene 槽与分化树：`Cell.I[40]` / `Cell.D` / `Gene.i,j` 子代槽索引；分裂时母/子切换，拓扑突变 1/5 概率重连（APK 解析报告 §11.4 / §11.5）。规格稿把 00–39 槽位做成左栏，并把 i/j 画成树边。
+- Child 1–4、angle / split mass / ratio、Cytoskeleton、Adhesin stiffness、Max connections、RGB、Load / Save、Edit mode、On contact(Cell/Wall/Split)、Secretion、Virus copy from：来自 Macro `strings.xml` 的 `genome_editor_*` 词条族。
+- 动态参数行（seekbar / spinner / checkbox / 帮助提示 / 预览回调）：Macro `GenomeEditorFragment.onCreateView()`（APK 报告 §5）。
+- 发育规则：`dev_*` 词条族——After N splits→M、Differentiation、Conditional / Random path、Max / Min connections、Stop splitting；端粒候选 `{-1,5,10,20,40,80}`。
+- 信号 lane：Add / Rename / Delete signal、Lane N output channel、Gene Bank、预览锁定（`setting_preview_lock`）；Macro 独有性未完全确认。
+- 18 类型：官方 APK 前 18 与 Macro 一致（§11.6）。
+
+### 13.2 明确未确认 / 不臆断
+
+- Macro 编辑器的具体标签页划分未确认；规格稿的「基因槽 / 分化树 / 信号 lane / 预览」四页是**布局提案**。
+- Cell Lab 原生 genome 编辑器快捷键未在资源中找到；Esc / Backspace 沿用本项目 v4 约定，不声称原版如此。
+- 95 个突变算子（`nextInt(95)`，每 15 tick 三次）已确认存在，但逐编号语义未全部展开，规格稿只标注为待补齐面板。
+- “40 modes” 是 UI 模式层，与运行时 `Cell.I[40]` 的 40 Gene 槽不同层，规格稿中已显式提示。
+
+### 13.3 与当前 Godot 实现的差距
+
+`CellEditorPanel.gd` 现有 8 滑块 / 呼吸 3 项 / 18 类型 / dev 指令表 / Add / Template / Clear / 文本预览 / Apply；缺 40 槽分化树、信号 lane、谱系图、撤销、参数与 dev_program 的双向可视化。本规格稿先确认布局，确认后再用 `Control` 节点落到 `.tscn`，所有写入仍只经 `CommandBus`。
+
+## 14. 待确认边界（沿用）
 
 - Macro 版 `p1/t1/v1` 的 `Cell.f` 常量索引未穷尽。
 - Macro shader 变体与细胞类型一一对应关系未确认。
 - 连接静息长度 `< 2r` 的语义不一致（见 §10.7），未改物理/schema。
+
+## 15. 后续阶段路线（从 v0.9.1 起）
+
+| 阶段 | 目标 | 主要内容 | 验收条件 |
+| --- | --- | --- | --- |
+| 11 | 发育编辑器 Godot 落地 | 按 `preview/dev_editor_preview.html` 用 `Control` / `.tscn` 搭 40 槽分化树、Gene 参数页、dev_program 时间轴、信号 lane；编辑只 enqueue，Apply 走 CommandBus | 编辑 → Apply → SPAWN 的 GNP1 往返一致；SmokeTest 覆盖树节点、时间轴、lane 与命令闭环 |
+| 12 | 多细胞编辑增强 | 拖拽排序、谱系图、模板库；引入可验证的突变算子子集（不一次性移植 95 个） | 编辑后可回放得到相同发育结果；模板/撤销不绕过唯一写入口 |
+| 13 | 连接内经济与信号传播 | 沿连接做能量再分配；4 通道信号按单 tick 时序传播；`channel_count` 可配置（Macro 101） | 能量守恒断言通过；信号时序不改 tick 顺序；存档 schema 只做版本化追加 |
+| 14 | 视觉-物理一致性精修 | 接触弦贴合、弹性膜、贴壁形变、高密簇不交叉；ADHERE / LINK 的 `<2r` 静息长度若要修必须单独版本化 | 无提前变形/闪烁；几何断言与确定性 hash 复验通过 |
+| 15 | 规模与性能深化 | 千级 LOD、GPU 采样批上限扩展、分段快进 + 检查点；>12× 有效倍速须先修订规格 | 性能数据真实（不缩放 dt、不突破单帧 12 tick 基线）；长跑分段可续 |
+| 16 | 回归与发布 | 存档兼容、T12 回退、长跑分段、文档与快照/tag | 全量 SmokeTest / GPU parity / fallback 通过；每版 tag + CHANGELOG + 验收记录 |
+
+优先级说明：阶段 11 直接响应用户当前需求；阶段 13/14 是已记录但尚未落地的机制边界；阶段 15 的倍速提升必须先走规格修订，不能靠改 `dt` 或突破单帧上限取巧。

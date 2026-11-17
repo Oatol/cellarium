@@ -1180,6 +1180,15 @@ func _check_microscope_layout() -> bool:
 		push_error("SmokeTest: lens/view button count mismatch")
 		instance.queue_free()
 		return false
+	var substrate_rows: Control = instance.get_node_or_null("UI/HUD/SubstratePanel/Panel/SubstrateRows") as Control
+	if substrate_rows == null or substrate_rows.get_child_count() <= 0:
+		push_error("SmokeTest: substrate rows missing")
+		instance.queue_free()
+		return false
+	if instance.get_node_or_null("UI/HUD/SubstratePanel/Panel/Title") != null:
+		push_error("SmokeTest: substrate title must not overlap rows in MarginContainer")
+		instance.queue_free()
+		return false
 	var panel_rect: Rect2 = panel.get_global_rect()
 	var lens_rect: Rect2 = lens.get_global_rect()
 	var status_rect: Rect2 = status.get_global_rect()
