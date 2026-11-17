@@ -26,7 +26,7 @@ const ENVIRONMENT_SETTING_KEYS: Array[String] = [
 @export_range(0.0, 360.0, 1.0) var light_angle_deg: float = 0.0
 @export_range(0.0, 1.0, 0.01) var light_falloff: float = 0.55
 ## Macro 食物池在本项目映射为五通道营养场源项；不使用全局 RNG。
-@export_range(0.0, 0.5, 0.001) var food_spawn_amount: float = 0.018
+@export_range(0.0, 0.5, 0.001) var food_spawn_amount: float = 0.12
 @export_range(0, 8, 1) var food_lump_radius: int = 2
 @export_range(0.0, 1.0, 0.01) var food_layer: float = 0.5
 ## 静态证据字段：Macro 有涂层比例，本项目暂不进物理，仅随快照保存。

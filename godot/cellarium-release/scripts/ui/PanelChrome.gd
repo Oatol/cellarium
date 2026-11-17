@@ -71,10 +71,22 @@ func install() -> bool:
 	_handle.add_child(_close_button)
 
 	# VBox 顺序：标题栏在上，原内容在下。
+	# 注意：existing 是先把原内容加进 vbox 的，直接 add_child(handle) 会排到最后（面板底部），
+	# 用户看到的「右上角关闭按钮」其实在底边。必须显式移到索引 0。
 	vbox.add_child(_handle)
+	vbox.move_child(_handle, 0)
 	panel.add_child(vbox)
 	panel.set_meta("chrome_pinned", false)
+	if not panel.is_connected("visibility_changed", Callable(self, "_on_panel_visibility_changed")):
+		panel.visibility_changed.connect(_on_panel_visibility_changed)
 	return true
+
+## 任何路径把面板 visible 置 false（例如关闭按钮先改 visible 再发信号）都要同步内部状态。
+func _on_panel_visibility_changed() -> void:
+	if panel == null or not panel.has_method("set_visible_state"):
+		return
+	if bool(panel.get("_visible_state")) != panel.visible:
+		panel.call("set_visible_state", panel.visible)
 
 func _on_handle_gui_input(event: InputEvent) -> void:
 	# 标题栏里的图钉/关闭按钮必须先收到完整按下-抬起，否则 Button.pressed 不会触发，

@@ -10,6 +10,7 @@ signal draft_applied(genome: RefCounted, type_id: int)
 
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
+const GENOME_PREVIEW_SCENE: PackedScene = preload("res://scenes/ui/GenomePreview.tscn")
 
 const TRAITS: Array[String] = ["速度", "感知", "外壳", "攻击", "繁殖", "代谢", "神经", "耐温"]
 const OPCODE_NAMES: Array[String] = ["DIVIDE 分裂", "DIFFERENTIATE 分化", "LINK 连接"]
@@ -54,6 +55,7 @@ var _status_label: Label = null
 var _gene_slot_labels: Array[Label] = []
 var _macro_draft: Dictionary = {}
 var _macro_controls: Dictionary = {}
+var _genome_preview: Node = null
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -103,6 +105,25 @@ static func default_dev_program() -> Array[Dictionary]:
 		{"opcode": 2, "a": 0, "b": 3,   "c": 14},
 	]
 
+## 分裂模板：每条 DIVIDE 增加 1 个细胞；a=被分裂的母细胞索引，b=角度(0..255→0..360°)，
+## c=亲子间距（世界单位，至少 2×静息半径，默认静态模板用 14）。
+static func division_template(divide_count: int) -> Array[Dictionary]:
+	var count: int = clampi(divide_count, 0, 8)
+	var program: Array[Dictionary] = []
+	# 始终从 0 号（合子）分裂，保持亲子链最短，避免引用还不存在的细胞索引。
+	for i in range(count):
+		program.append({"opcode": 0, "a": 0, "b": int(256 * i / maxi(1, count)) % 256, "c": 14})
+	return program
+
+static func instruction_help_text() -> String:
+	return (
+		"指令集（dev_program 从上到下按 tick 顺序执行，不做并行）\n"
+		+ "① DIVIDE 分裂：a=被分裂的细胞索引（从 0 合子开始）；b=分裂角度 0–255（0=向右，64=向下，128=向左，192=向上）；c=亲子间距（世界单位，建议 14，太小会重叠）。每 1 条 DIVIDE 多 1 个细胞。\n"
+		+ "② DIFFERENTIATE 分化：a=细胞索引；b=目标类型（光合 4、硝化 10 等，见表现类型下拉）；c 保留。\n"
+		+ "③ LINK 连接：a/b=两个细胞索引；c=连接静息长度（14 起）。不填连接也能分裂，只是不构成协作体。\n"
+		+ "不会分裂最常见原因：dev_program 里没有 DIVIDE，或只改了草案没点「装载合成器」并在皿内点击放置。用上面「分裂×1」模板即可立刻验证。"
+	)
+
 func _make_button(text_value: String, tip: String) -> Button:
 	var button: Button = Button.new()
 	button.text = text_value
@@ -143,19 +164,55 @@ func _build_ui() -> void:
 	_respiration_option.item_selected.connect(_on_respiration_selected)
 	toolbar.add_child(respiration_label)
 	toolbar.add_child(_respiration_option)
-	var template_button: Button = _make_button("4 细胞模板", "装载 4 细胞协作体 dev_program")
+	var template_row: HBoxContainer = HBoxContainer.new()
+	template_row.name = "TemplateRow"
+	template_row.add_theme_constant_override("separation", 6)
+	var template_label: Label = Label.new()
+	template_label.text = "模板"
+	template_label.tooltip_text = "一键装载常用发育程序；装载后仍需点「装载合成器」并在皿内点击放置"
+	template_row.add_child(template_label)
+	var presets: Array = [
+		["单细胞", "0 次分裂：只有合子，不会发育出多细胞", 0],
+		["分裂×1", "1 条 DIVIDE → 2 细胞（最容易验证分裂）", 1],
+		["分裂×2", "2 条 DIVIDE → 3 细胞", 2],
+		["分裂×3", "3 条 DIVIDE → 4 细胞", 3],
+	]
+	for preset in presets:
+		var preset_button: Button = _make_button(str(preset[0]), str(preset[1]))
+		preset_button.name = "Preset_%d" % int(preset[2])
+		preset_button.pressed.connect(_on_load_division_template.bind(int(preset[2])))
+		template_row.add_child(preset_button)
+	var template_button: Button = _make_button("4 细胞模板", "装载 4 细胞协作体 dev_program（含分化与连接）")
 	template_button.pressed.connect(_on_load_template)
-	var single_button: Button = _make_button("单细胞", "清空 dev_program，仅保留合子")
-	single_button.pressed.connect(_on_clear_program)
+	template_row.add_child(template_button)
+	_content.add_child(template_row)
+
 	var apply_button: Button = _make_button("装载合成器", "写入草案 → GameHUD → CommandBus；皿内点击放置")
 	apply_button.pressed.connect(_on_apply)
 	var default_button: Button = _make_button("恢复默认", "恢复 4 细胞模板草案")
 	default_button.pressed.connect(_on_default)
 	var close_button: Button = _make_button("关闭", "关闭面板")
 	close_button.pressed.connect(func() -> void: visible = false)
-	for button in [template_button, single_button, apply_button, default_button, close_button]:
+	for button in [apply_button, default_button, close_button]:
 		toolbar.add_child(button)
 	_content.add_child(toolbar)
+
+	# 指令集说明：把 dev_program 的三个 opcode 与 a/b/c 语义写清楚，避免「不会用、细胞不分裂」。
+	var help_panel: PanelContainer = PanelContainer.new()
+	help_panel.name = "InstructionHelp"
+	var help_margin: MarginContainer = MarginContainer.new()
+	help_margin.add_theme_constant_override("margin_left", 8)
+	help_margin.add_theme_constant_override("margin_top", 5)
+	help_margin.add_theme_constant_override("margin_right", 8)
+	help_margin.add_theme_constant_override("margin_bottom", 5)
+	var help_label: Label = Label.new()
+	help_label.name = "InstructionHelpLabel"
+	help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	help_label.add_theme_font_size_override("font_size", 11)
+	help_label.text = instruction_help_text()
+	help_margin.add_child(help_label)
+	help_panel.add_child(help_margin)
+	_content.add_child(help_panel)
 
 	# 主体三栏。
 	var body: HSplitContainer = HSplitContainer.new()
@@ -199,6 +256,10 @@ func _build_left_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
+	box.add_child(_make_section_title("GENOME PREVIEW · 发育预览（只读，不跑第二套模拟）"))
+	_genome_preview = (GENOME_PREVIEW_SCENE as PackedScene).instantiate()
+	_genome_preview.name = "GenomePreview"
+	box.add_child(_genome_preview)
 	box.add_child(_make_section_title("GENE SLOTS · 40 槽（前 8 槽 = GNP1 八性状）"))
 	box.add_child(_build_gene_slots())
 	box.add_child(_make_section_title("DEV · 分化程序 / 指令序列"))
@@ -509,6 +570,12 @@ func _refresh_all() -> void:
 	_refresh_macro_controls()
 	_refresh_timeline()
 	_refresh_summary()
+	_sync_preview()
+
+func _sync_preview() -> void:
+	if _genome_preview == null or not _genome_preview.has_method("set_program"):
+		return
+	_genome_preview.call("set_program", _program(), _macro_draft)
 
 func _program() -> Array:
 	return [] if draft == null else draft.get("dev_program")
@@ -566,7 +633,7 @@ func _refresh_params() -> void:
 
 func _operand_hint(opcode: int) -> String:
 	match opcode:
-		0: return "DIVIDE：a 子代类型 · b 分裂角度 · c 间距"
+		0: return "DIVIDE：a 母细胞索引 · b 角度(0..255) · c 亲子间距(建议14)"
 		1: return "DIFFERENTIATE：a 细胞索引 · b 目标类型 · c 保留"
 		2: return "LINK：a 细胞 A · b 细胞 B · c 静息长度"
 		_: return "a / b / c"
@@ -708,6 +775,13 @@ func _on_move_down() -> void:
 	program[_selected_instruction + 1] = temp
 	_selected_instruction += 1
 	_write_program(program)
+
+func _on_load_division_template(divide_count: int) -> void:
+	_write_program(division_template(divide_count))
+	_selected_instruction = 0
+	_refresh_all()
+	if _status_label != null:
+		_status_label.text = "已装载「分裂×%d」模板：%d 条 DIVIDE → %d 细胞；点「装载合成器」后在皿内点击放置" % [divide_count, divide_count, divide_count + 1]
 
 func _on_load_template() -> void:
 	_write_program(default_dev_program())

@@ -44,7 +44,7 @@ static func substrate() -> Array[Dictionary]:
 	## k 对应 EnvironmentManager 的 @export；writable=false 为静态证据占位（不进物理）。
 	return [
 		{"n":"食物密度", "k":"nutrient_density", "v":1.2, "min":0.0, "max":4.0, "step":0.05, "writable":true, "section":"食物 · FOOD", "tip":"初始营养场浓度，对应 Macro seekBar_food"},
-		{"n":"食物投放量/tick", "k":"food_spawn_amount", "v":0.018, "min":0.0, "max":0.5, "step":0.001, "writable":true, "section":"食物 · FOOD", "tip":"确定型营养源强度，对应 Macro 食物池大小"},
+		{"n":"食物投放量/tick", "k":"food_spawn_amount", "v":0.12, "min":0.0, "max":0.5, "step":0.001, "writable":true, "section":"食物 · FOOD", "tip":"确定型营养源强度，对应 Macro 食物池大小"},
 		{"n":"食物团块半径", "k":"food_lump_radius", "v":2, "min":0, "max":8, "step":1, "writable":true, "section":"食物 · FOOD", "tip":"每 tick 投放到多少格，对应 seekBar_food_lump_size"},
 		{"n":"食物层分布", "k":"food_layer", "v":0.5, "min":0.0, "max":1.0, "step":0.01, "writable":true, "section":"食物 · FOOD", "tip":"0 偏中心，1 偏皿缘，对应 seekBar_food_layer"},
 		{"n":"涂层比例", "k":"food_coated_ratio", "v":0.0, "min":0.0, "max":1.0, "step":0.01, "writable":false, "section":"食物 · FOOD", "tip":"Macro 证据字段；本项目暂无食物实体涂层"},

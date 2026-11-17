@@ -4,6 +4,35 @@
 
 ---
 
+## 0.13.1 — 2026-11-17
+
+**类型**：五项反馈修复 + 发育预览（纯视图 / 编辑器 UI，不改 tick、GNP1、dev_program 语义与确定性 hash）
+**触发**：用户反馈「光场边缘锯齿、食物看不到、指令集不会用导致自建细胞不分裂、生态报告关闭按钮无效且不再刷新、Cell Lab 基因组编辑页上方的发育可视化是什么」。
+
+### 代码证据
+
+- 静态反编译 Macro `GenomePreviewView`（`com.saterskog.cell_lab_enzymeglv.GenomePreviewView`，JADX 0.7.1，APK 未执行）：类清单 `ev_ef54d8a852cde2c2e2f1d62395c1c13f703fe576a03be9b30159bbe737c44912`、构造函数 `ev_b767a4f8b117ac1e4d422bcdc47f1ff1eca82bbede030477a29bc365e745f3a2`、渲染器 `j4` 类清单 `ev_671207c154a5cb5043907153e39fb2444164ecea0bd6a48ee5734d43fb8f5b33`。确认它是 GLSurfaceView + `j4` 渲染器 + `SimulationWorld/Gene[]`，用 FloatBuffer/ShortBuffer 程序化绘制真实细胞，带触摸平移/缩放/长按与选中回调；不是静态示意图。详见分析文档 §22。
+
+### 实现
+
+- **光场边缘锯齿**：`FieldLayer` 改为 shader 内解析圆 + `fwidth()` 抗锯齿，圆环也由 shader 绘制，删掉 `draw_arc()` 折线；双线性采样跳过圆外格，避免圆外零值混入边缘形成暗边。
+- **食物可见**：新增 `FoodLayer.gd`（只读营养通道 0，按局部对比度显示营养团块亮点）；`main.tscn` 增加 `DishView/FoodLayer`，顶栏新增「食物」开关；`food_spawn_amount` 默认 `0.018 → 0.12`（`EnvironmentManager` 与 `ToolCatalog` 同步）。仍不改五通道 schema，不新建实体池。
+- **生态报告**：`PanelChrome.install()` 把标题栏移到 `ChromeRoot` 索引 0（原来排在内容之后，所谓「右上角关闭按钮」实际在面板底部），并监听 `visibility_changed` 同步面板状态；`AnalysisPanel` 新增 6 tick 实时数字（tick / 活体个体 / 倍速）+ 30 tick 采样报告，`refresh_now()` 供测试/外部强制刷新。
+- **指令集易用性**：修正 `DIVIDE` 操作数提示（a=母细胞索引、b=角度 0–255、c=亲子间距，原误写成「a=子代类型」）；新增 `instruction_help_text()` 完整说明三种 opcode 与「装载合成器 → 皿内点击放置」流程；新增「单细胞 / 分裂×1 / 分裂×2 / 分裂×3」快捷模板按钮。
+- **发育预览**：新增可复用 `scenes/ui/GenomePreview.tscn` + `scripts/ui/GenomePreview.gd`，嵌入统一细胞编辑左栏。按 `dev_program` 逐条派生分裂 / 分化 / 连接状态，支持播放、暂停、上一步、下一步；颜色沿用 `CellVisualCatalog` 角色配色。纯只读视图：不跑第二套模拟、不写 `CommandBus`、不改确定性 hash。
+
+### 边界
+
+- 预览是 `dev_program` 的确定性示意，不复制 Macro 的 `SimulationWorld`/GL 管线，也不把 Macro 的逐基因参数变成运行时物理。
+- 食物仍是营养场源项派生的亮点视图，不是 Macro 的 `Food[]` 实体池。
+
+### 验证
+
+- `SmokeTest.gd`：新增脚本清单登记（`SCRIPTS=49`），断言光场抗锯齿与食物亮点、顶栏「食物」开关、chrome 标题栏在顶部、报告 6 tick 内刷新、指令帮助/模板与分裂细胞数、发育预览状态与步进且不污染 GNP1 hash。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=49 FAILURES=0 EXITCODE=0`；D 盘同步保留 MCP autoload、脚本 `.uid` 与场景 `unique_id`。
+
+---
+
 ## 0.13.0 — 2026-11-17
 
 **类型**：Macro 机制落地 —— 环境设置页 / 空间光照 / 食物源 / 细胞编辑 Macro 字段，并修正光合类型映射

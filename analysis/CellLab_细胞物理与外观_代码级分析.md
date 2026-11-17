@@ -639,3 +639,42 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 
 - 发布工程与 D 盘运行工程均 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。
 - D 盘同步 10 个脚本与 `main.tscn` 的 3 处语义改动，保留 MCP autoload、脚本 `.uid` 与场景节点 `unique_id`。
+
+## 22. GenomePreviewView 与 v0.13.1 发育预览（2026-11-17）
+
+### 22.1 用户问题与静态证据
+
+用户问「Cell Lab 基因组编辑页面上方那个可以看到细胞发育的页面是什么，能不能做一样的可视化效果」。为免按界面印象臆造，本轮重新从已提取目录 `analysis/cell_lab_apk_extract/tmp_macro` 重建 APK 并静态反编译（JADX 0.7.1，808 类 / 912 资源，APK 未执行；重建 zip 的 SHA256 为 `1f4593b864635335f92f975a09ec44a1198d648bfd204baeec12491735d86876`，与第 20 章的 `abfe6022…` 因 zip 容器元数据不同，解出的 DEX/资源树一致）。
+
+- 类检索 `GenomePreview` 命中唯一类 `com.saterskog.cell_lab_enzymeglv.GenomePreviewView`（`ev_6ac4f8a4917f6afe05bdd029c2bba932cc5c1fcb0c4d0acd54a5efa2f8787cbc`；完整证据链接 `ev_6ad47d7a3bbfa2f4599587fadbbe0d914f421aa9fd24cd5fd0ad9d40c99b171c`）。
+- 类清单（`ev_ef54d8a852cde2c2e2f1d62395c1c13f703fe576a03be9b30159bbe737c44912`）：7 个方法、12 个字段，包括 `onMeasure`、`onTouchEvent`、`requestRender`、`setPreviewLongPressCallback`、`setPreviewSelectionCallback`、`setOvernightRenderingSuppressed`；字段含 `s9 f892a`、`j4 f894c`、`GestureDetector f900k`、`float d/e/f/g/h`。
+- 构造函数（`ev_b767a4f8b117ac1e4d422bcdc47f1ff1eca82bbede030477a29bc365e745f3a2`）：
+  ```text
+  f892a = new s9();
+  setEGLContextClientVersion(2);
+  f899j = PreferenceManager.getDefaultSharedPreferences(...).getBoolean("lock_preview", true);
+  setEGLConfigChooser(8, 8, 8, 0, 16, 0);
+  f894c = new j4(context);
+  f894c.a0 = new i(5, this);
+  setRenderer(f894c);
+  setRenderMode(0);
+  f900k = new GestureDetector(context, new m4(this, 0));
+  ```
+- 渲染器 `j4` 类清单（`ev_671207c154a5cb5043907153e39fb2444164ecea0bd6a48ee5734d43fb8f5b33`）持有 `SimulationWorld S`、`Gene[] V/X`、`FloatBuffer u0`、`ShortBuffer v0`，并有 `B(SimulationWorld, C, int, int): Bitmap`、`onSurfaceCreated`、`H(float[],…,Gene)` 等方法。
+
+**结论**：那是**实时 GL 基因组预览**——用当前 `Gene` 起一个 `SimulationWorld`，由 `j4` 程序化绘制真实细胞发育，而不是一张静态图或时间轴示意图；触摸回调用于平移、缩放、选中细胞，`lock_preview` 默认 true 对应词条的「防止拖动/旋转/缩放预览」。
+
+### 22.2 本项目派生实现（v0.13.1）
+
+- 新增可复用 `scenes/ui/GenomePreview.tscn` + `scripts/ui/GenomePreview.gd`，嵌入统一细胞编辑左栏（节点优先，脚本只承载派生逻辑）。
+- `set_program(dev_program, macro_draft)` 逐条派生状态：初始合子 → `DIVIDE` 按 `a=母细胞索引`、`b=角度×TAU/256`、`c=亲子间距` 生成子细胞并让亲子各偏半间距 → `DIFFERENTIATE` 改类型 → `LINK` 加连接；播放/暂停/上一步/下一步可观察每个发育阶段。
+- 纯只读：不启动第二套 `SimulationWorld`，不写 `CommandBus`、环境场、GNP1、dev_program 或确定性 hash；颜色来自 `CellVisualCatalog.role_color()`。
+- 与 Macro 的差别：Macro 用真模拟 + GL shader 与生物物理；本项目是 `dev_program` 的确定性可视化派生，保留了「看到自己编辑的细胞如何发育」的用途，不声称等价移植。
+
+### 22.3 同批反馈修复
+
+- 光场边缘：解析圆 + `fwidth()` 抗锯齿，shader 内画环，双线性采样跳过圆外格。
+- 食物可见：`FoodLayer` 按营养局部对比度显示亮点，顶栏开关，投放量默认 0.12。
+- 生态报告：`PanelChrome` 标题栏移到 `ChromeRoot` 索引 0（此前排在内容之后，按钮实际在底边），`visibility_changed` 同步状态；`AnalysisPanel` 6 tick 实时数字 + 30 tick 采样报告。
+- 指令集：修正 `DIVIDE` 操作数提示，新增完整帮助文本与「单细胞 / 分裂×1/×2/×3」模板。
+- 验证：发布工程与 D 盘运行工程均 `SCRIPTS=49 FAILURES=0 EXITCODE=0`。

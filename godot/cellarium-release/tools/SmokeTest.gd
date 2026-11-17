@@ -44,12 +44,14 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/ui/DevEditorPanel.gd",
 	"res://scripts/ui/PanelChrome.gd",
 	"res://scripts/rendering/FieldLayer.gd",
+	"res://scripts/rendering/FoodLayer.gd",
 	"res://scripts/rendering/SelectionLayer.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
 	"res://tools/GpuSamplingTest.gd",
 	"res://scripts/ui/AnalysisPanel.gd",
+	"res://scripts/ui/GenomePreview.gd",
 ]
 
 func _initialize() -> void:
@@ -74,6 +76,12 @@ func _initialize() -> void:
 		failures += 1
 	else:
 		print("SmokeTest: OK res://scenes/cells/CellBase.tscn")
+	var preview_scene: PackedScene = ResourceLoader.load("res://scenes/ui/GenomePreview.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
+	if preview_scene == null:
+		push_error("SmokeTest: GenomePreview.tscn not loadable")
+		failures += 1
+	else:
+		print("SmokeTest: OK res://scenes/ui/GenomePreview.tscn")
 	var tick_route_ok: bool = await _check_tick_divide_route()
 	if not tick_route_ok:
 		failures += 1
@@ -957,7 +965,7 @@ func _check_environment_settings() -> bool:
 
 	# 确定型食物源：同一 tick 重放必须得到同一场 hash，且确实向营养场注入质量。
 	env.set("nutrient_density", 0.0)
-	env.set("food_spawn_amount", 0.05)
+	env.set("food_spawn_amount", 0.2)
 	env.set("food_lump_radius", 2)
 	env.call("apply_environment_preset")
 	env.call("apply_nutrient_sources", 42)
@@ -971,6 +979,14 @@ func _check_environment_settings() -> bool:
 	env.call("advance_field_tick")
 	if field.call("get_total_nutrient") <= 0.0:
 		push_error("SmokeTest: nutrient sources did not add food")
+		instance.queue_free(); return false
+	var food_layer: Node = instance.get_node_or_null("DishView/FoodLayer")
+	if food_layer == null or not bool(food_layer.call("is_enabled")):
+		push_error("SmokeTest: food layer missing or disabled")
+		instance.queue_free(); return false
+	food_layer.call("mark_dirty")
+	if int(food_layer.call("get_last_dot_count")) <= 0:
+		push_error("SmokeTest: food sources must produce visible dots")
 		instance.queue_free(); return false
 
 	# 环境设置页：分组标题与滚动容器存在；光场层用 shader texture 平滑绘制。
@@ -3143,6 +3159,52 @@ func _check_dev_editor_landing() -> bool:
 	if (dev.call("_program") as Array).size() != 9:
 		push_error("SmokeTest: dev editor load template failed")
 		dev.queue_free(); return false
+	# v0.13.1：指令集说明 + 分裂快捷模板，必须能一键得到可分裂的 dev_program。
+	var help_node: Node = dev.find_child("InstructionHelpLabel", true, false)
+	if help_node == null or not str(help_node.get("text")).contains("DIVIDE") or not str(help_node.get("text")).contains("装载合成器"):
+		push_error("SmokeTest: instruction help text missing or incomplete")
+		dev.queue_free(); return false
+	if not str(dev.call("_operand_hint", 0)).contains("母细胞索引"):
+		push_error("SmokeTest: DIVIDE operand hint still inaccurate")
+		dev.queue_free(); return false
+	var template_row: Node = dev.find_child("TemplateRow", true, false)
+	if template_row == null or template_row.get_child_count() < 5:
+		push_error("SmokeTest: division template row missing")
+		dev.queue_free(); return false
+	for divide_count in [1, 2, 3]:
+		dev.call("_on_load_division_template", divide_count)
+		var template_program: Array = dev.call("_program") as Array
+		if template_program.size() != divide_count:
+			push_error("SmokeTest: division template %d has wrong instruction count" % divide_count)
+			dev.queue_free(); return false
+		for instruction in template_program:
+			if int(instruction.get("opcode", -1)) != 0 or int(instruction.get("a", -1)) != 0:
+				push_error("SmokeTest: division template must divide the zygote (cell 0)")
+				dev.queue_free(); return false
+	# v0.13.1：发育预览只读重建 dev_program 状态，且可逐步查看；不得污染 GNP1 hash。
+	var preview_node: Node = dev.find_child("GenomePreview", true, false)
+	if preview_node == null or preview_node.find_child("Canvas", true, false) == null:
+		push_error("SmokeTest: genome preview scene missing from editor")
+		dev.queue_free(); return false
+	dev.call("_on_load_division_template", 2)
+	# 预览交互本身不得改 GNP1 hash（模板装载本来就会改 dev_program，所以基线在装载后取）。
+	var preview_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
+	if int(preview_node.call("get_state_count")) != 3 or int(preview_node.call("get_cell_count_at", 2)) != 3:
+		push_error("SmokeTest: genome preview did not derive 3 cells from 2 DIVIDEs")
+		dev.queue_free(); return false
+	preview_node.call("set_playing", false)
+	preview_node.call("step_forward")
+	if int(preview_node.call("get_cursor")) != 1:
+		push_error("SmokeTest: genome preview step forward failed")
+		dev.queue_free(); return false
+	preview_node.call("step_back")
+	if int(preview_node.call("get_cursor")) != 0:
+		push_error("SmokeTest: genome preview step back failed")
+		dev.queue_free(); return false
+	if int((dev.get("draft") as RefCounted).call("hash")) != preview_hash_before:
+		push_error("SmokeTest: genome preview must not change GNP1 hash")
+		dev.queue_free(); return false
+	dev.call("_on_load_template")
 	# Apply → draft_applied 信号携带合法 genome 草案（不直接写模拟）。
 	# lambda 按值捕获，用一个 RefCounted 包装器承接回调结果。
 	var applied: RefCounted = _make_signal_capture()
@@ -3253,6 +3315,33 @@ func _check_ui_chrome_and_filters() -> bool:
 		push_error("SmokeTest: report close button did not reset toggle")
 		instance.queue_free(); return false
 
+	# (4c) 标题栏必须在面板顶部：ChromeRoot 的第一个子节点是 ChromeHandle（原来错误地排在内容之后）。
+	var report_root: Node = report_panel.get_node_or_null("ChromeRoot")
+	if report_root == null or report_root.get_child_count() == 0 or report_root.get_child(0).name != "ChromeHandle":
+		push_error("SmokeTest: chrome handle must be the first child (top-right close button)")
+		instance.queue_free(); return false
+
+	# (4d) 生态报告实时数字：6 tick 内必须跟着 tick_index 变，不再只有 30 tick 采样才动。
+	var report_tick_core: Node = instance.get_node_or_null("Simulation/TickCore")
+	if report_tick_core == null:
+		push_error("SmokeTest: report tick core missing")
+		instance.queue_free(); return false
+	report_panel.call("set_visible_state", true)
+	report_panel.call("refresh_now")
+	var live_label: Node = report_panel.find_child("LiveStatsLabel", true, false)
+	if live_label == null:
+		push_error("SmokeTest: report live stats label missing")
+		instance.queue_free(); return false
+	var live_text: String = str(live_label.get("text"))
+	var probe_tick: int = 137
+	report_tick_core.set("tick_index", probe_tick)
+	for i in range(6):
+		report_panel.call("_on_tick_for_refresh", probe_tick + i)
+	live_text = str(live_label.get("text"))
+	if not live_text.contains("实时 tick %d" % probe_tick):
+		push_error("SmokeTest: report live stats did not refresh within 6 ticks: " + live_text)
+		instance.queue_free(); return false
+
 	# (5) 诊断选中：INSPECT 写 selection，SelectionLayer 存在。
 	var selection_layer: Node = instance.get_node_or_null("DishView/SelectionLayer")
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
@@ -3324,6 +3413,23 @@ func _check_ui_chrome_and_filters() -> bool:
 	field_toggle.set_pressed(true)
 	if not bool(field_layer.call("is_enabled")) or int(field_layer.get("channel_index")) != 3:
 		push_error("SmokeTest: field toggle did not restore light field")
+		instance.queue_free(); return false
+
+	var food_layer: Node = instance.get_node_or_null("DishView/FoodLayer")
+	var food_toggle: Button = toggles.get("@food", null) as Button
+	if food_layer == null or not bool(food_layer.call("is_enabled")) or hud.get("_food_layer") == null:
+		push_error("SmokeTest: food layer path/enabled state wrong")
+		instance.queue_free(); return false
+	if food_toggle == null or not food_toggle.is_pressed():
+		push_error("SmokeTest: food toggle not initialized pressed")
+		instance.queue_free(); return false
+	food_toggle.set_pressed(false)
+	if bool(food_layer.call("is_enabled")):
+		push_error("SmokeTest: food toggle did not hide food layer")
+		instance.queue_free(); return false
+	food_toggle.set_pressed(true)
+	if not bool(food_layer.call("is_enabled")):
+		push_error("SmokeTest: food toggle did not restore food layer")
 		instance.queue_free(); return false
 
 	# (7) 镜头滤镜：切换镜头不改 camera.zoom；各镜头滤镜参数不同。

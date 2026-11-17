@@ -1,14 +1,15 @@
 extends Node2D
 ## 场可视化层：把环境场通道直接画出来，参考 Cell Lab「能看到光」。
 ## 纯视图层：只读 EnvironmentManager.field 的通道副本，不写模拟状态、不进 tick 计算。
-## v0.13.0：不再按 32×32 格画方块；先把通道双线性上采样到 128×128，再由 canvas shader
-## 以连续渐变绘制，避免粗颗粒。物理采样仍用原始 32×32 场，二者数值完全一致。
+## v0.13.1：皿壁边界改由 shader 用解析圆 + fwidth 抗锯齿绘制，不再用像素化遮罩/draw_arc；
+## 双线性上采样时跳过圆外格，避免边缘把零值混进来形成暗边/锯齿。
 
 @export var environment_manager_path: NodePath = ^"../../Simulation/EnvironmentManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var channel_index: int = 3
 @export var visible_by_default: bool = true
 @export var max_alpha: float = 0.55
+@export var show_boundary_ring: bool = true
 
 var environment_manager: Node = null
 var tick_core: Node = null
@@ -53,9 +54,18 @@ render_mode unshaded;
 uniform sampler2D field_tex;
 uniform vec4 tint_color : source_color = vec4(1.0);
 uniform float max_alpha : hint_range(0.0, 1.0) = 0.55;
+uniform float show_ring : hint_range(0.0, 1.0) = 1.0;
 void fragment() {
+	vec2 p = UV * 2.0 - 1.0;
+	float dist = length(p);
+	float aa = max(fwidth(dist), 0.0035);
+	// 解析圆形抗锯齿遮罩：圆外完全透明，圆边按屏幕像素导数平滑。
+	float inside = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, dist);
 	float value = clamp(texture(field_tex, UV).r, 0.0, 1.0);
-	float alpha = smoothstep(0.02, 1.0, value) * max_alpha;
+	float field_alpha = smoothstep(0.02, 1.0, value) * max_alpha * inside;
+	// 皿壁细环同样在 shader 里生成，避免 draw_arc 的 128 段折线锯齿。
+	float ring = smoothstep(1.0 - aa * 3.0, 1.0 - aa, dist) * (1.0 - smoothstep(1.0, 1.0 + aa * 2.0, dist));
+	float alpha = max(field_alpha, ring * 0.55 * show_ring);
 	COLOR = vec4(tint_color.rgb, alpha);
 }
 """
@@ -63,19 +73,18 @@ void fragment() {
 	_field_material.shader = shader
 	_field_material.set_shader_parameter("tint_color", CHANNEL_COLORS[clampi(channel_index, 0, CHANNEL_COLORS.size() - 1)])
 	_field_material.set_shader_parameter("max_alpha", max_alpha)
+	_field_material.set_shader_parameter("show_ring", 1.0 if show_boundary_ring else 0.0)
 	_field_rect.material = _field_material
 
 func _on_tick_advanced(_tick_index: int) -> void:
 	if _enabled:
 		_refresh_texture()
-		queue_redraw()
 
 func set_enabled(value: bool) -> void:
 	_enabled = value
 	visible = value
 	if value:
 		_refresh_texture()
-		queue_redraw()
 
 func is_enabled() -> bool:
 	return _enabled
@@ -85,11 +94,9 @@ func set_channel(index: int) -> void:
 	if _field_material != null:
 		_field_material.set_shader_parameter("tint_color", CHANNEL_COLORS[channel_index])
 	_refresh_texture()
-	queue_redraw()
 
 func mark_dirty() -> void:
 	_refresh_texture()
-	queue_redraw()
 
 func _refresh_texture() -> void:
 	if environment_manager == null or _field_rect == null or _field_material == null:
@@ -122,14 +129,21 @@ func _refresh_texture() -> void:
 		for px in range(display_resolution):
 			var u: float = (float(px) + 0.5) / float(display_resolution)
 			var v: float = (float(py) + 0.5) / float(display_resolution)
-			var world: Vector2 = center + Vector2(u * 2.0 - 1.0, v * 2.0 - 1.0) * radius
-			var intensity: float = 0.0
-			if world.distance_squared_to(center) <= radius * radius:
-				intensity = clampf(_sample_grid(values, resolution, u * float(resolution) - 0.5, v * float(resolution) - 0.5) / max_value, 0.0, 1.0)
+			var intensity: float = clampf(
+				_sample_grid_masked(values, resolution, center, radius,
+					u * float(resolution) - 0.5, v * float(resolution) - 0.5) / max_value,
+				0.0, 1.0)
 			_field_image.set_pixel(px, py, Color(intensity, 0.0, 0.0, 1.0))
 	_field_texture.update(_field_image)
 
-func _sample_grid(values: PackedFloat32Array, resolution: int, gx: float, gy: float) -> float:
+func _grid_center_world(resolution: int, center: Vector2, radius: float, x: int, y: int) -> Vector2:
+	var local: Vector2 = Vector2(
+		(float(x) + 0.5) / float(resolution) * 2.0 - 1.0,
+		(float(y) + 0.5) / float(resolution) * 2.0 - 1.0
+	)
+	return center + local * radius
+
+func _sample_grid_masked(values: PackedFloat32Array, resolution: int, center: Vector2, radius: float, gx: float, gy: float) -> float:
 	var bounded: Vector2 = Vector2(gx, gy).clamp(Vector2.ZERO, Vector2(float(resolution - 1), float(resolution - 1)))
 	var base_x: int = floori(bounded.x)
 	var base_y: int = floori(bounded.y)
@@ -137,18 +151,18 @@ func _sample_grid(values: PackedFloat32Array, resolution: int, gx: float, gy: fl
 	var next_y: int = mini(base_y + 1, resolution - 1)
 	var fx: float = bounded.x - float(base_x)
 	var fy: float = bounded.y - float(base_y)
-	var top: float = lerpf(values[base_y * resolution + base_x], values[base_y * resolution + next_x], fx)
-	var bottom: float = lerpf(values[next_y * resolution + base_x], values[next_y * resolution + next_x], fx)
-	return lerpf(top, bottom, fy)
-
-func _draw() -> void:
-	if not _enabled or environment_manager == null:
-		return
-	var field: RefCounted = environment_manager.get("field") as RefCounted
-	if field == null:
-		return
-	var center: Vector2 = field.get("center")
-	var radius: float = float(field.get("radius"))
-	var tint: Color = CHANNEL_COLORS[clampi(channel_index, 0, CHANNEL_COLORS.size() - 1)]
-	# 皿内边界描一条暖色细环，让「照明覆盖范围」一眼可辨（纯视图派生）。
-	draw_arc(center, radius, 0.0, TAU, 128, Color(tint.r, tint.g, tint.b, 0.55), 2.0, true)
+	var total: float = 0.0
+	var weight_total: float = 0.0
+	for sample_y in [base_y, next_y]:
+		for sample_x in [base_x, next_x]:
+			var wx: float = fx if sample_x == next_x else 1.0 - fx
+			var wy: float = fy if sample_y == next_y else 1.0 - fy
+			var weight: float = wx * wy
+			if weight <= 0.0:
+				continue
+			# 圆外格在物理场中恒 0；视图插值不能把它们混进来，否则边缘出现暗锯齿。
+			if _grid_center_world(resolution, center, radius, sample_x, sample_y).distance_squared_to(center) > radius * radius:
+				continue
+			total += values[sample_y * resolution + sample_x] * weight
+			weight_total += weight
+	return total / weight_total if weight_total > 0.0 else 0.0

@@ -69,6 +69,7 @@ var _panel_toggles: Dictionary = {}
 var _panel_default_visible: Dictionary = {}
 ## 光场可视化层（阶段 UI 调整）。
 var _field_layer: Node = null
+var _food_layer: Node = null
 var _selection_layer: Node = null
 
 func _ready() -> void:
@@ -101,7 +102,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	## 顶栏开关与各面板内部关闭按钮（编辑器 Apply/关闭）状态对账，避免失配。
 	for target_path in _panel_toggles:
-		if target_path == "@field":
+		if target_path == "@field" or target_path == "@food":
 			continue
 		var button: Button = _panel_toggles[target_path] as Button
 		var node: Node = get_node_or_null(target_path)
@@ -111,10 +112,13 @@ func _process(_delta: float) -> void:
 ## 光场/选区可视化层引用；光场默认可见，可在顶栏关闭。
 func _register_view_layers() -> void:
 	_field_layer = get_node_or_null("../../DishView/FieldLayer")
+	_food_layer = get_node_or_null("../../DishView/FoodLayer")
 	_selection_layer = get_node_or_null("../../DishView/SelectionLayer")
 	# 光场默认可见：像 Cell Lab 一样开机就能看到照明覆盖范围，顶栏「光场」可关。
 	if _field_layer != null and _field_layer.has_method("set_enabled"):
 		_field_layer.call("set_enabled", true)
+	if _food_layer != null and _food_layer.has_method("set_enabled"):
+		_food_layer.call("set_enabled", true)
 
 ## 面板装饰系统：给每个面板加可拖动标题栏 + 图钉（可选）+ 关闭按钮。
 ## 面板自身 _ready 已缓存其子节点引用，这里重挂内容节点不会影响它们。
@@ -159,6 +163,7 @@ func _build_panel_toggles() -> void:
 		["小地图", "../Minimap"],
 		["细胞编辑", "CellEditorPanel"],
 		["光场", "@field"],
+		["食物", "@food"],
 	]
 	for definition in definitions:
 		var button: Button = _make_button(str(definition[0]), "开/关面板 · " + str(definition[1]))
@@ -171,6 +176,8 @@ func _build_panel_toggles() -> void:
 		var initial_pressed: bool = target != null and target.visible
 		if target_path == "@field" and _field_layer != null and _field_layer.has_method("is_enabled"):
 			initial_pressed = bool(_field_layer.call("is_enabled"))
+		elif target_path == "@food" and _food_layer != null and _food_layer.has_method("is_enabled"):
+			initial_pressed = bool(_food_layer.call("is_enabled"))
 		button.set_pressed_no_signal(initial_pressed)
 		_panel_toggles[target_path] = button
 		row.add_child(button)
@@ -181,6 +188,11 @@ func _on_panel_toggle(pressed: bool, button: Button) -> void:
 		if _field_layer != null and _field_layer.has_method("set_enabled"):
 			_field_layer.call("set_enabled", pressed)
 			_set_feedback("光场可视化 · " + ("开" if pressed else "关") + " · 直接显示光照场强度")
+		return
+	if target_path == "@food":
+		if _food_layer != null and _food_layer.has_method("set_enabled"):
+			_food_layer.call("set_enabled", pressed)
+			_set_feedback("食物可视化 · " + ("开" if pressed else "关") + " · 显示营养团块亮点")
 		return
 	var node: Node = get_node_or_null(target_path)
 	if node == null:

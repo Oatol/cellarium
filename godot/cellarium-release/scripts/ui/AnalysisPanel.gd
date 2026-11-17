@@ -7,6 +7,10 @@ extends PanelContainer
 const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 
+## 实时数字（tick / 活体数）每 6 tick 刷新；统计采样面板每 30 tick 刷新。
+const LIVE_REFRESH_TICKS: int = 6
+const REPORT_REFRESH_TICKS: int = 30
+
 @export var organism_manager_path: NodePath = ^"../../Simulation/OrganismManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
@@ -16,6 +20,7 @@ var tick_core: Node = null
 var command_bus: Node = null
 var _body: VBoxContainer = null
 var _text: Label = null
+var _live_text: Label = null
 var _inspect_title: Label = null
 var _inspect_text: Label = null
 var _visible_state: bool = false
@@ -25,12 +30,19 @@ func _on_tick_for_refresh(tick_index: int) -> void:
 	_tick_since_refresh += 1
 	if not visible:
 		return
-	# 每 30 tick 刷新；诊断快照则每次都跟（成本低）。
-	if _tick_since_refresh >= 30:
+	# 统计采样每 30 tick 更新一次；tick / 活体数等实时数字每 6 tick 更新，避免看起来「不刷新」。
+	if _tick_since_refresh >= REPORT_REFRESH_TICKS:
 		_tick_since_refresh = 0
 		_refresh()
+	elif _tick_since_refresh % LIVE_REFRESH_TICKS == 0:
+		_refresh_live()
 	elif organism_manager != null and organism_manager.has_method("get_last_inspection"):
 		_refresh_inspection()
+
+## 供外部（含无头验收）强制刷新完整报告。
+func refresh_now() -> void:
+	_tick_since_refresh = 0
+	_refresh()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -73,10 +85,15 @@ func _ready() -> void:
 	var title: Label = Label.new()
 	title.text = "生态报告 · R 关闭"
 	title.add_theme_font_size_override("font_size", 15)
+	_live_text = Label.new()
+	_live_text.name = "LiveStatsLabel"
+	_live_text.text = "—"
+	_live_text.add_theme_font_size_override("font_size", 13)
 	_text = Label.new()
 	_text.text = "—"
 	_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_body.add_child(title)
+	_body.add_child(_live_text)
 	_body.add_child(_text)
 	_inspect_title = Label.new()
 	_inspect_title.text = "细胞诊断 · 点击细胞后显示"
@@ -100,8 +117,22 @@ func _ready() -> void:
 func _refresh() -> void:
 	if organism_manager == null or _text == null:
 		return
+	_refresh_live()
 	_refresh_ecology()
 	_refresh_inspection()
+
+## 实时数字直接来自快照 getter，不改模拟、不依赖 30 tick 采样窗口。
+func _refresh_live() -> void:
+	if _live_text == null:
+		return
+	var tick_value: int = int(tick_core.get("tick_index")) if tick_core != null else 0
+	var alive: int = 0
+	if organism_manager != null and organism_manager.has_method("get_organism_count"):
+		alive = int(organism_manager.call("get_organism_count"))
+	var speed_text: String = "?"
+	if tick_core != null:
+		speed_text = str(float(tick_core.get("speed_scale")))
+	_live_text.text = "实时 tick %d · 活体个体 %d · 倍速 %s×" % [tick_value, alive, speed_text]
 
 func _refresh_ecology() -> void:
 	var report: Dictionary = organism_manager.call("export_ecology_report") as Dictionary
