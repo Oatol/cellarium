@@ -535,3 +535,12 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - **镜头**：切换到 `canvas_item` shader 滤镜，不再动相机；五镜头参数不同但仍只是滤镜，不声称还原 Cell Lab 的光学系统。
 - **编辑器分工**：`CellEditorPanel` 下方 `dev_program` 快速表 = `dev ...` 指令紧凑编辑；`DevEditorPanel` 是同一草案的完整可视化。两者共享真相源，不重复写模拟。
 - **验收**：发布与 D 盘工程 `SCRIPTS=48 FAILURES=0 EXITCODE=0`；D 盘同步回填 15 个脚本 uid + 30 个节点 unique_id，MCP autoload 保留。
+
+## 18. v0.12.0 — 统一细胞编辑与诊断解锁（2026-11-17）
+
+- **用户反馈**：诊断锁定后无法解除；生态报告右上角关闭按钮无效；细胞编辑与发育编辑重复，要求合并为单一「细胞编辑」并参考 Cell Lab UI。
+- **关闭按钮根因**：`PanelChrome` 的标题栏 `gui_input` 也接收图钉/关闭按钮上的鼠标事件，拖动逻辑抢走 press/release，`Button.pressed` 不触发。现在 `_event_over_button()` 对按钮区域直接返回；`GameHUD._on_panel_close()` 同时同步面板内部可见状态。
+- **解锁语义**：`selection` 是视图状态，解锁仍统一经 `CommandBus` 的 `CLEAR_SELECTION` 工具命令；入口为诊断点空白、分析面板「解除锁定」按钮、Esc。只清圆环与 `last_inspection`，不触碰物理、能量、dev_program 或确定性 hash。
+- **编辑器合并**：唯一面板 `CellEditorPanel`（`scenes/ui/DevEditorPanel.tscn` 实例，脚本 `DevEditorPanel.gd`），原 `CellEditorPanel.gd` 删除。三栏 + 时间轴参考 Cell Lab：左栏 `GENE SLOTS 40`（前 8 槽 = GNP1 八性状，后 32 槽只读占位）、`DEV` 指令树；中栏参数与八性状；右栏 Cell Lab 专有字段只读证据；底部 `DEV TIMELINE`。`dev_program` 仍是唯一发育真相源；40 Gene 槽、Child 1–4、信号 lane、95 算子仍不写入 GNP1。
+- **行为兼容**：合并编辑器保留旧 API 与 `(value, index, key)` 操作数写入签名；呼吸方式选择吸收进同一工具条；Apply 仍经 `draft_applied` → HUD → CommandBus → 皿内 SPAWN。
+- **验收**：发布与 D 盘工程 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。

@@ -1,14 +1,14 @@
 extends Control
-## 发育编辑器（阶段11）：参考 Cell Lab Macro 编辑界面与 preview/dev_editor_preview.html 规格稿。
-## 三栏 + 底部时间轴布局。唯一发育真相源是 draft Genome 的 dev_program（DIVIDE/DIFFERENTIATE/LINK）。
-## 规格稿里的 40 Gene 槽 / Child1-4 / 信号 lane / 95 算子是 Cell Lab 专有结构；GNP1 已冻结，
-## 本面板只在「规格参考」只读展示它们，不写入编码、不臆造字段。
-## 编辑只改 draft；Apply 经 signal → GameHUD → CommandBus 进入模拟，本面板不碰模拟状态与时间步。
+## 统一「细胞编辑」面板：参考 Cell Lab / Macro 的编辑器布局（基因槽 + 分化程序 +
+## 指令参数 + 规格参考 + 发育时间轴），吸收原「发育编辑」页的全部功能。
+## 唯一发育真相源是 draft Genome 的 dev_program（DIVIDE/DIFFERENTIATE/LINK）。
+## Cell Lab 专有的 40 Gene 槽 / Child1-4 / 信号 lane / 95 算子只作只读证据展示；GNP1 已冻结，
+## 不写入编码、不臆造字段。编辑只改 draft；Apply 经 signal → GameHUD → CommandBus 进入模拟。
+## 本面板不碰模拟状态、不改 dt、不改确定性 hash。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
-const LEGACY_EDITOR: Script = preload("res://scripts/ui/CellEditorPanel.gd")
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 
 const TRAITS: Array[String] = ["速度", "感知", "外壳", "攻击", "繁殖", "代谢", "神经", "耐温"]
@@ -16,6 +16,8 @@ const OPCODE_NAMES: Array[String] = ["DIVIDE 分裂", "DIFFERENTIATE 分化", "L
 const OPCODE_SHORT: Array[String] = ["DIVIDE", "DIFF", "LINK"]
 const MAX_DEV_INSTRUCTIONS: int = 64
 const CHANNEL_NAMES: Array[String] = ["营养0", "温度1", "氧气2", "光照3", "信号4"]
+const GENE_SLOT_COUNT: int = 40
+const RESPIRATION: Array[String] = ["兼性", "好氧", "厌氧"]
 
 @export var content_path: NodePath = ^"Panel/Content"
 
@@ -36,7 +38,9 @@ var _trait_labels: Array[Label] = []
 var _timeline_rows: HBoxContainer = null
 var _summary_label: Label = null
 var _type_option: OptionButton = null
+var _respiration_option: OptionButton = null
 var _status_label: Label = null
+var _gene_slot_labels: Array[Label] = []
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -55,8 +59,23 @@ func _reset_draft() -> void:
 	draft.set("mutation_rate_exp", 0)
 	draft.set("loci", PackedByteArray())
 	draft.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-	draft.call("set_development_program", LEGACY_EDITOR.call("default_dev_program"))
+	draft.call("set_development_program", default_dev_program())
 	_selected_instruction = 0
+
+static func default_dev_program() -> Array[Dictionary]:
+	# 4 细胞协作模板：结构核 + 运动/能量/信息三类分化，三条 LINK 连成一体。
+	# DIVIDE.c = 分裂间距；LINK.c = 静息长度。与原细胞编辑页完全一致的确定性模板。
+	return [
+		{"opcode": 0, "a": 0, "b": 0,   "c": 14},
+		{"opcode": 0, "a": 0, "b": 85,  "c": 14},
+		{"opcode": 0, "a": 1, "b": 170, "c": 14},
+		{"opcode": 1, "a": 1, "b": 2,   "c": 0},
+		{"opcode": 1, "a": 2, "b": 4,   "c": 0},
+		{"opcode": 1, "a": 3, "b": 5,   "c": 0},
+		{"opcode": 2, "a": 0, "b": 1,   "c": 14},
+		{"opcode": 2, "a": 0, "b": 2,   "c": 14},
+		{"opcode": 2, "a": 0, "b": 3,   "c": 14},
+	]
 
 func _make_button(text_value: String, tip: String) -> Button:
 	var button: Button = Button.new()
@@ -74,10 +93,10 @@ func _make_section_title(text_value: String) -> Label:
 func _build_ui() -> void:
 	if _content == null:
 		return
-	var title: Label = _make_section_title("发育编辑器 · 分化程序 / 基因槽 · 参考 Cell Lab Macro")
+	var title: Label = _make_section_title("细胞编辑 · CELL EDITOR · 参考 Cell Lab / Macro")
 	_content.add_child(title)
 
-	# 顶部工具条：类型选择 + 模板 + Apply/Load（Save 为本地草案占位，不落盘）。
+	# 顶部工具条：表现类型 + 呼吸方式 + 模板 + Apply（写入仍只经 CommandBus）。
 	var toolbar: HBoxContainer = HBoxContainer.new()
 	toolbar.add_theme_constant_override("separation", 6)
 	var type_label: Label = Label.new()
@@ -88,6 +107,16 @@ func _build_ui() -> void:
 		_type_option.add_item("%d %s" % [int(entry.get("id", 0)), str(entry.get("label", "?"))])
 	toolbar.add_child(type_label)
 	toolbar.add_child(_type_option)
+	var respiration_label: Label = Label.new()
+	respiration_label.text = "呼吸"
+	_respiration_option = OptionButton.new()
+	_respiration_option.custom_minimum_size = Vector2(84, 0)
+	for name_value in RESPIRATION:
+		_respiration_option.add_item(name_value)
+	_respiration_option.selected = 1
+	_respiration_option.item_selected.connect(_on_respiration_selected)
+	toolbar.add_child(respiration_label)
+	toolbar.add_child(_respiration_option)
 	var template_button: Button = _make_button("4 细胞模板", "装载 4 细胞协作体 dev_program")
 	template_button.pressed.connect(_on_load_template)
 	var single_button: Button = _make_button("单细胞", "清空 dev_program，仅保留合子")
@@ -132,7 +161,7 @@ func _build_ui() -> void:
 	_content.add_child(timeline_panel)
 
 	_status_label = Label.new()
-	_status_label.text = "编辑 dev_program：左栏选指令，中栏改参数，Apply 后经 CommandBus 落地。"
+	_status_label.text = "左栏基因槽/分化程序 → 中栏参数 → 右栏规格 → 底部时间轴；Apply 后经 CommandBus 落地。"
 	_content.add_child(_status_label)
 
 func _build_left_panel() -> Control:
@@ -144,7 +173,9 @@ func _build_left_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("A · 分化程序 / 指令序列"))
+	box.add_child(_make_section_title("GENE SLOTS · 40 槽（前 8 槽 = GNP1 八性状）"))
+	box.add_child(_build_gene_slots())
+	box.add_child(_make_section_title("DEV · 分化程序 / 指令序列"))
 	_tree_counter = Label.new()
 	_tree_counter.text = "指令 0 / %d" % MAX_DEV_INSTRUCTIONS
 	box.add_child(_tree_counter)
@@ -172,6 +203,37 @@ func _build_left_panel() -> Control:
 	panel.add_child(margin)
 	return panel
 
+## Cell Lab 的 40 Gene 槽在本项目只做可视化：前 8 槽对应 GNP1 八性状，
+## 后 32 槽是只读占位（GNP1 冻结，不臆造字段、不写入编码）。
+func _build_gene_slots() -> Control:
+	var grid: GridContainer = GridContainer.new()
+	grid.columns = 8
+	grid.add_theme_constant_override("h_separation", 3)
+	grid.add_theme_constant_override("v_separation", 3)
+	for i in range(GENE_SLOT_COUNT):
+		var slot: PanelContainer = PanelContainer.new()
+		slot.custom_minimum_size = Vector2(28, 22)
+		var label: Label = Label.new()
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		label.add_theme_font_size_override("font_size", 9)
+		if i < TRAITS.size():
+			label.text = TRAITS[i]
+			label.tooltip_text = "GNP1 性状 %d · 在中栏滑块编辑" % i
+		else:
+			label.text = "—"
+			label.tooltip_text = "GNP1 冻结：Cell Lab 专有第 %d 槽，本项目不写入" % i
+		slot.add_child(label)
+		_gene_slot_labels.append(label)
+		grid.add_child(slot)
+	return grid
+
+func _refresh_gene_slots() -> void:
+	if draft == null or _gene_slot_labels.is_empty():
+		return
+	var traits: PackedByteArray = draft.get("traits")
+	for i in range(mini(_gene_slot_labels.size(), TRAITS.size())):
+		_gene_slot_labels[i].text = "%s %d" % [TRAITS[i], int(traits[i]) if i < traits.size() else 0]
+
 func _build_center_panel() -> Control:
 	var panel: PanelContainer = PanelContainer.new()
 	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -181,7 +243,7 @@ func _build_center_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("B · 指令参数 / GNP1 八性状"))
+	box.add_child(_make_section_title("PARAM · 指令参数 / GNP1 八性状"))
 
 	_param_opcode = OptionButton.new()
 	for name_value in OPCODE_NAMES:
@@ -252,7 +314,7 @@ func _build_right_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("C · 规格参考（Cell Lab 专有 · 未采纳）"))
+	box.add_child(_make_section_title("REFERENCE · Cell Lab 专有字段（只读证据）"))
 	var reference: Label = Label.new()
 	reference.text = "\n".join([
 		"40 Gene 槽：Cell.I[40]，分裂按 Gene.i/j 重连（1/5 概率）",
@@ -358,6 +420,7 @@ func _refresh_traits() -> void:
 		var value: int = int(traits[i]) if i < traits.size() else 0
 		_trait_sliders[i].set_value_no_signal(float(value))
 		_trait_labels[i].text = str(value)
+	_refresh_gene_slots()
 
 func _refresh_timeline() -> void:
 	if _timeline_rows == null:
@@ -420,14 +483,25 @@ func _on_opcode_changed(index: int) -> void:
 	_refresh_summary()
 	_refresh_params()
 
-func _on_operand_changed(value: float, key: String) -> void:
+func _on_operand_changed(value: float, key_or_index: Variant, maybe_key: String = "") -> void:
+	# 兼容两种调用：中栏 SpinBox (value, key) 与旧版快速表 (value, instruction_index, key)。
+	var instruction_index: int = _selected_instruction
+	var key: String = str(key_or_index)
+	if not maybe_key.is_empty():
+		instruction_index = int(key_or_index)
+		key = maybe_key
 	var program: Array = _program()
-	if _selected_instruction < 0 or _selected_instruction >= program.size():
+	if instruction_index < 0 or instruction_index >= program.size():
 		return
-	program[_selected_instruction][key] = clampi(int(round(value)), 0, 1023 if key == "c" else 255)
+	program[instruction_index][key] = clampi(int(round(value)), 0, 1023 if key == "c" else 255)
 	draft.set("dev_program", program)
 	_refresh_tree()
 	_refresh_timeline()
+	_refresh_summary()
+
+func _on_respiration_selected(index: int) -> void:
+	if draft != null:
+		draft.set("respiration", clampi(index, 0, RESPIRATION.size() - 1))
 
 func _on_trait_changed(value: float, index: int) -> void:
 	if draft == null or index < 0 or index >= TRAITS.size():
@@ -437,6 +511,7 @@ func _on_trait_changed(value: float, index: int) -> void:
 	draft.set("traits", traits)
 	if index < _trait_labels.size():
 		_trait_labels[index].text = str(int(traits[index]))
+	_refresh_gene_slots()
 
 func _on_add_instruction() -> void:
 	var program: Array = _program()
@@ -446,11 +521,13 @@ func _on_add_instruction() -> void:
 	_selected_instruction = program.size() - 1
 	_write_program(program)
 
-func _on_remove_instruction() -> void:
+func _on_remove_instruction(instruction_index: int = -1) -> void:
 	var program: Array = _program()
 	if program.is_empty():
 		return
-	program.remove_at(clampi(_selected_instruction, 0, program.size() - 1))
+	var target: int = clampi(instruction_index if instruction_index >= 0 else _selected_instruction, 0, program.size() - 1)
+	program.remove_at(target)
+	_selected_instruction = clampi(target, 0, maxi(0, program.size() - 1))
 	_write_program(program)
 
 func _on_move_up() -> void:
@@ -474,7 +551,7 @@ func _on_move_down() -> void:
 	_write_program(program)
 
 func _on_load_template() -> void:
-	_write_program(LEGACY_EDITOR.call("default_dev_program"))
+	_write_program(default_dev_program())
 	_selected_instruction = 0
 	_refresh_all()
 
@@ -494,7 +571,21 @@ func _on_apply() -> void:
 	draft_applied.emit(draft.duplicate_genome(), _type_id)
 	visible = false
 
+## 供 GameHUD / 测试读取当前草案（与旧细胞编辑页同 API）。
+func get_draft() -> RefCounted:
+	return draft
+
+func get_dev_program() -> Array:
+	return _program()
+
+func set_dev_program(program: Array) -> bool:
+	_write_program(program)
+	return true
+
+func get_type_id() -> int:
+	return 0 if _type_option == null else _type_option.selected
+
 ## 供 GameHUD 读取当前草案摘要（反馈用）。
 func draft_summary() -> String:
 	var program: Array = _program()
-	return "发育编辑器草案：%d 指令 · 类型 %d" % [program.size(), _type_id]
+	return "细胞编辑草案：%d 指令 · 类型 %d" % [program.size(), _type_id]

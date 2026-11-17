@@ -26,7 +26,7 @@ var environment_manager: Node = null
 var tick_core: Node = null
 
 ## 工具命令诊断计数：仅统计外部干预注入，不进入确定性 hash（干预本身是外部输入）。
-var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_GENOME": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
+var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_GENOME": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "CLEAR_SELECTION": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
 var last_inspection: Dictionary = {}
 var _next_genome_id: int = 1
 var energy_ledger: RefCounted = ENERGY_LEDGER_SCRIPT.new() as RefCounted
@@ -39,7 +39,7 @@ var selection: Array[int] = []
 var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
 var perf_probe: RefCounted = PERF_PROBE_SCRIPT.new() as RefCounted
 
-const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "CLEAR_SELECTION", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
 ## AgentBridge 写入命令与开发者命令（阶段5），均走 CommandBus → apply_command。
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
@@ -514,7 +514,9 @@ func _apply_tool_command(command: Dictionary) -> int:
 		"INSPECT":
 			var index: int = _nearest_alive_cell(position, 24.0)
 			if index < 0:
-				last_tool_message = "细胞诊断：点击位置附近没有细胞"
+				# 点在空白处即解除诊断锁定，避免圆环一直跟着上一枚细胞。
+				selection = []
+				last_tool_message = "细胞诊断：附近没有细胞 · 已解除锁定"
 				return -1
 			# 诊断即选中：写入 selection，SelectionLayer 会画圆环高亮（纯视图，不改模拟）。
 			selection = [index]
@@ -645,6 +647,12 @@ func _apply_tool_command(command: Dictionary) -> int:
 			last_tool_message = "颜色注射：#%d → 类型 %d" % [index, chosen]
 			tool_diagnostics["INJECT_COLOR"] = int(tool_diagnostics["INJECT_COLOR"]) + 1
 			return index
+		"CLEAR_SELECTION":
+			# 纯视图解锁：只清 selection / 诊断快照，不改物理、能量或确定性 hash。
+			selection = []
+			last_inspection = {}
+			last_tool_message = "细胞诊断：已解除锁定"
+			return 0
 		"SELECT":
 			# 点选：半径内最近细胞；delta.x>0 表示框选半径由 delta.y 指定。
 			var radius: float = maxf(8.0, absf(delta.y))

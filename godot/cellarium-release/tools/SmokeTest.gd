@@ -41,7 +41,6 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellMembrane.gd",
 	"res://scripts/rendering/CellContactChords.gd",
 	"res://scripts/ui/ToolCatalog.gd",
-	"res://scripts/ui/CellEditorPanel.gd",
 	"res://scripts/ui/DevEditorPanel.gd",
 	"res://scripts/ui/PanelChrome.gd",
 	"res://scripts/rendering/FieldLayer.gd",
@@ -2572,8 +2571,8 @@ func _check_camera_speed_editor() -> bool:
 	if speed_panel.get_global_rect().intersects(editor_button.get_global_rect()):
 		push_error("SmokeTest: speed panel overlaps cell editor button")
 		instance.queue_free(); return false
-	if editor.get_global_rect().intersects(feedback.get_global_rect()) or editor.get_global_rect().intersects(microscope.get_global_rect()):
-		push_error("SmokeTest: cell editor panel overlaps feedback or microscope")
+	if editor.visible and (editor.get_global_rect().intersects(feedback.get_global_rect()) or editor.get_global_rect().intersects(microscope.get_global_rect())):
+		push_error("SmokeTest: visible cell editor panel overlaps feedback or microscope")
 		instance.queue_free(); return false
 	var viewport_rect: Rect2 = instance.get_viewport().get_visible_rect()
 	if not viewport_rect.encloses(speed_panel.get_global_rect()) or not viewport_rect.encloses(editor_button.get_global_rect()):
@@ -3002,6 +3001,10 @@ func _check_dev_editor_landing() -> bool:
 	if timeline == null or timeline.get_child_count() != 9:
 		push_error("SmokeTest: dev editor timeline not built")
 		dev.queue_free(); return false
+	var gene_labels: Array = dev.get("_gene_slot_labels") as Array
+	if gene_labels == null or gene_labels.size() != 40 or not str((gene_labels[0] as Label).text).contains("速度"):
+		push_error("SmokeTest: Cell Lab 40 gene slots not built")
+		dev.queue_free(); return false
 	# 编辑 a/b/c → 写回 draft.dev_program（真实双向，非静态展示）。
 	dev.call("_on_tree_selected", 0)
 	dev.get("_param_a").set_value(9.0)
@@ -3038,22 +3041,25 @@ func _check_dev_editor_landing() -> bool:
 		dev.queue_free(); return false
 	dev.queue_free()
 
-	# main.tscn 必须挂 DevEditorButton / DevEditorPanel 实例，GameHUD 暴露对应路径。
+	# main.tscn 只保留一个「细胞编辑」面板/按钮：原「发育编辑」入口必须消失。
 	var main_scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
 	var main_instance: Node = main_scene.instantiate()
 	root.add_child(main_instance)
 	await process_frame
 	var hud: Node = main_instance.get_node_or_null("UI/HUD")
-	var dev_panel: Node = main_instance.get_node_or_null("UI/HUD/DevEditorPanel")
-	var dev_button: Node = main_instance.get_node_or_null("UI/HUD/DevEditorButton")
-	if hud == null or dev_panel == null or dev_button == null:
-		push_error("SmokeTest: main.tscn missing dev editor button/panel")
+	var cell_panel: Node = main_instance.get_node_or_null("UI/HUD/CellEditorPanel")
+	var cell_button: Node = main_instance.get_node_or_null("UI/HUD/CellEditorButton")
+	if hud == null or cell_panel == null or cell_button == null:
+		push_error("SmokeTest: merged cell editor button/panel missing")
 		main_instance.queue_free(); return false
-	if dev_panel.get("draft_applied") == null and not dev_panel.has_signal("draft_applied"):
-		push_error("SmokeTest: dev editor panel missing draft_applied signal")
+	if main_instance.get_node_or_null("UI/HUD/DevEditorPanel") != null or main_instance.get_node_or_null("UI/HUD/DevEditorButton") != null:
+		push_error("SmokeTest: duplicate dev editor entry still present")
+		main_instance.queue_free(); return false
+	if not cell_panel.has_signal("draft_applied") or not cell_panel.has_method("get_dev_program"):
+		push_error("SmokeTest: merged editor missing draft API")
 		main_instance.queue_free(); return false
 	main_instance.queue_free()
-	print("SmokeTest: OK dev editor Godot landing (skeleton/three-pane/dev_program edit/Apply/main wiring)")
+	print("SmokeTest: OK unified cell editor (gene slots / three-pane / dev_program / Apply / no duplicate entry)")
 	return true
 
 ## UI 调整验收：面板 chrome（拖动/图钉/关闭/顶栏开关）、诊断选中、光场层、镜头滤镜不改视野。
@@ -3073,7 +3079,7 @@ func _check_ui_chrome_and_filters() -> bool:
 	# (1) 面板 chrome：每个目标面板下有 ChromeHandle + 关闭按钮；报告面板额外有图钉。
 	var panel_paths: Array[String] = [
 		"UI/HUD/ToolDock", "UI/HUD/SubstratePanel", "UI/HUD/MicroscopePanel",
-		"UI/HUD/SpeedPanel", "UI/HUD/CellEditorPanel", "UI/HUD/DevEditorPanel",
+		"UI/HUD/SpeedPanel", "UI/HUD/CellEditorPanel",
 		"UI/AnalysisPanel", "UI/Minimap",
 	]
 	for panel_path in panel_paths:
@@ -3088,8 +3094,8 @@ func _check_ui_chrome_and_filters() -> bool:
 
 	# (2) 顶栏开关按钮：每个面板/光场均有 toggle；关闭 → 重开闭环。
 	var toggles: Dictionary = hud.get("_panel_toggles") as Dictionary
-	if toggles.size() < 9:
-		push_error("SmokeTest: panel toggles not built, size=%d" % toggles.size())
+	if toggles.size() < 8 or toggles.has("DevEditorPanel"):
+		push_error("SmokeTest: panel toggles not merged, size=%d" % toggles.size())
 		instance.queue_free(); return false
 	var speed_panel: Node = instance.get_node_or_null("UI/HUD/SpeedPanel")
 	var speed_toggle: Button = toggles.get("SpeedPanel", null) as Button
@@ -3123,6 +3129,16 @@ func _check_ui_chrome_and_filters() -> bool:
 	if not bool(report_panel.get_meta("chrome_pinned", false)):
 		push_error("SmokeTest: pin did not set chrome_pinned meta")
 		instance.queue_free(); return false
+	# (4b) 图钉固定后关闭按钮仍必须生效，并同步内部 _visible_state 与顶栏 toggle。
+	report_panel.call("set_visible_state", true)
+	var report_toggle: Button = toggles.get("../AnalysisPanel", null) as Button
+	report_chrome.get_close_button().pressed.emit()
+	if bool(report_panel.visible) or bool(report_panel.get("_visible_state")):
+		push_error("SmokeTest: report close button did not hide panel/state")
+		instance.queue_free(); return false
+	if report_toggle != null and report_toggle.is_pressed():
+		push_error("SmokeTest: report close button did not reset toggle")
+		instance.queue_free(); return false
 
 	# (5) 诊断选中：INSPECT 写 selection，SelectionLayer 存在。
 	var selection_layer: Node = instance.get_node_or_null("DishView/SelectionLayer")
@@ -3140,6 +3156,29 @@ func _check_ui_chrome_and_filters() -> bool:
 	var selection: Array = manager.get("selection") as Array
 	if selection.size() != 1 or int(selection[0]) != spawned:
 		push_error("SmokeTest: INSPECT did not select cell")
+		instance.queue_free(); return false
+	# 解锁三种入口：面板按钮（经 CommandBus）、Esc 命令、诊断点空白。
+	bus.call("enqueue", {"type": "CLEAR_SELECTION"})
+	bus.call("execute_tick_commands", 3)
+	if not (manager.get("selection") as Array).is_empty():
+		push_error("SmokeTest: CLEAR_SELECTION did not unlock")
+		instance.queue_free(); return false
+	bus.call("enqueue", {"type": "INSPECT", "position": cells.call("get_position", spawned), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 4)
+	bus.call("enqueue", {"type": "INSPECT", "position": Vector2(20, 20), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 5)
+	if not (manager.get("selection") as Array).is_empty():
+		push_error("SmokeTest: INSPECT on empty space did not unlock")
+		instance.queue_free(); return false
+	var report_unlock: Node = report_panel.find_child("UnlockSelectionButton", true, false)
+	if report_unlock == null:
+		push_error("SmokeTest: analysis panel unlock button missing")
+		instance.queue_free(); return false
+	bus.call("enqueue", {"type": "INSPECT", "position": cells.call("get_position", spawned), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 6)
+	(report_unlock as Button).pressed.emit()
+	if not (manager.get("selection") as Array).is_empty():
+		push_error("SmokeTest: report unlock button did not clear selection")
 		instance.queue_free(); return false
 
 	# (6) 光场层：存在、默认关闭、可开、通道=3、有 set_channel。

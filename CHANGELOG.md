@@ -4,6 +4,35 @@
 
 ---
 
+## 0.12.0 — 2026-11-17
+
+**类型**：编辑器合并 + 诊断解锁 / 关闭按钮修复（表现层 + 纯视图命令，不改模拟与确定性 hash）
+**触发**：用户反馈诊断锁定无法解除、生态报告右上角关闭按钮无效；要求细胞编辑与发育编辑合并为单一「细胞编辑」，UI 参考 Cell Lab
+
+### 修复
+
+- `PanelChrome.gd`：标题栏拖动 handler 现在跳过图钉/关闭按钮区域，Button 能完整收到按下-抬起，`pressed` 正常触发（此前拖动逻辑抢走事件，表现为"点了没用"）。
+- `GameHUD._on_panel_close()`：关闭按钮同步调用面板 `set_visible_state(false)`，生态报告内部状态与顶栏 toggle 不再失配。
+- 诊断解锁三条入口：
+  - 诊断工具点空白处 → `INSPECT` 未命中时清 `selection`；
+  - `AnalysisPanel` 新增「解除锁定」按钮 → 经 `CommandBus.enqueue(CLEAR_SELECTION)` 并立即 flush（纯视图命令）；
+  - `Esc` → Main 经 CommandBus 清 `selection` 与 `last_inspection`。
+  - `OrganismManager` 新增 `CLEAR_SELECTION` 工具分支与 `TOOL_TYPES` 登记，只改视图状态，不动物理/能量/hash。
+
+### 编辑器合并
+
+- `scenes/main.tscn`：移除旧 `CellEditorPanel` 内联子树与 `DevEditorButton`；`DevEditorPanel.tscn` 实例改名为唯一 `CellEditorPanel`，保留 `CellEditorButton`「细胞编辑」。删除 `scripts/ui/CellEditorPanel.gd`。
+- `scripts/ui/DevEditorPanel.gd` 成为统一编辑器：标题改为「细胞编辑 · CELL EDITOR」；吸收原细胞编辑页的呼吸方式选择、`default_dev_program()`、`get_dev_program/set_dev_program/get_type_id/get_draft` API 与 `(value, index, key)` 操作数写入兼容签名。
+- UI 按 Cell Lab 布局与用词组织：`GENE SLOTS · 40 槽`（前 8 槽对应 GNP1 八性状并实时显示数值，后 32 槽只读占位、明确标注 GNP1 冻结）、`DEV · 分化程序 / 指令序列`、`PARAM · 指令参数 / GNP1 八性状`、`REFERENCE · Cell Lab 专有字段（只读证据）`、`DEV TIMELINE`。`dev_program` 仍是唯一发育真相源，写入只经 Apply → GameHUD → CommandBus。
+- `GameHUD.gd`：移除发育编辑按钮/面板注册、顶栏「发育编辑」开关与语义 ID；面板 chrome/toggle 只剩单一「细胞编辑」。
+
+### 验证
+
+- `SmokeTest.gd`：SCRIPT_MANIFEST 47 项；新增 40 基因槽、合并入口唯一性、无重复 DevEditor 节点、报告关闭按钮（含图钉固定后）、`CLEAR_SELECTION` / 诊断点空白 / 面板解锁按钮三类解锁断言；原重叠断言改为仅编辑器可见时检查。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。D 盘同步回填 14 个 `ext_resource uid` + 9 个节点 `unique_id`，保留 MCP autoload，并删除旧 `CellEditorPanel.gd` 及 `.uid`。
+
+---
+
 ## 0.11.0 — 2026-11-17
 
 **类型**：UI 调整批次（纯表现层 / 编辑器体验，不改模拟与确定性 hash）

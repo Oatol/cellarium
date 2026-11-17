@@ -77,6 +77,11 @@ func install() -> bool:
 	return true
 
 func _on_handle_gui_input(event: InputEvent) -> void:
+	# 标题栏里的图钉/关闭按钮必须先收到完整按下-抬起，否则 Button.pressed 不会触发，
+	# 表现就是「点了关闭没反应」。鼠标落在按钮上时不要把事件当拖动处理。
+	if event is InputEventMouse and _event_over_button(event as InputEventMouse):
+		_drag_active = false
+		return
 	if event is InputEventMouseButton:
 		var mouse_button: InputEventMouseButton = event as InputEventMouseButton
 		if mouse_button.button_index == MOUSE_BUTTON_LEFT:
@@ -90,6 +95,13 @@ func _on_handle_gui_input(event: InputEvent) -> void:
 		var motion: InputEventMouseMotion = event as InputEventMouseMotion
 		var delta: Vector2 = motion.global_position - _drag_start_mouse
 		panel.global_position = _drag_start_pos + delta
+
+func _event_over_button(event: InputEventMouse) -> bool:
+	var point: Vector2 = event.global_position
+	for button in [_pin_button, _close_button]:
+		if button != null and button.visible and button.get_global_rect().has_point(point):
+			return true
+	return false
 
 func _on_close_pressed() -> void:
 	if panel != null:

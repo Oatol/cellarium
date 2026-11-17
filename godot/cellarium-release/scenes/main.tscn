@@ -15,7 +15,6 @@
 [ext_resource type="PackedScene" path="res://scenes/cells/CellBase.tscn" id="13_cellbase"]
 [ext_resource type="Script" path="res://scripts/rendering/CellSceneRenderer.gd" id="14_scenerender"]
 [ext_resource type="Script" path="res://scripts/rendering/CameraController.gd" id="15_camera"]
-[ext_resource type="Script" path="res://scripts/ui/CellEditorPanel.gd" id="16_editor"]
 [ext_resource type="PackedScene" path="res://scenes/ui/DevEditorPanel.tscn" id="17_devpanel"]
 [ext_resource type="Script" path="res://scripts/rendering/FieldLayer.gd" id="18_fieldlayer"]
 [ext_resource type="Script" path="res://scripts/rendering/SelectionLayer.gd" id="19_selectionlayer"]
@@ -291,116 +290,8 @@ offset_bottom = 56.0
 grow_horizontal = 0
 text = "细胞编辑"
 
-[node name="DevEditorButton" type="Button" parent="UI/HUD"]
+[node name="CellEditorPanel" parent="UI/HUD" instance=ExtResource("17_devpanel")]
 layout_mode = 1
-anchors_preset = 10
-anchor_right = 1.0
-offset_left = 1204.0
-offset_top = 8.0
-offset_right = -580.0
-offset_bottom = 56.0
-grow_horizontal = 0
-text = "发育编辑"
-
-[node name="DevEditorPanel" parent="UI/HUD" instance=ExtResource("17_devpanel")]
-layout_mode = 1
-
-[node name="CellEditorPanel" type="PanelContainer" parent="UI/HUD"]
-visible = false
-layout_mode = 1
-offset_left = 8.0
-offset_top = 92.0
-offset_right = 428.0
-offset_bottom = 600.0
-script = ExtResource("16_editor")
-
-[node name="Panel" type="MarginContainer" parent="UI/HUD/CellEditorPanel"]
-layout_mode = 2
-theme_override_constants/margin_left = 10
-theme_override_constants/margin_top = 8
-theme_override_constants/margin_right = 10
-theme_override_constants/margin_bottom = 8
-
-[node name="Scroll" type="ScrollContainer" parent="UI/HUD/CellEditorPanel/Panel"]
-layout_mode = 2
-size_flags_vertical = 3
-
-[node name="Content" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll"]
-layout_mode = 2
-size_flags_horizontal = 3
-theme_override_constants/separation = 4
-
-[node name="Title" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-text = "CELL EDITOR · 细胞 / 多细胞编辑"
-
-[node name="TraitRows" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-theme_override_constants/separation = 2
-
-[node name="ConfigRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-
-[node name="TypeLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
-layout_mode = 2
-custom_minimum_size = Vector2(72, 0)
-text = "类型"
-
-[node name="TypeOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
-layout_mode = 2
-custom_minimum_size = Vector2(150, 0)
-
-[node name="RespirationLabel" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
-layout_mode = 2
-text = "呼吸"
-
-[node name="RespirationOption" type="OptionButton" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ConfigRow"]
-layout_mode = 2
-custom_minimum_size = Vector2(90, 0)
-
-[node name="ActionRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-theme_override_constants/separation = 6
-
-[node name="ApplyButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
-layout_mode = 2
-text = "装载到合成器"
-
-[node name="DefaultButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
-layout_mode = 2
-text = "恢复默认"
-
-[node name="CloseButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/ActionRow"]
-layout_mode = 2
-text = "关闭"
-
-[node name="DevTitle" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-text = "DEVELOPMENT · 多细胞发育程序"
-
-[node name="DevRows" type="VBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-theme_override_constants/separation = 2
-
-[node name="DevActionRow" type="HBoxContainer" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-theme_override_constants/separation = 6
-
-[node name="AddButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
-layout_mode = 2
-text = "添加指令"
-
-[node name="TemplateButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
-layout_mode = 2
-text = "4 细胞模板"
-
-[node name="ClearButton" type="Button" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content/DevActionRow"]
-layout_mode = 2
-text = "单细胞"
-
-[node name="DevPreview" type="Label" parent="UI/HUD/CellEditorPanel/Panel/Scroll/Content"]
-layout_mode = 2
-text = "预览："
 
 [node name="Minimap" type="PanelContainer" parent="UI" unique_id=543256719]
 

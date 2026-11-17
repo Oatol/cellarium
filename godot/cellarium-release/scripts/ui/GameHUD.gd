@@ -26,8 +26,6 @@ const PANEL_CHROME: RefCounted = preload("res://scripts/ui/PanelChrome.gd")
 @export var speed_lod_path: NodePath = ^"SpeedPanel/Panel/SpeedRow/LodLabel"
 @export var cell_editor_path: NodePath = ^"CellEditorPanel"
 @export var cell_editor_button_path: NodePath = ^"CellEditorButton"
-@export var dev_editor_path: NodePath = ^"DevEditorPanel"
-@export var dev_editor_button_path: NodePath = ^"DevEditorButton"
 
 signal tool_changed(tool: Dictionary)
 signal mode_changed(mode: Dictionary)
@@ -55,7 +53,6 @@ var _speed_slider: HSlider = null
 var _speed_spin: SpinBox = null
 var _speed_lod: Label = null
 var _cell_editor: Control = null
-var _dev_editor: Control = null
 var _draft_genome: RefCounted = null
 var _draft_type_id: int = 0
 var _syncing_speed: bool = false
@@ -88,7 +85,6 @@ func _ready() -> void:
 	_build_injector()
 	_register_speed_controls()
 	_register_cell_editor()
-	_register_dev_editor()
 	_register_view_layers()
 	_build_panel_chrome()
 	_build_panel_toggles()
@@ -122,7 +118,6 @@ func _build_panel_chrome() -> void:
 		["MicroscopePanel", "显微镜 · MICROSCOPE", false],
 		["SpeedPanel", "倍速 · SPEED", false],
 		["CellEditorPanel", "细胞编辑 · CELL EDITOR", false],
-		["DevEditorPanel", "发育编辑 · DEV EDITOR", false],
 		["../AnalysisPanel", "报告/诊断 · ANALYSIS", true],
 		["../Minimap", "小地图 · MINIMAP", false],
 	]
@@ -156,7 +151,6 @@ func _build_panel_toggles() -> void:
 		["分析", "../AnalysisPanel"],
 		["小地图", "../Minimap"],
 		["细胞编辑", "CellEditorPanel"],
-		["发育编辑", "DevEditorPanel"],
 		["光场", "@field"],
 	]
 	for definition in definitions:
@@ -187,6 +181,10 @@ func _on_panel_toggle(pressed: bool, button: Button) -> void:
 		node.call("set_visible_state", pressed)
 
 func _on_panel_close(panel_path: String) -> void:
+	var node: Node = get_node_or_null(panel_path)
+	# 生态报告等面板有内部 _visible_state，关闭按钮必须同步，否则 R 键状态会失配。
+	if node != null and node.has_method("set_visible_state"):
+		node.call("set_visible_state", false)
 	var button: Button = _panel_toggles.get(panel_path, null) as Button
 	if button != null:
 		button.set_pressed_no_signal(false)
@@ -218,10 +216,6 @@ func _register_semantic_ids() -> void:
 	if editor_button != null:
 		editor_button.set_meta("semantic_id", "ui://sim/cell-editor/toggle")
 		SEMANTIC.call("register", "ui://sim/cell-editor/toggle", editor_button)
-	var dev_button: Button = get_node_or_null(dev_editor_button_path) as Button
-	if dev_button != null:
-		dev_button.set_meta("semantic_id", "ui://sim/dev-editor/toggle")
-		SEMANTIC.call("register", "ui://sim/dev-editor/toggle", dev_button)
 
 func _register_speed_controls() -> void:
 	_speed_slider = get_node_or_null(speed_slider_path) as HSlider
@@ -248,24 +242,6 @@ func _register_cell_editor() -> void:
 		editor_button.pressed.connect(_on_cell_editor_toggle)
 	if _cell_editor != null and _cell_editor.has_signal("draft_applied"):
 		_cell_editor.connect("draft_applied", Callable(self, "_on_draft_applied"))
-
-## 发育编辑器（阶段11）：按钮开合 + draft_applied → 复用 _on_draft_applied 装载合成器。
-func _register_dev_editor() -> void:
-	_dev_editor = get_node_or_null(dev_editor_path) as Control
-	var dev_button: Button = get_node_or_null(dev_editor_button_path) as Button
-	if dev_button != null:
-		dev_button.pressed.connect(_on_dev_editor_toggle)
-	if _dev_editor != null and _dev_editor.has_signal("draft_applied"):
-		_dev_editor.connect("draft_applied", Callable(self, "_on_draft_applied"))
-
-func _on_dev_editor_toggle() -> void:
-	if _dev_editor == null:
-		return
-	_dev_editor.visible = not _dev_editor.visible
-	if _dev_editor.visible:
-		_dev_editor.call("move_to_front")
-	_sync_toggle_for("DevEditorPanel", _dev_editor.visible)
-	_set_feedback("发育编辑器 · " + ("打开" if _dev_editor.visible else "关闭") + " · 编辑 dev_program，Apply 后装载合成器")
 
 func _sync_toggle_for(panel_path: String, value: bool) -> void:
 	var button: Button = _panel_toggles.get(panel_path, null) as Button

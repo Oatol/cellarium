@@ -9,9 +9,11 @@ const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.g
 
 @export var organism_manager_path: NodePath = ^"../../Simulation/OrganismManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
+@export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 
 var organism_manager: Node = null
 var tick_core: Node = null
+var command_bus: Node = null
 var _body: VBoxContainer = null
 var _text: Label = null
 var _inspect_title: Label = null
@@ -58,6 +60,7 @@ func _set_visible(value: bool) -> void:
 func _ready() -> void:
 	organism_manager = get_node_or_null(organism_manager_path)
 	tick_core = get_node_or_null(tick_core_path)
+	command_bus = get_node_or_null(command_bus_path)
 	# 场景可能被反复实例化（测试/热重载）：先清本命名空间旧注册再注册。
 	SEMANTIC.call("clear_prefix", "ui://report/")
 	SEMANTIC.call("register", "ui://report/panel", self)
@@ -78,10 +81,17 @@ func _ready() -> void:
 	_inspect_title = Label.new()
 	_inspect_title.text = "细胞诊断 · 点击细胞后显示"
 	_inspect_title.add_theme_font_size_override("font_size", 15)
+	var unlock_button: Button = Button.new()
+	unlock_button.name = "UnlockSelectionButton"
+	unlock_button.text = "解除锁定"
+	unlock_button.tooltip_text = "清除诊断选中的圆环（也可按 Esc 或用诊断工具点空白处）"
+	unlock_button.custom_minimum_size = Vector2(84, 24)
+	unlock_button.pressed.connect(_on_unlock_pressed)
 	_inspect_text = Label.new()
 	_inspect_text.text = "（用「细胞诊断」工具点击皿内细胞）"
 	_inspect_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_body.add_child(_inspect_title)
+	_body.add_child(unlock_button)
 	_body.add_child(_inspect_text)
 	add_child(_body)
 	visible = false
@@ -143,3 +153,17 @@ func _refresh_inspection() -> void:
 ## INSPECT 工具执行后由 Main 调用：弹出面板并立即刷新诊断段。
 func show_inspection() -> void:
 	_set_visible(true)
+
+## 诊断解锁：仍走 CommandBus 唯一写入口；冻结档无下一 tick 时同步 flush。
+func _on_unlock_pressed() -> void:
+	if command_bus == null:
+		return
+	command_bus.call("enqueue", {"type": "CLEAR_SELECTION"})
+	# 解锁是纯视图命令，UI 按钮立即 flush，圆环不等下一 tick 才消失。
+	var tick_index: int = int(tick_core.get("tick_index")) if tick_core != null else 0
+	command_bus.call("execute_tick_commands", tick_index)
+	_refresh_inspection()
+
+## Main 在 CLEAR_SELECTION 执行后调用，清掉面板里的旧诊断文本。
+func refresh_inspection() -> void:
+	_refresh_inspection()

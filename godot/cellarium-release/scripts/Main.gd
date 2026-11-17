@@ -144,6 +144,8 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 	# 细胞诊断命中后自动弹出分析面板，展示逐项状态（参考 Cell Lab 诊断工具）。
 	if command.get("type", "") == "INSPECT" and result >= 0 and analysis_panel != null and analysis_panel.has_method("show_inspection"):
 		analysis_panel.call("show_inspection")
+	if command.get("type", "") == "CLEAR_SELECTION" and analysis_panel != null and analysis_panel.has_method("refresh_inspection"):
+		analysis_panel.call("refresh_inspection")
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
 
 ## 屏幕坐标 → 模拟世界坐标。用事件自身的 position + canvas transform，
@@ -168,6 +170,13 @@ func _flush_commands_if_paused() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event: InputEventKey = event as InputEventKey
+		if key_event.keycode == KEY_ESCAPE:
+			# Esc 解除诊断锁定（圆环 + 诊断快照），仍经 CommandBus。
+			if command_bus != null:
+				command_bus.call("enqueue", {"type": "CLEAR_SELECTION"})
+				_flush_commands_if_paused()
+				_set_status("已解除细胞诊断锁定")
+			return
 		if key_event.keycode == KEY_F9:
 			toggle_dev_mode()
 			return
