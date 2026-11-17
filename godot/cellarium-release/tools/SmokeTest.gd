@@ -42,6 +42,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellContactChords.gd",
 	"res://scripts/ui/ToolCatalog.gd",
 	"res://scripts/ui/CellEditorPanel.gd",
+	"res://scripts/ui/DevEditorPanel.gd",
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
@@ -162,6 +163,10 @@ func _initialize() -> void:
 	if not await _check_multicell_editor():
 		failures += 1
 	if not await _check_shape_radius_and_motion():
+		failures += 1
+	if not await _check_lifecycle_and_injectors():
+		failures += 1
+	if not await _check_dev_editor_landing():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
@@ -1064,10 +1069,11 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
-	bus.call("enqueue", {"type": "INJECT_COLOR", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	# 颜色注射：显式指定类型 6（吞噬细胞），验证写入的是用户所选而非轮转/随机。
+	bus.call("enqueue", {"type": "INJECT_COLOR", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world", "color_type": 6})
 	bus.call("execute_tick_commands", 3)
-	if int(cells.get("cell_type")[spawned_index]) == 0:
-		push_error("SmokeTest: INJECT_COLOR did not change type")
+	if int(cells.get("cell_type")[spawned_index]) != 6:
+		push_error("SmokeTest: INJECT_COLOR did not apply chosen type")
 		instance.queue_free()
 		return false
 
@@ -2816,4 +2822,231 @@ func _check_shape_radius_and_motion() -> bool:
 		push_error("SmokeTest: 30x should report frame-cap carry")
 		return false
 	print("SmokeTest: OK unified CellShape radius / collision diameter / speed-to-ticks-and-motion")
+	return true
+
+## 阶段11验收：光照通道 / 基础代谢耗能 / 信号注射通道 / 颜色注射 / 诊断 / 黏附 / 拖拽识别。
+## 干预本身是外部输入，不进确定性 hash；这里只验证可见行为与参数落地。
+func _check_lifecycle_and_injectors() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	if scene == null:
+		push_error("SmokeTest: lifecycle scene missing")
+		return false
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", true)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+
+	# (1) 光照通道：默认 light_intensity>0，场采样通道 3 必须非零（此前恒 0）。
+	var light_value: float = float(env.get("light_intensity"))
+	if light_value <= 0.0 or not bool(env.call("apply_light_intensity")):
+		push_error("SmokeTest: light intensity not applied to field")
+		instance.queue_free(); return false
+	var center_sample: PackedFloat32Array = env.call("sample_fields", Vector2(250, 250))
+	if center_sample.size() < 4 or center_sample[3] <= 0.0:
+		push_error("SmokeTest: light channel sample must be non-zero")
+		instance.queue_free(); return false
+
+	# (2) 基础代谢：提高 base_metabolic_cost 后，固定能量细胞在若干 tick 内必须下降。
+	manager.set("base_metabolic_cost", 0.4)
+	manager.set("heterotrophic_intake_rate", 0.0)
+	manager.set("photosynthetic_intake_rate", 0.0)
+	manager.set("chemotrophic_intake_rate", 0.0)
+	manager.set("movement_energy_cost", 0.0)
+	bus.call("enqueue", {"type": "SPAWN", "position": Vector2(250, 250), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 1)
+	var probe_index: int = int(cells.call("size")) - 1
+	var energy_before: float = float(cells.get("cell_energy")[probe_index])
+	for _i in range(10):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	var energy_after: float = float(cells.get("cell_energy")[probe_index])
+	if energy_after >= energy_before:
+		push_error("SmokeTest: base metabolism did not drain energy")
+		instance.queue_free(); return false
+
+	# (3) 信号注射：选定通道 2（氧气）注入后，推进一次场扩散，该通道值必须上升。
+	# add_source 写入 pending source，需 diffuse_tick 结算；sample_fields 有缓存，需重新 begin。
+	var o2_positions: Array[Vector2] = [Vector2(250, 250)]
+	env.call("advance_field_tick")
+	env.call("begin_field_sampling", o2_positions)
+	var o2_sample: PackedFloat32Array = env.call("sample_fields", Vector2(250, 250))
+	var o2_before: float = o2_sample[2] if o2_sample.size() > 2 else 0.0
+	bus.call("enqueue", {"type": "INJECT_SIGNAL", "position": Vector2(250, 250), "delta": Vector2.ZERO,
+		"kind": "world", "signal_channel": 2, "signal_amount": 1.5})
+	bus.call("execute_tick_commands", 2)
+	env.call("advance_field_tick")
+	env.call("begin_field_sampling", o2_positions)
+	var o2_after_sample: PackedFloat32Array = env.call("sample_fields", Vector2(250, 250))
+	if o2_after_sample.size() <= 2 or o2_after_sample[2] <= o2_before + 0.01:
+		push_error("SmokeTest: INJECT_SIGNAL did not write chosen field channel (before=%.4f after=%.4f)" % [o2_before, o2_after_sample[2] if o2_after_sample.size() > 2 else -1.0])
+		instance.queue_free(); return false
+
+	# (4) 颜色注射：选定类型 7 写入目标细胞，值精确等于选择（非轮转/随机）。
+	var probe_pos: Vector2 = cells.call("get_position", probe_index)
+	bus.call("enqueue", {"type": "INJECT_COLOR", "position": probe_pos,
+		"delta": Vector2.ZERO, "kind": "world", "color_type": 7})
+	bus.call("execute_tick_commands", 3)
+	if int(cells.get("cell_type")[probe_index]) != 7:
+		push_error("SmokeTest: INJECT_COLOR type mismatch")
+		instance.queue_free(); return false
+
+	# (5) 细胞诊断：INSPECT 写 last_inspection，getter 返回各项字段；工具反馈非空。
+	bus.call("enqueue", {"type": "INSPECT", "position": probe_pos, "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 4)
+	var info: Dictionary = manager.call("get_last_inspection") as Dictionary
+	for required_key in ["cell_index", "org_id", "energy", "cell_type", "position", "radius", "links", "field"]:
+		if not info.has(required_key):
+			push_error("SmokeTest: INSPECT missing field " + str(required_key))
+			instance.queue_free(); return false
+	if str(manager.call("get_last_tool_message")).is_empty():
+		push_error("SmokeTest: INSPECT tool message empty")
+		instance.queue_free(); return false
+
+	# (6) 黏附连接：同个体两细胞两次点击建链，静息长度 >= 2r，反馈可读。
+	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	var probe_org: int = int(org_ids[probe_index])
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var same_org_peer: int = -1
+	for cell_index in range(alive.size()):
+		if cell_index != probe_index and alive[cell_index] != 0 and int(org_ids[cell_index]) == probe_org:
+			same_org_peer = cell_index
+			break
+	if same_org_peer < 0:
+		print("SmokeTest: SKIP ADHERE sub-check (no same-org peer)")
+	else:
+		manager.set("adhesion_anchor", -1)
+		bus.call("enqueue", {"type": "ADHERE", "position": cells.call("get_position", probe_index), "delta": Vector2.ZERO, "kind": "world"})
+		bus.call("execute_tick_commands", 5)
+		bus.call("enqueue", {"type": "ADHERE", "position": cells.call("get_position", same_org_peer), "delta": Vector2.ZERO, "kind": "world"})
+		bus.call("execute_tick_commands", 6)
+		var has_valid_rest: bool = false
+		for rest_value in cells.get("link_rest_length"):
+			if rest_value >= float(manager.get("cell_radius")) * 2.0:
+				has_valid_rest = true
+				break
+		if not has_valid_rest:
+			push_error("SmokeTest: ADHERE rest length below collision diameter")
+			instance.queue_free(); return false
+
+	# (7) 光学镊子：HUD.is_drag_tool 在 DRAG 工具下为真、SPAWN 为假。
+	var hud: Node = instance.get_node("UI/HUD")
+	if not hud.has_method("is_drag_tool"):
+		push_error("SmokeTest: HUD.is_drag_tool missing")
+		instance.queue_free(); return false
+	var tools_data: Array[Dictionary] = hud.get("_tools") as Array[Dictionary]
+	var drag_index: int = -1
+	var spawn_index: int = -1
+	for tool_index in range(tools_data.size()):
+		var tool_id: String = str(tools_data[tool_index].get("id", ""))
+		if tool_id == "DRAG":
+			drag_index = tool_index
+		elif tool_id == "SPAWN":
+			spawn_index = tool_index
+	if drag_index < 0:
+		push_error("SmokeTest: DRAG tool missing")
+		instance.queue_free(); return false
+	hud.call("_on_tool_pressed", drag_index)
+	if not bool(hud.call("is_drag_tool")):
+		push_error("SmokeTest: DRAG must be recognized as drag tool")
+		instance.queue_free(); return false
+	hud.call("_on_tool_pressed", spawn_index)
+	if bool(hud.call("is_drag_tool")):
+		push_error("SmokeTest: SPAWN must not be a drag tool")
+		instance.queue_free(); return false
+
+	instance.queue_free()
+	print("SmokeTest: OK lifecycle light/metabolism + injector channel/color/inspect/adhere + drag recognition")
+	return true
+
+## 阶段11：发育编辑器 Godot 落地验收。节点结构 / 三栏控件 / dev_program 双向编辑 / Apply 闭环。
+class SignalCapture extends RefCounted:
+	var genome: RefCounted = null
+	var type_id: int = 0
+	func on_applied(genome_value: RefCounted, type_id_value: int) -> void:
+		genome = genome_value
+		type_id = type_id_value
+
+func _make_signal_capture() -> RefCounted:
+	return SignalCapture.new() as RefCounted
+
+func _check_dev_editor_landing() -> bool:
+	var dev_scene: PackedScene = load("res://scenes/ui/DevEditorPanel.tscn") as PackedScene
+	if dev_scene == null:
+		push_error("SmokeTest: DevEditorPanel.tscn not loadable")
+		return false
+	var dev: Node = dev_scene.instantiate()
+	root.add_child(dev)
+	await process_frame
+	# 骨架内容节点存在。
+	if dev.get_node_or_null("Panel/Content") == null:
+		push_error("SmokeTest: dev editor content skeleton missing")
+		dev.queue_free(); return false
+	# 默认模板 = 9 指令（4 细胞 + 3 连接），同时反映到左栏树与底部时间轴。
+	var program: Array = dev.call("_program") as Array
+	if program.size() != 9:
+		push_error("SmokeTest: dev editor default program size != 9")
+		dev.queue_free(); return false
+	var tree_rows: VBoxContainer = dev.get("_tree_rows") as VBoxContainer
+	var timeline: HBoxContainer = dev.get("_timeline_rows") as HBoxContainer
+	if tree_rows == null or tree_rows.get_child_count() < 9:
+		push_error("SmokeTest: dev editor tree rows not built")
+		dev.queue_free(); return false
+	if timeline == null or timeline.get_child_count() != 9:
+		push_error("SmokeTest: dev editor timeline not built")
+		dev.queue_free(); return false
+	# 编辑 a/b/c → 写回 draft.dev_program（真实双向，非静态展示）。
+	dev.call("_on_tree_selected", 0)
+	dev.get("_param_a").set_value(9.0)
+	if int((dev.call("_program") as Array)[0].get("a", -1)) != 9:
+		push_error("SmokeTest: dev editor operand edit not written back")
+		dev.queue_free(); return false
+	# 追加 / 上移 / 删除 指令。
+	var before_add: int = (dev.call("_program") as Array).size()
+	dev.call("_on_add_instruction")
+	if (dev.call("_program") as Array).size() != before_add + 1:
+		push_error("SmokeTest: dev editor add instruction failed")
+		dev.queue_free(); return false
+	dev.call("_on_remove_instruction")
+	if (dev.call("_program") as Array).size() != before_add:
+		push_error("SmokeTest: dev editor remove instruction failed")
+		dev.queue_free(); return false
+	# 清空 → 单细胞；再恢复模板。
+	dev.call("_on_clear_program")
+	if not (dev.call("_program") as Array).is_empty():
+		push_error("SmokeTest: dev editor clear program failed")
+		dev.queue_free(); return false
+	dev.call("_on_load_template")
+	if (dev.call("_program") as Array).size() != 9:
+		push_error("SmokeTest: dev editor load template failed")
+		dev.queue_free(); return false
+	# Apply → draft_applied 信号携带合法 genome 草案（不直接写模拟）。
+	# lambda 按值捕获，用一个 RefCounted 包装器承接回调结果。
+	var applied: RefCounted = _make_signal_capture()
+	dev.connect("draft_applied", Callable(applied, "on_applied"))
+	dev.call("_on_apply")
+	var applied_genome: RefCounted = applied.get("genome") as RefCounted
+	if applied_genome == null or not bool(applied_genome.call("is_valid")):
+		push_error("SmokeTest: dev editor Apply did not emit valid genome")
+		dev.queue_free(); return false
+	dev.queue_free()
+
+	# main.tscn 必须挂 DevEditorButton / DevEditorPanel 实例，GameHUD 暴露对应路径。
+	var main_scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var main_instance: Node = main_scene.instantiate()
+	root.add_child(main_instance)
+	await process_frame
+	var hud: Node = main_instance.get_node_or_null("UI/HUD")
+	var dev_panel: Node = main_instance.get_node_or_null("UI/HUD/DevEditorPanel")
+	var dev_button: Node = main_instance.get_node_or_null("UI/HUD/DevEditorButton")
+	if hud == null or dev_panel == null or dev_button == null:
+		push_error("SmokeTest: main.tscn missing dev editor button/panel")
+		main_instance.queue_free(); return false
+	if dev_panel.get("draft_applied") == null and not dev_panel.has_signal("draft_applied"):
+		push_error("SmokeTest: dev editor panel missing draft_applied signal")
+		main_instance.queue_free(); return false
+	main_instance.queue_free()
+	print("SmokeTest: OK dev editor Godot landing (skeleton/three-pane/dev_program edit/Apply/main wiring)")
 	return true

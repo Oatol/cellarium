@@ -16,6 +16,7 @@
 [ext_resource type="Script" path="res://scripts/rendering/CellSceneRenderer.gd" id="14_scenerender"]
 [ext_resource type="Script" path="res://scripts/rendering/CameraController.gd" id="15_camera"]
 [ext_resource type="Script" path="res://scripts/ui/CellEditorPanel.gd" id="16_editor"]
+[ext_resource type="PackedScene" path="res://scenes/ui/DevEditorPanel.tscn" id="17_devpanel"]
 
 [node name="Main" type="Node2D" unique_id=201441505]
 script = ExtResource("1_tbgi4")
@@ -281,6 +282,20 @@ offset_right = -436.0
 offset_bottom = 56.0
 grow_horizontal = 0
 text = "细胞编辑"
+
+[node name="DevEditorButton" type="Button" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 1204.0
+offset_top = 8.0
+offset_right = -580.0
+offset_bottom = 56.0
+grow_horizontal = 0
+text = "发育编辑"
+
+[node name="DevEditorPanel" parent="UI/HUD" instance=ExtResource("17_devpanel")]
+layout_mode = 1
 
 [node name="CellEditorPanel" type="PanelContainer" parent="UI/HUD"]
 visible = false

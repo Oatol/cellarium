@@ -268,6 +268,16 @@ func set_value(channel_index: int, x: int, y: int, value: float) -> bool:
 	channels[channel_index][index] = value if _is_active(index) else 0.0
 	return _upload_active_buffer()
 
+## 阶段11光照落地：整通道填充，只上传一次 GPU 缓冲。
+func fill_channel(channel_index: int, value: float) -> bool:
+	if channel_index < 0 or channel_index >= CHANNEL_COUNT or not is_finite(value) or channels.size() != CHANNEL_COUNT:
+		return false
+	for index in range(resolution * resolution):
+		channels[channel_index][index] = value if _is_active(index) else 0.0
+	if backend_name == "gpu_compute":
+		_upload_active_buffer()
+	return true
+
 func set_advection(velocity_cells_per_tick: Vector2) -> bool:
 	if not is_finite(velocity_cells_per_tick.x) or not is_finite(velocity_cells_per_tick.y):
 		return false

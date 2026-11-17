@@ -4,6 +4,44 @@
 
 ---
 
+## 0.10.0 — 2026-11-17
+
+**类型**：阶段 11 — 生命周期可见化 + 工具闭环 + 发育编辑器 Godot 落地
+**触发**：用户反馈细胞不耗能/不分裂/不死亡、光照未生效；光学镊子拖拽中断、诊断无信息、黏附连接难用、颜色/信号注射不可选；发育编辑器从 HTML/SVG 规格稿落到 Godot
+
+### 生命周期（可见化，不缩放 dt）
+
+- `OrganismManager.gd`：
+  - 基础代谢从 `0.001*dt` 提到 `base_metabolic_cost=0.006`，并新增 `_apply_base_metabolism()`（WorkerThreadPool 静态分区、能量归零触发 `DEATH_STARVATION`）。
+  - `_apply_environment_metabolism()` 接入五场通道：类型 0 吃营养[0]、类型 1 光合吃光照[3]、类型 2 化能吃信号[4]；呼吸效率与运动耗能保留。
+  - 新增 `_apply_autonomous_lifecycle()`：成熟个体按「能量阈值 + cooldown + 首次资格宽限期」确定性分裂（角度由 `cell_index/_sim_tick` 派生，不用全局 RNG），上限 `autonomous_max_cells_per_organism=8`，间隔 300 tick。宽限期保证发育程序 9 指令→4 细胞/3 连接的确定性快照不被当 tick 分裂破坏。
+- `EnvironmentField.gd`：新增 `fill_channel(channel, value)`，整通道填充只上传一次 GPU 缓冲。
+- `EnvironmentManager.gd`：新增 `light_intensity`（默认 0.6）与 `apply_light_intensity()`，bind_preset 默认值写入通道 3（DECAY[3]=0，光合可持续取用）。此前光照通道恒 0。
+- `ToolCatalog.gd`：光照强度由「仅 UI 占位」改为可写；`GameHUD._on_substrate_changed()` 改动后调用 `apply_light_intensity()`。
+
+### 工具闭环（外部干预，不进确定性 hash）
+
+- 光学镊子拖拽：`Main.gd` 新增 `InputEventMouseMotion` 连续处理，按住左键且当前为拖拽型工具（DRAG/旋转选区/地形笔刷/橡皮）时逐 motion 事件经 CommandBus 入队；`GameHUD.is_drag_tool()` 判定工具类型。修复「点击后只能移动一小段」。
+- 细胞诊断：`OrganismManager.INSPECT` 写入 `last_inspection`（索引/org/tick/能量/类型/位置/半径/连接/物种/年龄/健康/五通道场采样）与 `get_last_inspection()` getter；`AnalysisPanel.gd` 新增诊断段，INSPECT 命中后由 `Main` 自动弹出面板显示逐项状态（参考 Cell Lab）。
+- 黏附连接：`ADHERE` 改为两枚细胞点击式建链（首点存 `adhesion_anchor`），静息长度 `max(14, 2r)` 不小于碰撞直径；成功/失败写 `last_tool_message`，HUD 实时反馈。
+- 颜色注射：`INJECT_COLOR` 读取命令 `color_type`（0–17 官方类型），不再轮转；`GameHUD` 注射参数行提供类型下拉。
+- 信号注射：`INJECT_SIGNAL` 读取 `signal_channel`（0–4）与 `signal_amount`；`EnvironmentManager.add_channel_source()` 按选定场通道注入 source。注射参数行提供通道下拉 + 注入量 SpinBox。
+
+### 发育编辑器 Godot 落地（阶段 11）
+
+- 新增 `scenes/ui/DevEditorPanel.tscn`（节点声明骨架）+ `scripts/ui/DevEditorPanel.gd`（三栏 + 底部时间轴）：A 分化程序指令序列（增删/上下移/选中）、B 指令参数（opcode/a/b/c 双向写回 dev_program）+ GNP1 八性状、C 规格参考（只读展示 Cell Lab 专有的 40 Gene 槽/Child1–4/信号 lane/95 算子，**不写入冻结 GNP1**）、DEV TIMELINE（指令按 tick 顺序，仅 UI 不缩放 dt）。
+- `DevEditorPanel.draft_applied` → `GameHUD._on_draft_applied()` → 装载合成器 → CommandBus → 皿内放置，闭环复用现有命令通道。
+- `main.tscn` / D 盘运行工程新增 `DevEditorButton`（顶栏「发育编辑」）与 `DevEditorPanel` 实例；GameHUD 语义 ID `ui://sim/dev-editor/toggle`。D 盘同步保留其 MCP autoload、脚本 `.uid` 与场景 `unique_id`。
+- 设计约束遵循规格稿：GNP1 已冻结，dev_program 是唯一发育真相源；Cell Lab 专有字段只作证据展示，不臆造、不进编码。
+
+### 验证
+
+- `SmokeTest.gd`：新增 `_check_lifecycle_and_injectors()`（光照通道非零、基础代谢耗能、信号注射通道落地、颜色注射精确写入、INSPECT 字段完整、ADHERE 静息长度、DRAG 工具识别）与 `_check_dev_editor_landing()`（节点骨架、三栏控件、dev_program 双向编辑增删、Apply 发合法草案、main.tscn 接线）。新增脚本登记入 SCRIPT_MANIFEST。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=45 FAILURES=0 EXITCODE=0`。
+- 删除临时诊断脚本 `tools/LifecycleDiag.gd` 与启动冒烟 `tools/BootSmoke.gd`（仅验证用，不发布）。
+
+---
+
 ## 0.9.1 — 2026-11-17
 
 **类型**：UI 布局修复 + 发育编辑器规格稿（文档/前端，不改模拟）

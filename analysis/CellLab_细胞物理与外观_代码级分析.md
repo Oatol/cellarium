@@ -512,3 +512,14 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 | 16 | 回归与发布 | 存档兼容、T12 回退、长跑分段、文档与快照/tag | 全量 SmokeTest / GPU parity / fallback 通过；每版 tag + CHANGELOG + 验收记录 |
 
 优先级说明：阶段 11 直接响应用户当前需求；阶段 13/14 是已记录但尚未落地的机制边界；阶段 15 的倍速提升必须先走规格修订，不能靠改 `dt` 或突破单帧上限取巧。
+
+## 16. v0.10.0 — 阶段 11 落地结论（2026-11-17）
+
+阶段 11（发育编辑器 Godot 落地）已随 v0.10.0 完成，§15 路线中的阶段 11 行标记为已完成。落地口径严格遵循 §13/§15 与冻结约束：
+
+- **真相源**：`dev_program`（DIVIDE/DIFFERENTIATE/LINK）是唯一发育结构；GNP1 二进制格式已冻结，规格稿中 Cell Lab 专有的 40 Gene 槽、Child 1–4、on-contact、信号 lane、95 算子只作只读证据展示，不写入编码、不臆造字段。
+- **实现**：`scenes/ui/DevEditorPanel.tscn`（节点骨架）+ `scripts/ui/DevEditorPanel.gd`（三栏 + 时间轴）。左栏指令序列支持增删/上下移/选中；中栏 opcode/a/b/c 双向写回 draft 并编辑 GNP1 八性状；底部时间轴按 tick 顺序表达指令，仅 UI、不缩放 dt。
+- **写入口**：`draft_applied` → `GameHUD._on_draft_applied()` → 装载合成器 → `CommandBus.enqueue()` → 皿内 SPAWN。面板不直接写模拟状态。
+- **配套修复**（用户同批反馈）：生命周期可见化（基础代谢 0.006、光照通道 0.6、成熟个体按能量 cooldown 分裂、饥饿死亡）；工具闭环（光学镊子连续拖拽、INSPECT 诊断弹窗、ADHERE 双击建链、颜色/信号注射可选）。
+- **行为边界**：自主分裂设「首次资格 cooldown 宽限期」，避免发育程序 9 指令→4 细胞/3 连接的确定性快照被成熟当 tick 分裂破坏；所有干预不进确定性 hash。
+- **验收**：发布工程与 D 盘运行工程均 `SCRIPTS=45 FAILURES=0 EXITCODE=0`；新增生命周期与发育编辑器两组 SmokeTest。临时诊断脚本未发布。

@@ -9,6 +9,7 @@ extends Node2D
 @export var status_label_path: NodePath = ^"UI/HUD/StatusBar"
 @export var game_hud_path: NodePath = ^"UI/HUD"
 @export var dish_view_path: NodePath = ^"DishView"
+@export var analysis_panel_path: NodePath = ^"UI/AnalysisPanel"
 @export var create_demo_organism: bool = true
 ## AgentBridge 默认关闭（§7.2）；仅当 .tscn 开启 agent_bridge_enabled 时才启用。
 @export var agent_bridge_enabled: bool = false
@@ -22,10 +23,14 @@ var organism_manager: Node = null
 var status_label: Label = null
 var game_hud: Node = null
 var dish_view: Node2D = null
+var analysis_panel: Node = null
 var executed_commands: int = 0
 var agent_bridge: RefCounted = null
 var dev_mode: bool = false
 var _carry_notified: bool = false
+## 光学镊子/地形笔刷等拖拽型工具的连续输入状态：按住左键时逐 motion 事件入队。
+var _pointer_dragging: bool = false
+var _last_drag_world: Vector2 = Vector2.ZERO
 
 func _ready() -> void:
 	tick_core = get_node_or_null(tick_core_path)
@@ -35,6 +40,7 @@ func _ready() -> void:
 	status_label = get_node_or_null(status_label_path) as Label
 	game_hud = get_node_or_null(game_hud_path)
 	dish_view = get_node_or_null(dish_view_path) as Node2D
+	analysis_panel = get_node_or_null(analysis_panel_path)
 	var on_tick: Callable = Callable(self, "_on_tick_advanced")
 	if tick_core != null and tick_core.has_signal("tick_advanced") and not tick_core.is_connected("tick_advanced", on_tick):
 		tick_core.connect("tick_advanced", on_tick)
@@ -129,6 +135,15 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 			push_warning("[cellarium] DIVIDE rejected @tick %d" % tick_index)
 	if game_hud != null and game_hud.has_method("apply_result"):
 		game_hud.call("apply_result", str(command.get("type", "?")), result)
+	# 业务反馈：细胞诊断/黏附连接等工具在 OrganismManager 写入 last_tool_message，
+	# 优先显示它，让"点了没反应"的工具给出可读提示。
+	if organism_manager != null and game_hud != null and game_hud.has_method("show_tool_message"):
+		var tool_message: String = str(organism_manager.call("get_last_tool_message"))
+		if not tool_message.is_empty():
+			game_hud.call("show_tool_message", tool_message)
+	# 细胞诊断命中后自动弹出分析面板，展示逐项状态（参考 Cell Lab 诊断工具）。
+	if command.get("type", "") == "INSPECT" and result >= 0 and analysis_panel != null and analysis_panel.has_method("show_inspection"):
+		analysis_panel.call("show_inspection")
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)
 
 ## 屏幕坐标 → 模拟世界坐标。用事件自身的 position + canvas transform，
@@ -183,8 +198,28 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		var mouse_button: InputEventMouseButton = event as InputEventMouseButton
-		if mouse_button.button_index == MOUSE_BUTTON_LEFT and mouse_button.pressed:
-			var world_position: Vector2 = screen_to_world(mouse_button.position)
-			var accepted: bool = bool(game_hud.call("world_action", world_position, Vector2.ZERO))
-			if accepted:
-				_flush_commands_if_paused()
+		if mouse_button.button_index == MOUSE_BUTTON_LEFT:
+			if mouse_button.pressed:
+				var world_position: Vector2 = screen_to_world(mouse_button.position)
+				var accepted: bool = bool(game_hud.call("world_action", world_position, Vector2.ZERO))
+				if accepted:
+					_flush_commands_if_paused()
+					# 仅拖拽型工具（光学镊子/旋转选区/地形笔刷）进入连续拖拽态。
+					if game_hud.has_method("is_drag_tool") and bool(game_hud.call("is_drag_tool")):
+						_pointer_dragging = true
+						_last_drag_world = world_position
+			else:
+				_pointer_dragging = false
+	elif event is InputEventMouseMotion and _pointer_dragging:
+		var motion_event: InputEventMouseMotion = event as InputEventMouseMotion
+		# 左键未按住（可能在窗口外释放）则结束拖拽，避免"粘住"。
+		if (motion_event.button_mask & MOUSE_BUTTON_MASK_LEFT) == 0:
+			_pointer_dragging = false
+			return
+		var world_position: Vector2 = screen_to_world(motion_event.position)
+		var world_delta: Vector2 = world_position - _last_drag_world
+		if world_delta.length_squared() <= 0.0001:
+			return
+		game_hud.call("world_action", world_position, world_delta)
+		_flush_commands_if_paused()
+		_last_drag_world = world_position

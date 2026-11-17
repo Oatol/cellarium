@@ -46,7 +46,7 @@ static func substrate() -> Array[Dictionary]:
 		{"n":"氧气分数","k":"oxygen_fraction","v":0.0,"min":0.0,"max":1.0,"step":0.01,"writable":true},
 		{"n":"温度","k":"temperature","v":273.0,"min":260.0,"max":320.0,"step":1.0,"writable":true},
 		{"n":"最大发育深度","k":"max_dev_depth","v":12,"min":0,"max":64,"step":1,"writable":true},
-		{"n":"光照强度","k":"light_amount","v":0.6,"min":0.0,"max":1.0,"step":0.01,"writable":false},
+		{"n":"光照强度","k":"light_intensity","v":0.6,"min":0.0,"max":2.0,"step":0.01,"writable":true},
 		{"n":"黏度","k":"viscosity","v":0.35,"min":0.0,"max":1.0,"step":0.01,"writable":false},
 		{"n":"重力","k":"gravity","v":0.1,"min":0.0,"max":1.0,"step":0.01,"writable":false},
 		{"n":"盐度","k":"salinity","v":0.3,"min":0.0,"max":1.0,"step":0.01,"writable":false}

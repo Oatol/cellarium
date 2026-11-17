@@ -7,6 +7,7 @@ extends Control
 const CATALOG: RefCounted = preload("res://scripts/ui/ToolCatalog.gd")
 const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 const CODEC: RefCounted = preload("res://scripts/core/data/GenomeCodec.gd")
+const CELL_VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
@@ -24,6 +25,8 @@ const CODEC: RefCounted = preload("res://scripts/core/data/GenomeCodec.gd")
 @export var speed_lod_path: NodePath = ^"SpeedPanel/Panel/SpeedRow/LodLabel"
 @export var cell_editor_path: NodePath = ^"CellEditorPanel"
 @export var cell_editor_button_path: NodePath = ^"CellEditorButton"
+@export var dev_editor_path: NodePath = ^"DevEditorPanel"
+@export var dev_editor_button_path: NodePath = ^"DevEditorButton"
 
 signal tool_changed(tool: Dictionary)
 signal mode_changed(mode: Dictionary)
@@ -51,6 +54,7 @@ var _speed_slider: HSlider = null
 var _speed_spin: SpinBox = null
 var _speed_lod: Label = null
 var _cell_editor: Control = null
+var _dev_editor: Control = null
 var _draft_genome: RefCounted = null
 var _draft_type_id: int = 0
 var _syncing_speed: bool = false
@@ -73,8 +77,10 @@ func _ready() -> void:
 	_build_lenses()
 	_build_view_buttons()
 	_build_tint()
+	_build_injector()
 	_register_speed_controls()
 	_register_cell_editor()
+	_register_dev_editor()
 	_register_semantic_ids()
 	_apply_mode(_selected_mode)
 	print("[GameHUD] ready tools=", _tools.size(), " modes=", _modes.size(), " substrate=", _substrate.size(), " semantic=", SEMANTIC.call("count"))
@@ -106,6 +112,10 @@ func _register_semantic_ids() -> void:
 	if editor_button != null:
 		editor_button.set_meta("semantic_id", "ui://sim/cell-editor/toggle")
 		SEMANTIC.call("register", "ui://sim/cell-editor/toggle", editor_button)
+	var dev_button: Button = get_node_or_null(dev_editor_button_path) as Button
+	if dev_button != null:
+		dev_button.set_meta("semantic_id", "ui://sim/dev-editor/toggle")
+		SEMANTIC.call("register", "ui://sim/dev-editor/toggle", dev_button)
 
 func _register_speed_controls() -> void:
 	_speed_slider = get_node_or_null(speed_slider_path) as HSlider
@@ -132,6 +142,23 @@ func _register_cell_editor() -> void:
 		editor_button.pressed.connect(_on_cell_editor_toggle)
 	if _cell_editor != null and _cell_editor.has_signal("draft_applied"):
 		_cell_editor.connect("draft_applied", Callable(self, "_on_draft_applied"))
+
+## 发育编辑器（阶段11）：按钮开合 + draft_applied → 复用 _on_draft_applied 装载合成器。
+func _register_dev_editor() -> void:
+	_dev_editor = get_node_or_null(dev_editor_path) as Control
+	var dev_button: Button = get_node_or_null(dev_editor_button_path) as Button
+	if dev_button != null:
+		dev_button.pressed.connect(_on_dev_editor_toggle)
+	if _dev_editor != null and _dev_editor.has_signal("draft_applied"):
+		_dev_editor.connect("draft_applied", Callable(self, "_on_draft_applied"))
+
+func _on_dev_editor_toggle() -> void:
+	if _dev_editor == null:
+		return
+	_dev_editor.visible = not _dev_editor.visible
+	if _dev_editor.visible:
+		_dev_editor.call("move_to_front")
+	_set_feedback("发育编辑器 · " + ("打开" if _dev_editor.visible else "关闭") + " · 编辑 dev_program，Apply 后装载合成器")
 
 func sync_speed_ui() -> void:
 	if tick_core == null or _syncing_speed:
@@ -331,6 +358,79 @@ func _build_tint() -> void:
 	_tint.z_index = -1
 	add_child(_tint)
 
+## 注射参数行：颜色注射选细胞类型、信号注射选场通道 + 注入量。
+## 只在选中对应工具时显示，避免常驻占屏；控件用代码填充，与 _build_tools 风格一致。
+func _build_injector() -> void:
+	_injector_panel = HBoxContainer.new()
+	_injector_panel.name = "InjectorPanel"
+	_injector_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_injector_panel.offset_left = 12.0
+	_injector_panel.offset_top = 88.0
+	_injector_panel.offset_right = 720.0
+	_injector_panel.offset_bottom = 120.0
+	_injector_panel.add_theme_constant_override("separation", 6)
+
+	_color_label = Label.new()
+	_color_label.text = "颜色→类型"
+	_color_option = OptionButton.new()
+	_color_option.custom_minimum_size = Vector2(128, 0)
+	for entry in CELL_VISUALS.call("entries"):
+		_color_option.add_item("%d %s" % [int(entry.get("id", 0)), str(entry.get("label", "?"))])
+	_color_option.item_selected.connect(_on_color_selected)
+
+	_channel_label = Label.new()
+	_channel_label.text = "信号→通道"
+	_channel_option = OptionButton.new()
+	_channel_option.custom_minimum_size = Vector2(96, 0)
+	for channel_name in ["营养0", "温度1", "氧气2", "光照3", "信号4"]:
+		_channel_option.add_item(channel_name)
+	_channel_option.selected = 4
+	_channel_option.item_selected.connect(_on_channel_selected)
+
+	_amount_label = Label.new()
+	_amount_label.text = "注入量"
+	_amount_spin = SpinBox.new()
+	_amount_spin.custom_minimum_size = Vector2(72, 0)
+	_amount_spin.min_value = 0.0
+	_amount_spin.max_value = 4.0
+	_amount_spin.step = 0.1
+	_amount_spin.value = 0.5
+	_amount_spin.value_changed.connect(_on_amount_changed)
+
+	_injector_panel.add_child(_color_label)
+	_injector_panel.add_child(_color_option)
+	_injector_panel.add_child(_channel_label)
+	_injector_panel.add_child(_channel_option)
+	_injector_panel.add_child(_amount_label)
+	_injector_panel.add_child(_amount_spin)
+	add_child(_injector_panel)
+	_update_injector_visibility()
+
+func _update_injector_visibility() -> void:
+	if _injector_panel == null:
+		return
+	var tool_id: String = selected_tool_id()
+	var show_color: bool = tool_id == "INJECT_COLOR"
+	var show_signal: bool = tool_id == "INJECT_SIGNAL"
+	_injector_panel.visible = show_color or show_signal
+	if _color_label != null: _color_label.visible = show_color
+	if _color_option != null: _color_option.visible = show_color
+	if _channel_label != null: _channel_label.visible = show_signal
+	if _channel_option != null: _channel_option.visible = show_signal
+	if _amount_label != null: _amount_label.visible = show_signal
+	if _amount_spin != null: _amount_spin.visible = show_signal
+
+func _on_color_selected(index: int) -> void:
+	set_inject_color_type(index)
+	_set_feedback("颜色注射 → 类型 %d · 点击细胞写入" % index)
+
+func _on_channel_selected(index: int) -> void:
+	set_inject_signal_channel(index)
+	_set_feedback("信号注射 → 通道 %d · 点击皿内注入" % index)
+
+func _on_amount_changed(value: float) -> void:
+	set_inject_signal_amount(value)
+
 func _format_value(value: float, step: float) -> String:
 	if step >= 1.0:
 		return str(int(round(value)))
@@ -365,6 +465,7 @@ func _on_tool_pressed(index: int) -> void:
 		_tool_buttons[i].set_pressed_no_signal(i == index)
 	var tool: Dictionary = _tools[index]
 	tool_changed.emit(tool)
+	_update_injector_visibility()
 	if str(tool.get("id", "")) == "SPAWN":
 		_set_feedback("细胞合成器 · " + _genome_summary() + " · 在皿内点击放置")
 	elif str(tool.get("id", "")) == "INJECT_GENOME":
@@ -381,7 +482,10 @@ func _on_substrate_changed(value: float, index: int) -> void:
 		if not bool(row_data.get("writable", false)):
 			_value_labels[index].text += " *"
 	if bool(row_data.get("writable", false)) and environment_manager != null:
-		environment_manager.set(str(row_data.get("k", "")), value)
+		var key: String = str(row_data.get("k", ""))
+		environment_manager.set(key, value)
+		if key == "light_intensity":
+			environment_manager.call("apply_light_intensity")
 
 func _on_lens_pressed(index: int) -> void:
 	_selected_lens = index
@@ -427,6 +531,32 @@ func selected_tool() -> Dictionary:
 func selected_tool_id() -> String:
 	return str(selected_tool().get("id", ""))
 
+## 拖拽型工具（光学镊子/旋转选区/地形笔刷/地形橡皮）由 Main 在按住左键时连续入队。
+func is_drag_tool() -> bool:
+	return selected_tool_id() in ["DRAG", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+
+## 当前注射工具的参数选择（颜色注射 = 细胞表现类型；信号注射 = 场通道）。
+## 由 HUD 的选择控件写入；未提供时使用确定性的默认值，保持命令自包含。
+var _inject_color_type: int = 0
+var _inject_signal_channel: int = 4
+var _inject_signal_amount: float = 0.5
+var _injector_panel: HBoxContainer = null
+var _color_option: OptionButton = null
+var _channel_option: OptionButton = null
+var _amount_spin: SpinBox = null
+var _color_label: Label = null
+var _channel_label: Label = null
+var _amount_label: Label = null
+
+func set_inject_color_type(type_id: int) -> void:
+	_inject_color_type = maxi(0, type_id)
+
+func set_inject_signal_channel(channel: int) -> void:
+	_inject_signal_channel = clampi(channel, 0, 4)
+
+func set_inject_signal_amount(amount: float) -> void:
+	_inject_signal_amount = clampf(amount, 0.0, 4.0)
+
 func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -> bool:
 	## 由 Main 的鼠标输入调用：把当前工具 + 世界坐标封装成命令入队。
 	var tool: Dictionary = selected_tool()
@@ -445,6 +575,11 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 			return false
 		command["genome_bytes"] = CODEC.call("encode", _draft_genome)
 		command["type_id"] = _draft_type_id
+	if tool_id == "INJECT_COLOR":
+		command["color_type"] = _inject_color_type
+	if tool_id == "INJECT_SIGNAL":
+		command["signal_channel"] = _inject_signal_channel
+		command["signal_amount"] = _inject_signal_amount
 	if command_bus == null:
 		return false
 	command_bus.call("enqueue", command)
@@ -452,6 +587,10 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 		_set_feedback("细胞合成器 → %s 落点 (%.1f, %.1f)" % [_genome_summary(), world_position.x, world_position.y])
 	elif tool_id == "INJECT_GENOME":
 		_set_feedback("基因组注射 → %s · CommandBus 入队" % _genome_summary())
+	elif tool_id == "INJECT_COLOR":
+		_set_feedback("颜色注射 → 类型 %d · (%.1f, %.1f)" % [_inject_color_type, world_position.x, world_position.y])
+	elif tool_id == "INJECT_SIGNAL":
+		_set_feedback("信号注射 → 通道 %d 量 %.2f · (%.1f, %.1f)" % [_inject_signal_channel, _inject_signal_amount, world_position.x, world_position.y])
 	else:
 		_set_feedback("%s → CommandBus 入队（下一 tick 生效） @ (%.1f, %.1f)" % [tool.get("name", "?"), world_position.x, world_position.y])
 	return true
@@ -466,3 +605,7 @@ func apply_result(command_type: String, result: int) -> void:
 		_set_feedback("基因组注射未执行 · code=%d · 需先装载草案并点在细胞上" % result)
 	else:
 		_set_feedback("%s 未执行 · code=%d" % [command_type, result])
+
+func show_tool_message(message: String) -> void:
+	## 工具的业务反馈（INSPECT 摘要 / ADHERE 选点等），由 Main 在命令执行后透传。
+	_set_feedback(message)

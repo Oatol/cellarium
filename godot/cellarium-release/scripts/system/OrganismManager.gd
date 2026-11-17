@@ -46,6 +46,11 @@ const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AR
 var _sim_tick: int = 0
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
+## 自主生命周期：发育程序完成后仍按能量阈值分裂/耗尽死亡，避免"建成即静止"。
+var _autonomous_division_tick: Dictionary = {}
+## 最近一次工具的业务反馈（ADHERE 选点、INSPECT 摘要等），由 HUD 读取显示。
+var last_tool_message: String = ""
+var adhesion_anchor: int = -1
 
 func _ready() -> void:
 	species_system.call("configure", speciation_distance, speciation_cooldown)
@@ -55,7 +60,12 @@ func _ready() -> void:
 @export var dish_radius: float = 512.0
 @export_range(0.0, 1.0, 0.01) var boundary_normal_damping: float = 0.5
 @export var cell_radius: float = CELL_SHAPE_SCRIPT.REST_RADIUS
-@export var base_metabolic_cost: float = 0.001
+@export var base_metabolic_cost: float = 0.006
+@export var autonomous_division_enabled: bool = true
+@export var autonomous_division_energy: float = 0.16
+@export var autonomous_division_cooldown: int = 300
+@export var autonomous_max_cells_per_organism: int = 8
+@export var autonomous_division_separation: float = 14.0
 @export var default_transfer_rate: float = 0.0
 @export var facultative_aerobic_efficiency: float = 2.0
 @export var anaerobic_toxicity_damage_per_second: float = 0.1
@@ -74,6 +84,12 @@ func _ready() -> void:
 @export var reproduce_parent_energy_fraction: float = 0.4
 @export var speciation_distance: float = 6.0
 @export var speciation_cooldown: int = 600
+
+func get_last_inspection() -> Dictionary:
+	return (last_inspection as Dictionary).duplicate(true)
+
+func get_last_tool_message() -> String:
+	return last_tool_message
 
 func advance_physics_tick(dt: float) -> void:
 	_sim_tick += 1
@@ -108,6 +124,7 @@ func advance_physics_tick(dt: float) -> void:
 	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt)
 	_apply_base_metabolism(dt)
 	_apply_environment_metabolism(dt)
+	_apply_autonomous_lifecycle()
 	perf_probe.call("end", "metabolism")
 	perf_probe.call("begin", "predation")
 	_apply_predation(dt)
@@ -274,6 +291,55 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 	for org_id in range(health.size() - 1, -1, -1):
 		if organisms.get("org_alive")[org_id] != 0 and health[org_id] <= 0.0:
 			_remove_organism_cells(org_id, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_TOXICITY"]))
+
+## 发育程序完成后，能量充足的成熟个体按确定性的 tick/index 角度自主分裂。
+## 不调用全局 RNG，不写除 CommandBus 外的命令通道；死亡仍由能量<=0 触发。
+func _apply_autonomous_lifecycle() -> void:
+	if not autonomous_division_enabled or autonomous_division_cooldown <= 0:
+		return
+	var state_map: Dictionary = ORGANISM_STORE_SCRIPT.get_script_constant_map()
+	var mature_state: int = int(state_map["STATE_MATURE"])
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	var org_alive: PackedByteArray = organisms.get("org_alive")
+	var org_state: PackedByteArray = organisms.get("org_state")
+	var cell_counts: PackedInt32Array = organisms.get("cell_count")
+	var candidates: Array[int] = []
+	for cell_index in range(energies.size()):
+		if alive[cell_index] == 0 or energies[cell_index] < autonomous_division_energy:
+			continue
+		var org_id: int = org_ids[cell_index]
+		if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or org_state[org_id] != mature_state:
+			continue
+		if int(cell_counts[org_id]) >= autonomous_max_cells_per_organism:
+			continue
+		# 首次具备分裂资格时记录起点并跳过本 tick：给发育完成一个 cooldown 宽限期，
+		# 否则成熟当 tick 就分裂，会打破"发育程序 9 指令 → 4 细胞 3 连接"的确定性快照。
+		if not _autonomous_division_tick.has(org_id):
+			_autonomous_division_tick[org_id] = _sim_tick
+			continue
+		var last_tick: int = int(_autonomous_division_tick[org_id])
+		if _sim_tick - last_tick < autonomous_division_cooldown:
+			continue
+		candidates.append(cell_index)
+	for cell_index in candidates:
+		if alive[cell_index] == 0 or energies[cell_index] < autonomous_division_energy:
+			continue
+		var org_id: int = org_ids[cell_index]
+		if int(cell_counts[org_id]) >= autonomous_max_cells_per_organism:
+			continue
+		var angle: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
+		var child_index: int = int(cells.call("divide_cell", cell_index, angle, autonomous_division_separation))
+		if child_index < 0:
+			continue
+		if not bool(organisms.call("add_developed_cell", org_id, child_index, autonomous_max_cells_per_organism)):
+			cells.call("remove_cell", child_index)
+			continue
+		org_state[org_id] = mature_state
+		organisms.set("org_state", org_state)
+		cell_counts = organisms.get("cell_count")
+		_autonomous_division_tick[org_id] = _sim_tick
 
 func _apply_predation(dt: float) -> void:
 	if dt <= 0.0:
@@ -448,40 +514,66 @@ func _apply_tool_command(command: Dictionary) -> int:
 		"INSPECT":
 			var index: int = _nearest_alive_cell(position, 24.0)
 			if index < 0:
+				last_tool_message = "细胞诊断：点击位置附近没有细胞"
 				return -1
+			var org_id: int = int(cells.get("cell_org_id")[index])
+			var sampled: PackedFloat32Array = PackedFloat32Array()
+			if environment_manager != null:
+				sampled = environment_manager.call("sample_fields", cells.call("get_position", index))
 			last_inspection = {
 				"cell_index": index,
-				"org_id": int(cells.get("cell_org_id")[index]),
+				"org_id": org_id,
+				"tick": _sim_tick,
 				"energy": float(cells.get("cell_energy")[index]),
 				"cell_type": int(cells.get("cell_type")[index]),
-				"position": cells.call("get_position", index)
+				"position": cells.call("get_position", index),
+				"radius": cell_radius,
+				"links": int(cells.get("cell_link_count")[index]),
+				"species_id": int(organisms.get("org_species_id")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_species_id").size()) else -1,
+				"age": int(organisms.get("org_age")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_age").size()) else -1,
+				"health": float(organisms.get("org_health")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_health").size()) else 0.0,
+				"field": sampled.duplicate()
 			}
+			last_tool_message = "细胞诊断：#%d 能量 %.4f · 类型 %d · 连接 %d" % [
+				index, float(last_inspection["energy"]), int(last_inspection["cell_type"]), int(last_inspection["links"])
+			]
 			tool_diagnostics["INSPECT"] = int(tool_diagnostics["INSPECT"]) + 1
 			return index
 		"ADHERE":
-			var a: int = _nearest_alive_cell(position, 24.0)
-			if a < 0:
+			var index: int = _nearest_alive_cell(position, 24.0)
+			if index < 0:
+				last_tool_message = "黏附连接：请点在细胞上"
 				return -1
-			var b: int = _nearest_alive_cell(position, 24.0)
-			if b < 0:
-				return -1
-			var candidates: Array[int] = []
-			var alive: PackedByteArray = cells.get("cell_alive")
-			var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
-			var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
-			for cell_index in range(alive.size()):
-				if cell_index == a or alive[cell_index] == 0:
-					continue
-				var dx: float = pos_x[cell_index] - pos_x[a]
-				var dy: float = pos_y[cell_index] - pos_y[a]
-				if dx * dx + dy * dy <= 24.0 * 24.0:
-					candidates.append(cell_index)
-			if candidates.is_empty():
-				return -1
-			b = candidates[0]
-			var linked: bool = bool(cells.call("link_cells", a, b, 8.0))
+			if adhesion_anchor < 0 or adhesion_anchor >= int(cells.call("size")) or int(cells.get("cell_alive")[adhesion_anchor]) == 0:
+				adhesion_anchor = index
+				last_tool_message = "黏附连接：已选第一枚 #%d，再点另一枚细胞" % index
+				return index
+			var a: int = adhesion_anchor
+			var b: int = index
+			if b == a:
+				var candidates: Array[int] = []
+				var alive: PackedByteArray = cells.get("cell_alive")
+				var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+				var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+				for cell_index in range(alive.size()):
+					if cell_index == a or alive[cell_index] == 0:
+						continue
+					var dx: float = pos_x[cell_index] - pos_x[a]
+					var dy: float = pos_y[cell_index] - pos_y[a]
+					if dx * dx + dy * dy <= 24.0 * 24.0:
+						candidates.append(cell_index)
+				if candidates.is_empty():
+					last_tool_message = "黏附连接：第一枚附近没有第二枚细胞"
+					return -1
+				b = candidates[0]
+			var rest_length: float = maxf(14.0, cell_radius * 2.0)
+			var linked: bool = bool(cells.call("link_cells", a, b, rest_length))
 			if not linked:
+				last_tool_message = "黏附连接失败：两细胞需同个体且未连接"
+				adhesion_anchor = -1
 				return -1
+			adhesion_anchor = -1
+			last_tool_message = "黏附连接成功：#%d ↔ #%d · 静息长度 %.1f" % [a, b, rest_length]
 			tool_diagnostics["ADHERE"] = int(tool_diagnostics["ADHERE"]) + 1
 			return b
 		"INJECT_GENOME":
@@ -515,11 +607,19 @@ func _apply_tool_command(command: Dictionary) -> int:
 			tool_diagnostics["INJECT_GENOME"] = int(tool_diagnostics["INJECT_GENOME"]) + 1
 			return target_org
 		"INJECT_SIGNAL":
-			if environment_manager == null or not environment_manager.has_method("add_signal_source"):
+			if environment_manager == null or not environment_manager.has_method("add_channel_source"):
 				return -1
-			environment_manager.call("add_signal_source", position, maxf(0.0, 0.5))
+			# 信号注射：可选场通道（默认 4=信号）与注入量；选择改变写入的通道，不是随机。
+			var channel: int = clampi(int(command.get("signal_channel", 4)), 0, 4)
+			var amount: float = clampf(float(command.get("signal_amount", 0.5)), 0.0, 4.0)
+			if amount <= 0.0:
+				return -1
+			if not bool(environment_manager.call("add_channel_source", position, channel, amount)):
+				return -1
+			energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_TOOL_TO_ENV, "E_external", "E_env", amount, "tool_inject_signal_ch%d" % channel)
+			last_tool_message = "信号注射：通道 %d 注入 %.2f @ (%.1f, %.1f)" % [channel, amount, position.x, position.y]
 			tool_diagnostics["INJECT_SIGNAL"] = int(tool_diagnostics["INJECT_SIGNAL"]) + 1
-			return 0
+			return channel
 		"INJECT_SUBSTANCE":
 			if environment_manager == null or environment_manager.get("field") == null:
 				return -1
@@ -535,12 +635,12 @@ func _apply_tool_command(command: Dictionary) -> int:
 			var index: int = _nearest_alive_cell(position, 24.0)
 			if index < 0:
 				return -1
+			# 颜色注射：写入用户选定的表现类型（0..17 官方细胞类型），不再轮转。
+			var chosen: int = clampi(int(command.get("color_type", 0)), 0, 17)
 			var types: PackedByteArray = cells.get("cell_type")
-			var next_type: int = int(types[index]) + 1
-			if next_type > 254:
-				next_type = 0
-			types[index] = next_type
+			types[index] = chosen
 			cells.set("cell_type", types)
+			last_tool_message = "颜色注射：#%d → 类型 %d" % [index, chosen]
 			tool_diagnostics["INJECT_COLOR"] = int(tool_diagnostics["INJECT_COLOR"]) + 1
 			return index
 		"SELECT":
