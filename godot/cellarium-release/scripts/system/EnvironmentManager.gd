@@ -18,6 +18,9 @@ var preset: Resource = null
 var dev_context: RefCounted = null
 var field: RefCounted = FIELD_SCRIPT.new() as RefCounted
 var field_diagnostics: Dictionary = {}
+## 阶段10：每 tick 一次批量采样，行为/代谢复用同一批结果，不再逐细胞触发小回读。
+var _sample_positions: Array[Vector2] = []
+var _field_samples: Array[PackedFloat32Array] = []
 
 func _ready() -> void:
 	bind_preset()
@@ -38,10 +41,18 @@ func bind_preset() -> void:
 func advance_field_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 	return bool(field.call("diffuse_tick", source_additions))
 
+func begin_field_sampling(positions: Array[Vector2]) -> void:
+	_sample_positions = positions.duplicate()
+	_field_samples = field.call("sample_cells", positions)
+
 func sample_fields(position: Vector2) -> PackedFloat32Array:
+	var index: int = _sample_positions.find(position)
+	if index >= 0 and index < _field_samples.size():
+		return _field_samples[index]
 	return field.call("sample", position)
 
 func get_field_diagnostics() -> Dictionary:
+	field_diagnostics = field.call("get_backend_diagnostics")
 	return field_diagnostics.duplicate()
 
 func consume_nutrient(position: Vector2, requested: float) -> float:

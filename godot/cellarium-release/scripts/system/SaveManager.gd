@@ -181,6 +181,7 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		if not restored_sources.is_empty():
 			field.set("_pending_sources", restored_sources)
 		field.call("_upload_active_buffer")
+		field.call("clear_runtime_caches")
 
 	var species_data: Dictionary = snapshot.get("species", {}) as Dictionary
 	if not species_data.is_empty():

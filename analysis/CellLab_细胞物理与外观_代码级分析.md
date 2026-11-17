@@ -440,3 +440,38 @@ wall_chord:    s + radius <= dish_radius + 1e-6  → invalid
 - 无需改代码：`CellContactChords.gd` 的「规范顺序 → 相交截断 → 遮挡剔除 → 排序 → 解析圆弧」流程在两种 APK 上都成立。
 - 配置约束：`channel_count` 保持可配置（Macro 101 / 官方 4）。
 - 待办边界：`p1/t1/v1` 的 `Cell.f` 常量索引穷尽检查；Macro 各 shader 变体与细胞类型的一一对应关系（不影响当前视觉层实现）。
+
+## 12. 阶段 10：完全 GPU 采样迁移（v0.9.0）
+
+### 12.1 原瓶颈
+
+`EnvironmentField.diffuse_tick()` 在 GPU dispatch 后调用 `_read_active_buffer()`，每 tick 把 `5 × R²` 个 float 从 GPU 回读到 CPU `channels`；生产 R=32 为 20 KB/tick，吞吐测试 R=64 为 80 KB/tick。而 CPU 侧真正需要的只是每个活细胞 5 个通道的采样值——被 `_build_behavior_environment()` 与 `_sample_environment_range()` 各取一次。
+
+### 12.2 新数据流
+
+```text
+GPU 场缓冲 active ──SAMPLE_SOURCE(dispatch 1)──> N×5 sample buffer ──小回读──> 行为/代谢
+                    ▲                                   │
+                    │                              consume() 聚合 Δ(index,channel)
+                    └──DELTA_SOURCE(下一 tick)───────────┘
+扩散：active ──COMPUTE_SOURCE──> inactive ──swap──> active（无回读）
+CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档时惰性同步
+```
+
+- `SAMPLE_SOURCE` 的格坐标公式与 CPU `get_grid_position()` 一致：`floor((p - (center - radius)) / (2r) * R)`，不引入双线性，避免与 `sample()` 语义分叉。实测 GPU/CPU 采样最大误差 `5.96e-8`。
+- `DELTA_SOURCE` 的输入由 CPU 按 `(格索引, 通道)` 聚合成唯一条目，因此不存在同一地址的写竞争；消费仍然先按当前场值 clamp，再写入，数值语义与旧 `consume()` 相同。
+- `consume()` 使用的采样值来自本 tick 的批量采样缓存，与旧实现读「上一次扩散后镜像」的时序等价。
+- `get_state_hash()` 与 `get_state_snapshot()` 现在先惰性同步 CPU 镜像，因此 hash 仍按全量场计算，不是按采样缓存计算；`SaveManager.restore()` 后清空缓存与未提交 Δ，避免跨局污染。
+
+### 12.3 回退与边界
+
+- CPU 后端走 `_sample_cpu()` / `_apply_pending_deltas_cpu()`，数值路径未变；SmokeTest 断言批量采样与逐点采样逐位相等。
+- 单批样本上限 4096 细胞、8192 条聚合 Δ；超过上限退回逐点采样，且不恢复全量回读。
+- `readback_bytes` 现在报告真实每 tick 回读量（4 细胞 = 80 B），`legacy_full_field_bytes` 保留旧全量方案作对照。
+- Cell Lab 对照：官方版同样不把全量场搬到 CPU 做逐细胞采样；其顶点缓冲由 GPU 端场/参数直接生成。本次迁移只改变宿主侧数据搬运，不改变 §5–§11 的场数学与共享弦视觉机制。
+
+## 13. 待确认边界（沿用）
+
+- Macro 版 `p1/t1/v1` 的 `Cell.f` 常量索引未穷尽。
+- Macro shader 变体与细胞类型一一对应关系未确认。
+- 连接静息长度 `< 2r` 的语义不一致（见 §10.7），未改物理/schema。

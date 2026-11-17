@@ -45,6 +45,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/ui/GameHUD.gd",
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
+	"res://tools/GpuSamplingTest.gd",
 	"res://scripts/ui/AnalysisPanel.gd",
 ]
 
@@ -103,6 +104,8 @@ func _initialize() -> void:
 	if not _check_respiration_rules():
 		failures += 1
 	if not _check_environment_field():
+		failures += 1
+	if not _check_gpu_sampling_api():
 		failures += 1
 	if not _check_full_tick_determinism():
 		failures += 1
@@ -903,6 +906,37 @@ func _check_environment_field() -> bool:
 		push_error("SmokeTest: circular mask or queued source injection failed")
 		return false
 	print("SmokeTest: OK five-channel CPU field / circular mask / source injection / nutrient accounting")
+	return true
+
+## 阶段10：批量采样 API 在 CPU 回退路径必须与逐点 sample 完全一致，诊断字段齐全。
+func _check_gpu_sampling_api() -> bool:
+	var script: Script = load("res://scripts/system/EnvironmentField.gd") as Script
+	var field: RefCounted = script.new() as RefCounted
+	var defaults: PackedFloat32Array = PackedFloat32Array([1.0, 273.0, 0.21, 0.3, 0.05])
+	field.call("configure", 16, Vector2.ZERO, 40.0, defaults, false)
+	var positions: Array[Vector2] = [Vector2.ZERO, Vector2(12.0, 3.0), Vector2(-20.0, 8.0)]
+	var batch: Array[PackedFloat32Array] = field.call("sample_cells", positions)
+	if batch.size() != positions.size():
+		push_error("SmokeTest: batch sampling lost positions")
+		return false
+	for index in range(positions.size()):
+		if batch[index] != field.call("sample", positions[index]):
+			push_error("SmokeTest: batch sampling must match point sampling on CPU fallback")
+			return false
+	var empty_positions: Array[Vector2] = []
+	var empty_batch: Array[PackedFloat32Array] = field.call("sample_cells", empty_positions)
+	if not empty_batch.is_empty():
+		push_error("SmokeTest: empty sampling request must return empty result")
+		return false
+	var info: Dictionary = field.call("get_backend_diagnostics")
+	for key in ["gpu_sample_count", "gpu_sample_cells", "gpu_delta_count", "gpu_full_readback_count", "legacy_full_field_bytes", "gpu_sampling_active"]:
+		if not info.has(key):
+			push_error("SmokeTest: stage10 diagnostics lost key " + str(key))
+			return false
+	if int(info.get("gpu_sampling_active", 1)) != 0:
+		push_error("SmokeTest: CPU fallback must not claim GPU sampling")
+		return false
+	print("SmokeTest: OK batch field sampling API / CPU fallback parity")
 	return true
 
 func _check_respiration_rules() -> bool:

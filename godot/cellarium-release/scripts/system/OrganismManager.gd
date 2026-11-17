@@ -78,6 +78,9 @@ func _ready() -> void:
 func advance_physics_tick(dt: float) -> void:
 	_sim_tick += 1
 	perf_probe.call("begin_tick")
+	# 阶段10：一个 tick 两批（物理前/后），每批一次 GPU 采样 dispatch + 小回读。
+	if environment_manager != null:
+		environment_manager.call("begin_field_sampling", _field_sample_positions())
 	# LOD 神经降频（§2.6）：高倍速下按 tick_core 间隔更新神经，中间 tick 复用上次 intents。
 	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
 	perf_probe.call("begin", "behavior")
@@ -97,6 +100,8 @@ func advance_physics_tick(dt: float) -> void:
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping)
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
+	if environment_manager != null:
+		environment_manager.call("begin_field_sampling", _field_sample_positions())
 	var rates: PackedFloat32Array = PackedFloat32Array()
 	rates.resize(int(cells.call("size")))
 	rates.fill(default_transfer_rate)
@@ -123,6 +128,14 @@ func _species_populations() -> Dictionary:
 		var species_id: int = int(species_ids[org_id])
 		populations[species_id] = int(populations.get(species_id, 0)) + 1
 	return populations
+
+func _field_sample_positions() -> Array[Vector2]:
+	var positions: Array[Vector2] = []
+	var alive: PackedByteArray = cells.get("cell_alive")
+	for cell_index in range(int(cells.call("size"))):
+		if alive[cell_index] != 0:
+			positions.append(cells.call("get_position", cell_index))
+	return positions
 
 func _build_behavior_environment() -> Dictionary:
 	## 一次 tick 只建一次空间哈希；neighbors 用 Array 索引替代 Dictionary，减少热路径哈希开销。

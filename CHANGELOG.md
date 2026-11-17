@@ -4,6 +4,32 @@
 
 ---
 
+## 0.9.0 — 2026-11-17
+
+**类型**：阶段 10 — 完全 GPU 采样迁移（架构变更）
+**目标**：扩散结果驻留 GPU，取消每 tick 全量场回读；保留 CPU 回退与存档/快照语义
+
+### 实现
+
+- `EnvironmentField.gd`：
+  - 新增两个 compute pass：`SAMPLE_SOURCE` 按细胞位置做与 CPU `_cell_index()` 等价的最近格采样，一次 dispatch 写出 N×5 个 float；`DELTA_SOURCE` 把消费量 scatter 回场缓冲。
+  - `diffuse_tick()` 不再调用 `_read_active_buffer()`；只在显式 `set_value()` / `paint_terrain()` 编辑、快照、hash、存档和诊断时惰性回读。
+  - `consume()` 在 GPU 后端改为「查采样缓存 → 聚合 (格,通道) 增量 → 下一 tick GPU delta pass」，CPU 后端保持原路径。
+  - 新增 `sample_cells(positions)` 批量 API 与 `clear_runtime_caches()`；`SaveManager.restore()` 恢复后清理采样缓存和未提交增量。
+  - 诊断新增 `gpu_sample_count / gpu_sample_cells / gpu_delta_count / gpu_full_readback_count / legacy_full_field_bytes / gpu_sampling_active`；`readback_bytes` 改为每 tick 实际采样回读字节。
+- `EnvironmentManager.gd`：新增 `begin_field_sampling(positions)`，缓存本批结果；`sample_fields()` 优先命中缓存。
+- `OrganismManager.gd`：每 tick 在物理前、物理后各做一次批量采样，替代原先每细胞两次逐点采样。
+- 新增 `tools/GpuSamplingTest.gd`；SmokeTest 登记该脚本并加入批量采样 API / CPU 回退一致性断言。
+
+### 验证
+
+- 无头 CPU 回退：`SCRIPTS=44 FAILURES=0`、退出码 0。
+- 窗口 Vulkan（RTX 3050 Laptop）：`SCRIPTS=44 FAILURES=0`；`GpuSamplingTest PASS`，采样误差 `5.96e-8`，消费后全场误差 `6.10e-5`，每 tick 回读 **80 B**（旧方案 20 KB @ R=32，80 KB @ R=64）。
+- `GpuFieldParityTest` 通过，最大误差 `3.05e-5`（温度通道，与历史基准一致）；`GpuThroughputTest` GPU `1371 µs/tick`、CPU `68.2 ms/tick`，GPU 回读 0。
+- 上限：单批最多 4096 个采样细胞、8192 条聚合增量；超过则回退逐点采样，仍不增加全量场回读。
+
+---
+
 ## 0.8.14 — 2026-11-17
 
 **类型**：细胞未接触先变形的视觉修复（纯视觉层）
