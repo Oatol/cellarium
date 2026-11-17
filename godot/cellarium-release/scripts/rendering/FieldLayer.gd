@@ -6,8 +6,8 @@ extends Node2D
 @export var environment_manager_path: NodePath = ^"../../Simulation/EnvironmentManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var channel_index: int = 3
-@export var visible_by_default: bool = false
-@export var max_alpha: float = 0.42
+@export var visible_by_default: bool = true
+@export var max_alpha: float = 0.55
 
 var environment_manager: Node = null
 var tick_core: Node = null
@@ -73,6 +73,7 @@ func _draw() -> void:
 		if value > max_value:
 			max_value = value
 	max_value = maxf(max_value, 0.001)
+	var lit_cells: int = 0
 	for row in range(resolution):
 		for column in range(resolution):
 			var index: int = row * resolution + column
@@ -88,3 +89,7 @@ func _draw() -> void:
 			var strength: float = clampf(value / max_value, 0.0, 1.0)
 			draw_rect(Rect2(world_cell, Vector2(cell_size + 0.5, cell_size + 0.5)),
 				Color(tint.r, tint.g, tint.b, strength * max_alpha), true)
+			lit_cells += 1
+	# 皿内边界描一条暖色细环，让「照明覆盖范围」一眼可辨（纯视图派生）。
+	if lit_cells > 0:
+		draw_arc(center, radius, 0.0, TAU, 128, Color(tint.r, tint.g, tint.b, 0.55), 2.0, true)

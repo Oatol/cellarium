@@ -544,3 +544,11 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - **编辑器合并**：唯一面板 `CellEditorPanel`（`scenes/ui/DevEditorPanel.tscn` 实例，脚本 `DevEditorPanel.gd`），原 `CellEditorPanel.gd` 删除。三栏 + 时间轴参考 Cell Lab：左栏 `GENE SLOTS 40`（前 8 槽 = GNP1 八性状，后 32 槽只读占位）、`DEV` 指令树；中栏参数与八性状；右栏 Cell Lab 专有字段只读证据；底部 `DEV TIMELINE`。`dev_program` 仍是唯一发育真相源；40 Gene 槽、Child 1–4、信号 lane、95 算子仍不写入 GNP1。
 - **行为兼容**：合并编辑器保留旧 API 与 `(value, index, key)` 操作数写入签名；呼吸方式选择吸收进同一工具条；Apply 仍经 `draft_applied` → HUD → CommandBus → 皿内 SPAWN。
 - **验收**：发布与 D 盘工程 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。
+
+## 19. v0.12.1 — 光场可见性根因与修复（2026-11-17）
+
+- **现象**：用户仍反馈看不到光场，希望像 Cell Lab 一样直接显示光照范围。
+- **根因**：`GameHUD._register_view_layers()` 用相对路径 `../DishView/FieldLayer`；HUD 位于 `UI/HUD`，实际解析到 `UI/DishView`，而 `DishView` 是主节点直接子节点（`/root/Main/DishView`）。`_field_layer` 一直为 null，顶栏「光场」toggle 的 `set_enabled()` 从未作用到图层；叠加 `visible_by_default=false`，图层始终不可见。顶栏开关初始化又用 `get_node("@field")`（必然 null）取初值，所以按钮也恒为关闭态，进一步误导。
+- **修复**：路径改为 `../../DishView/...`；光场默认启用且 toggle 初值读 `FieldLayer.is_enabled()`；光场 alpha 提至 0.55，并在照亮格子的外沿按场半径画暖色细环，明确「照明覆盖范围」。
+- **边界**：FieldLayer 仍只读 `EnvironmentManager.field` 通道 3；不新增物理场、不写场数据、不改 tick 与确定性 hash。皿内光照默认值 0.6 为均匀填充，因此可见范围覆盖整个皿内区域，这与场数据一致，不伪造聚光。
+- **验收**：发布与 D 盘工程 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。

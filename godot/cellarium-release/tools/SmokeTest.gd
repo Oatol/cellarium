@@ -3181,18 +3181,36 @@ func _check_ui_chrome_and_filters() -> bool:
 		push_error("SmokeTest: report unlock button did not clear selection")
 		instance.queue_free(); return false
 
-	# (6) 光场层：存在、默认关闭、可开、通道=3、有 set_channel。
+	# (6) 光场层：默认可见、通道=3 有实际光照数据、顶栏开关可关可开。
 	var field_layer: Node = instance.get_node_or_null("DishView/FieldLayer")
 	if field_layer == null or not field_layer.has_method("set_enabled") or not field_layer.has_method("set_channel"):
 		push_error("SmokeTest: FieldLayer view API missing")
 		instance.queue_free(); return false
-	if bool(field_layer.call("is_enabled")):
-		push_error("SmokeTest: FieldLayer should default off")
+	if not bool(field_layer.call("is_enabled")) or not bool(field_layer.visible):
+		push_error("SmokeTest: FieldLayer should be visible by default")
 		instance.queue_free(); return false
-	field_layer.call("set_enabled", true)
-	field_layer.call("set_channel", 3)
+	if hud.get("_field_layer") == null:
+		push_error("SmokeTest: HUD field layer path is wrong")
+		instance.queue_free(); return false
+	var light_values: PackedFloat32Array = ((instance.get_node("Simulation/EnvironmentManager").get("field") as RefCounted).get("channels") as Array)[3] as PackedFloat32Array
+	var lit_cells: int = 0
+	for value in light_values:
+		if value > 0.001:
+			lit_cells += 1
+	if lit_cells == 0:
+		push_error("SmokeTest: light channel has no visible coverage")
+		instance.queue_free(); return false
+	var field_toggle: Button = toggles.get("@field", null) as Button
+	if field_toggle == null or not field_toggle.is_pressed():
+		push_error("SmokeTest: field toggle not initialized pressed")
+		instance.queue_free(); return false
+	field_toggle.set_pressed(false)
+	if bool(field_layer.call("is_enabled")):
+		push_error("SmokeTest: field toggle did not hide light field")
+		instance.queue_free(); return false
+	field_toggle.set_pressed(true)
 	if not bool(field_layer.call("is_enabled")) or int(field_layer.get("channel_index")) != 3:
-		push_error("SmokeTest: FieldLayer enable/channel failed")
+		push_error("SmokeTest: field toggle did not restore light field")
 		instance.queue_free(); return false
 
 	# (7) 镜头滤镜：切换镜头不改 camera.zoom；各镜头滤镜参数不同。

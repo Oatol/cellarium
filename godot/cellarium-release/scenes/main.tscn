@@ -30,7 +30,7 @@ script = ExtResource("6_dish")
 [node name="FieldLayer" type="Node2D" parent="DishView" unique_id=1725509909]
 script = ExtResource("18_fieldlayer")
 channel_index = 3
-visible_by_default = false
+visible_by_default = true
 
 [node name="SelectionLayer" type="Node2D" parent="DishView"]
 script = ExtResource("19_selectionlayer")

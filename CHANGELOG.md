@@ -4,6 +4,20 @@
 
 ---
 
+## 0.12.1 — 2026-11-17
+
+**类型**：光场可视化修复（纯视图）
+**触发**：用户再次反馈「光场看不到，希望像 Cell Lab 一样直接看到光照范围」
+
+- **根因**：`GameHUD._register_view_layers()` 用 `../DishView/...` 找光场层；HUD 位于 `UI/HUD`，该路径实际解析到 `UI/DishView`，而 `DishView` 是主节点直接子节点，正确路径是 `../../DishView/...`。因此 `_field_layer` 一直为 null，顶栏「光场」开关从未作用到图层；同时图层默认 `visible_by_default=false`，双重写成不可见。
+- `GameHUD`：修正 FieldLayer / SelectionLayer 路径；光场层默认启用；顶栏「光场」toggle 初始值改为读 `FieldLayer.is_enabled()`，不再因 `get_node("@field")` 为 null 而恒显示关闭。
+- `FieldLayer.gd`：`visible_by_default=true`、`max_alpha=0.55`；在照亮格子外沿培养皿半径画一条暖色细环，让照明覆盖范围一眼可辨。只读场通道 3，不写模拟状态、不改 tick / hash。
+- `main.tscn`：`FieldLayer.visible_by_default = true`。
+- `SmokeTest.gd`：断言光场默认可见、HUD 层引用非空、光照通道确有正值、顶栏开关可关可开；D 盘同步保留 MCP autoload 与场景 ID。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=47 FAILURES=0 EXITCODE=0`。
+
+---
+
 ## 0.12.0 — 2026-11-17
 
 **类型**：编辑器合并 + 诊断解锁 / 关闭按钮修复（表现层 + 纯视图命令，不改模拟与确定性 hash）

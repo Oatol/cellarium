@@ -104,10 +104,11 @@ func _process(_delta: float) -> void:
 
 ## 光场/选区可视化层引用；field 层默认关，用户可经顶栏开关打开。
 func _register_view_layers() -> void:
-	_field_layer = get_node_or_null("../DishView/FieldLayer")
-	_selection_layer = get_node_or_null("../DishView/SelectionLayer")
+	_field_layer = get_node_or_null("../../DishView/FieldLayer")
+	_selection_layer = get_node_or_null("../../DishView/SelectionLayer")
+	# 光场默认可见：像 Cell Lab 一样开机就能看到照明覆盖范围，顶栏「光场」可关。
 	if _field_layer != null and _field_layer.has_method("set_enabled"):
-		_field_layer.call("set_enabled", false)
+		_field_layer.call("set_enabled", true)
 
 ## 面板装饰系统：给每个面板加可拖动标题栏 + 图钉（可选）+ 关闭按钮。
 ## 面板自身 _ready 已缓存其子节点引用，这里重挂内容节点不会影响它们。
@@ -161,7 +162,10 @@ func _build_panel_toggles() -> void:
 		button.toggled.connect(Callable(self, "_on_panel_toggle").bind(button))
 		var target_path: String = str(definition[1])
 		var target: Node = get_node_or_null(target_path)
-		button.set_pressed_no_signal(target != null and target.visible)
+		var initial_pressed: bool = target != null and target.visible
+		if target_path == "@field" and _field_layer != null and _field_layer.has_method("is_enabled"):
+			initial_pressed = bool(_field_layer.call("is_enabled"))
+		button.set_pressed_no_signal(initial_pressed)
 		_panel_toggles[target_path] = button
 		row.add_child(button)
 
