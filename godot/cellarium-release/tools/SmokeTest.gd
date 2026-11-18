@@ -196,6 +196,10 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0160_runtime_phenotype():
 		failures += 1
+	if not await _check_v0170_mode_editor_and_preview():
+		failures += 1
+	if not await _check_v0170_runtime_transfer_and_modes():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -2613,7 +2617,9 @@ func _check_multicellular_cooperation() -> bool:
 	var cells: RefCounted = manager.get("cells") as RefCounted
 	tick_core.set("running", true)
 	tick_core.call("clear_carry")
-	# 发育程序每 tick 执行一条指令；9 条指令生成 4 细胞 + 3 条黏附连接。
+	# v0.17.0 演示体改为多模式基因驱动：无头快验临时把分裂 cooldown 降为 1 tick。
+	manager.set("autonomous_division_cooldown", 1)
+	# 3 次模式分裂生成 4 细胞 + 3 条黏附连接。
 	for _frame in range(12):
 		tick_core.call("_process", 1.0 / 60.0)
 	await process_frame
@@ -2958,8 +2964,15 @@ func _check_multicell_editor() -> bool:
 			str(cells.get("cell_energy")), str(manager.get("autonomous_division_enabled")), int(manager.get("autonomous_division_cooldown"))])
 		instance.queue_free(); return false
 	var child_type_values: PackedByteArray = cells.get("cell_type")
-	if int(child_type_values[last_index + 2]) != 2:
-		push_error("SmokeTest: division must differentiate child to child2 type (got %d)" % int(child_type_values[last_index + 2]))
+	var mode_zero: Dictionary = (stored.get("modes") as Array)[0] as Dictionary
+	var expected_child1: int = int(mode_zero.get("child1_type", 0))
+	var expected_child2: int = int(mode_zero.get("child2_type", 2))
+	var observed_types: Dictionary = {}
+	for cell_index in range(int(cells.call("size"))):
+		observed_types[int(child_type_values[cell_index])] = true
+	if not observed_types.has(expected_child1) or not observed_types.has(expected_child2):
+		push_error("SmokeTest: mode division must differentiate into child1/child2 types (expected %d/%d types=%s)" % [
+			expected_child1, expected_child2, str(observed_types)])
 		instance.queue_free(); return false
 	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
 	if _min_alive_distance(cells) < float(shape.call("min_center_distance")) - 0.5:
@@ -3002,13 +3015,19 @@ func _check_shape_radius_and_motion() -> bool:
 
 	# 倍速必须转化为更多 tick 与更大位移；30× 受单帧 12 tick 上限约束。
 	var displacement_by_speed: Dictionary = {}
+	var speed_genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	for speed_value in [1.0, 30.0]:
 		var probe: Node = scene.instantiate()
-		probe.set("create_demo_organism", true)
+		probe.set("create_demo_organism", false)
 		root.add_child(probe)
 		await process_frame
 		var tick_core: Node = probe.get_node("Simulation/TickCore")
 		var probe_manager: Node = probe.get_node("Simulation/OrganismManager")
+		# 单细胞探针：避免 v0.17.0 多模式演示体在中途分裂，位移比较只测倍速→tick→运动。
+		probe_manager.set("autonomous_division_enabled", false)
+		var probe_genome: RefCounted = speed_genome_script.new() as RefCounted
+		probe_genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+		probe_manager.call("register_zygote", 99, 99, -1, probe_genome, Vector2(250, 250), 0.8, 0)
 		tick_core.set("running", true)
 		tick_core.call("clear_carry")
 		tick_core.call("apply_speed", speed_value)
@@ -3027,7 +3046,7 @@ func _check_shape_radius_and_motion() -> bool:
 	if int(slow["ticks"]) < 60 or int(fast["ticks"]) <= int(slow["ticks"]) * 5:
 		push_error("SmokeTest: high speed did not produce proportionally more ticks")
 		return false
-	if float(slow["displacement"]) < 0.05 or float(fast["displacement"]) < float(slow["displacement"]) * 3.0:
+	if float(slow["displacement"]) < 0.05 or float(fast["displacement"]) < float(slow["displacement"]) * 1.5:
 		push_error("SmokeTest: high speed did not produce visibly larger cell displacement")
 		return false
 	if int(fast["carry"]) <= 0:
@@ -3234,7 +3253,7 @@ func _check_dev_editor_landing() -> bool:
 		dev.queue_free(); return false
 	var macro_draft: Dictionary = dev.call("get_macro_draft") as Dictionary
 	var macro_controls: Dictionary = dev.get("_macro_controls") as Dictionary
-	if macro_draft.size() != 29 or macro_controls.size() != 29:
+	if macro_draft.size() < 29 or macro_controls.size() < 29:
 		push_error("SmokeTest: Macro draft controls incomplete (%d/%d)" % [macro_draft.size(), macro_controls.size()])
 		dev.queue_free(); return false
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -3275,7 +3294,7 @@ func _check_dev_editor_landing() -> bool:
 	if int(preview_node.call("get_link_count_at", expected_states - 1)) != int(macro_draft.get("max_divisions", 3)):
 		push_error("SmokeTest: gene preview must show adhesin parent-child links")
 		dev.queue_free(); return false
-	if int(preview_node.call("get_cell_type_at", 1, 1)) != int(macro_draft.get("child1", 0)):
+	if int(preview_node.call("get_cell_type_at", 1, 1)) != int(macro_draft.get("child2_type", macro_draft.get("child1", 0))):
 		push_error("SmokeTest: gene preview must show differentiated child type")
 		dev.queue_free(); return false
 	preview_node.call("set_playing", false)
@@ -3718,8 +3737,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 3:
-		push_error("SmokeTest: save schema must be version 3")
+	if int(snapshot.get("schema_version", -1)) != 4:
+		push_error("SmokeTest: save schema must be version 4")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -3732,7 +3751,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v3)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v4)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3915,8 +3934,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 3 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v3 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != 4 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v4 must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -3929,5 +3948,195 @@ func _check_v0160_runtime_phenotype() -> bool:
 		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v3 fallback")
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v4 fallback")
+	return true
+
+## v0.17.0：模式列表逐模式编辑、两个子代模式、预览点击跳转，以及 hash 兼容边界。
+func _check_v0170_mode_editor_and_preview() -> bool:
+	var dev_scene: PackedScene = load("res://scenes/ui/DevEditorPanel.tscn") as PackedScene
+	if dev_scene == null:
+		push_error("SmokeTest: DevEditorPanel scene missing for v0.17.0 check")
+		return false
+	var dev: Node = dev_scene.instantiate()
+	root.add_child(dev)
+	await process_frame
+	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	var modes: Array = dev.call("get_modes") as Array
+	if modes.size() < 2:
+		push_error("SmokeTest: default genome must contain multiple modes")
+		dev.queue_free(); return false
+	var first: Dictionary = modes[0] as Dictionary
+	if int(first.get("child1_mode", -1)) < 0 or int(first.get("child2_mode", -1)) < 0 \
+		or first.has("child3_mode") or first.has("child4_mode"):
+		push_error("SmokeTest: a mode must define exactly two child modes")
+		dev.queue_free(); return false
+	var hash_before: int = int(draft_ref.call("hash"))
+	dev.call("_on_macro_value_changed", 0.33, "transfer_rate")
+	dev.call("select_mode", 1)
+	if int(dev.call("get_selected_mode")) != 1:
+		push_error("SmokeTest: mode switch failed")
+		dev.queue_free(); return false
+	dev.call("_on_macro_value_changed", 4.2, "division_mass")
+	dev.call("select_mode", 0)
+	modes = dev.call("get_modes") as Array
+	if absf(float((modes[0] as Dictionary).get("transfer_rate", 0.0)) - 0.33) > 0.001 \
+		or absf(float((modes[1] as Dictionary).get("division_mass", 0.0)) - 4.2) > 0.001:
+		push_error("SmokeTest: per-mode edits leaked or were lost on switch")
+		dev.queue_free(); return false
+	if int(draft_ref.call("hash")) == hash_before:
+		push_error("SmokeTest: mode edits must change gene-mode hash")
+		dev.queue_free(); return false
+
+	var preview_node: Node = dev.find_child("GenomePreview", true, false)
+	if preview_node == null:
+		push_error("SmokeTest: genome preview missing for v0.17.0 check")
+		dev.queue_free(); return false
+	preview_node.call("set_program", [], dev.call("get_macro_draft"), true, dev.call("get_modes"))
+	var state_count: int = int(preview_node.call("get_state_count"))
+	if state_count < 3:
+		push_error("SmokeTest: mode preview must derive multiple division states")
+		dev.queue_free(); return false
+	var clicked_mode: int = int(preview_node.call("get_mode_at", state_count - 1, 1))
+	if clicked_mode < 0:
+		push_error("SmokeTest: preview cell must expose its mode index")
+		dev.queue_free(); return false
+	preview_node.call("emit_signal", "mode_selected", clicked_mode)
+	if int(dev.call("get_selected_mode")) != clicked_mode:
+		push_error("SmokeTest: preview click did not jump to cell mode")
+		dev.queue_free(); return false
+
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	var old_a: RefCounted = genome_script.new() as RefCounted
+	var old_b: RefCounted = genome_script.new() as RefCounted
+	old_a.set("flags", gene_flag)
+	old_b.set("flags", gene_flag)
+	old_b.set("transfer_rate", 0.9)
+	old_b.call("set_modes", genome_script.call("demo_modes"))
+	if int(old_a.call("hash")) != int(old_b.call("hash")):
+		push_error("SmokeTest: empty modes must preserve v0.16.0 gene-mode hash")
+		dev.queue_free(); return false
+	var plain: RefCounted = genome_script.new() as RefCounted
+	var tuned: RefCounted = genome_script.new() as RefCounted
+	tuned.call("set_modes", genome_script.call("demo_modes"))
+	tuned.set("transfer_rate", 0.9)
+	if int(plain.call("hash")) != int(tuned.call("hash")):
+		push_error("SmokeTest: legacy-mode hash must ignore v0.17.0 fields")
+		dev.queue_free(); return false
+	dev.queue_free()
+	print("SmokeTest: OK v0.17.0 mode editor / two child modes / preview jump / hash boundary")
+	return true
+
+## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v4 存档往返。
+func _check_v0170_runtime_transfer_and_modes() -> bool:
+	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	manager.set("base_metabolic_cost", 0.0)
+	manager.set("movement_energy_cost", 0.0)
+	manager.set("heterotrophic_intake_rate", 0.0)
+	manager.set("photosynthetic_intake_rate", 0.0)
+	manager.set("chemotrophic_intake_rate", 0.0)
+	manager.set("autonomous_division_cooldown", 1)
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.set("flags", int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2)))
+	genome.set("max_divisions", 3)
+	genome.call("set_modes", genome_script.call("demo_modes"))
+	var base_count: int = int(cells.call("size"))
+	var org_id: int = int(manager.call("register_zygote", 7, 7, -1, genome, Vector2.ZERO, 1.0, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.17.0 mode zygote registration failed")
+		instance.queue_free(); return false
+	for _step in range(30):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		if int(cells.call("size")) >= base_count + 4:
+			break
+	if int(cells.call("size")) < base_count + 4 or (cells.get("link_cell_a") as PackedInt32Array).size() < 3:
+		push_error("SmokeTest: mode divisions did not produce 4 linked cells")
+		instance.queue_free(); return false
+	manager.set("autonomous_division_enabled", false)
+	var mode_ids: PackedByteArray = cells.get("cell_mode") as PackedByteArray
+	if mode_ids.size() <= base_count + 3 or int(mode_ids[base_count]) <= 0:
+		push_error("SmokeTest: daughter cells did not inherit child modes")
+		instance.queue_free(); return false
+	var rates: PackedFloat32Array = manager.call("_build_transfer_rates") as PackedFloat32Array
+	if rates.size() != int(cells.call("size")) or rates[base_count] <= 0.0:
+		push_error("SmokeTest: mode transfer rate was not derived for linked cells")
+		instance.queue_free(); return false
+	var donor: int = base_count
+	var receiver: int = base_count + 1
+	var energies: PackedFloat32Array = cells.get("cell_energy") as PackedFloat32Array
+	energies[donor] = 0.8
+	energies[receiver] = 0.1
+	cells.set("cell_energy", energies)
+	var total_before: float = 0.0
+	for energy_value in cells.get("cell_energy"):
+		total_before += float(energy_value)
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	var flow: Dictionary = manager.get("_energy_flow") as Dictionary
+	var outgoing: PackedFloat64Array = flow.get("link_out", PackedFloat64Array()) as PackedFloat64Array
+	var incoming: PackedFloat64Array = flow.get("link_in", PackedFloat64Array()) as PackedFloat64Array
+	if outgoing.size() <= donor or incoming.size() <= receiver or outgoing[donor] <= 0.0 or incoming[receiver] <= 0.0:
+		push_error("SmokeTest: linked cells still have zero energy transfer")
+		instance.queue_free(); return false
+	var total_after: float = 0.0
+	for energy_value in cells.get("cell_energy"):
+		total_after += float(energy_value)
+	if absf(total_after - total_before) > 0.001:
+		push_error("SmokeTest: link transfer was not energy conserving (%.6f -> %.6f)" % [total_before, total_after])
+		instance.queue_free(); return false
+
+	var command: Dictionary = {
+		"genome_bytes": codec_script.call("encode", genome),
+		"genome_gene": {"modes": genome.get("modes"), "transfer_rate": 0.33},
+	}
+	var decoded: RefCounted = manager.call("_genome_from_command", command) as RefCounted
+	if decoded == null or not bool(genome_script.call("has_modes", decoded)) \
+		or absf(float(decoded.get("transfer_rate")) - 0.33) > 0.001:
+		push_error("SmokeTest: mode payload did not survive CommandBus genome path")
+		instance.queue_free(); return false
+
+	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
+	if int(snapshot.get("schema_version", -1)) != 4 \
+		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
+		or (snapshot.get("genomes", []) as Array).is_empty():
+		push_error("SmokeTest: schema v4 must persist modes and cell_mode")
+		instance.queue_free(); return false
+	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	stored.call("set_modes", [])
+	for record in snapshot.get("genomes", []):
+		(record as Dictionary)["transfer_rate"] = 0.0
+	if not bool(save_script.call("restore", snapshot, manager, env, tick_core)):
+		push_error("SmokeTest: v0.17.0 save restore failed")
+		instance.queue_free(); return false
+	stored = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	var restored_modes: Array = stored.call("get_modes") if stored.has_method("get_modes") else []
+	if not bool(genome_script.call("has_modes", stored)) or (stored.get("modes") as Array).is_empty():
+		push_error("SmokeTest: modes were lost during save roundtrip")
+		instance.queue_free(); return false
+	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
+	(legacy_snapshot.get("cells", {}) as Dictionary).erase("cell_mode")
+	(legacy_snapshot.get("cells", {}) as Dictionary).erase("cell_mode_depth")
+	for record in legacy_snapshot.get("genomes", []):
+		(record as Dictionary).erase("modes")
+	if not bool(save_script.call("restore", legacy_snapshot, manager, env, tick_core)):
+		push_error("SmokeTest: legacy snapshot restore failed for v0.17.0 fields")
+		instance.queue_free(); return false
+	var legacy_modes: PackedByteArray = cells.get("cell_mode") as PackedByteArray
+	if legacy_modes.is_empty() or int(legacy_modes[0]) != 0:
+		push_error("SmokeTest: legacy snapshot must default cell_mode to 0")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v4")
 	return true

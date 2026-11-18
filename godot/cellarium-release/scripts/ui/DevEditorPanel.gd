@@ -8,6 +8,8 @@ extends Control
 ## 本面板不碰模拟状态、不改 dt；v0.14.1 起「生成黏附素」写入 draft.flags bit0，
 ## v0.15.0 起基因模式写入 bit1，v0.16.0 起营养优先级/骨架强度/细胞大小/连接数/RGB 也写入 draft，
 ## 两者都会改变该基因组的 hash；其余 Macro 字段（split_mass/ratio/角度等）仍只展示。
+## v0.17.0：改为逐模式编辑——一个基因组含多个模式槽，每个模式独立保存类型、行为、两子代与
+## 特殊控制；发育预览中的细胞可点击跳到对应模式。GNP1 仍冻结，modes 只走 payload / 存档。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
@@ -27,12 +29,15 @@ const RESPIRATION: Array[String] = ["兼性", "好氧", "厌氧"]
 ## 不进入 dev_program。v0.14.1 例外：make_glue 映射到已存在的 Genome.flags bit0。
 ## 控件提示保留静态反编译字段来源。
 const MACRO_FIELD_KEYS: Array[String] = [
-	"cell_type", "make_glue", "child1", "child2", "child3", "child4",
-	"child1_angle", "child2_angle", "child3_angle", "child4_angle",
-	"split_mass", "invert_split_mass", "nutrition_priority",
+	"cell_type", "make_glue", "stay_alive", "initial",
+	"child1_type", "child2_type", "child1_mode", "child2_mode",
+	"child1_glue", "child2_glue", "child1_mirror", "child2_mirror",
+	"child1_angle", "child2_angle", "division_mass", "invert_split_mass",
+	"split_ratio", "mode_max_divisions", "nutrition_priority", "transfer_rate",
 	"split_angle", "split_angle2", "ratio", "ratio2",
 	"stiffness", "cell_size", "max_connections", "min_connections",
-	"stay_alive", "initial", "color_r", "color_g", "color_b",
+	"adhesion_strength", "adhesion_length", "adhesion_stretch",
+	"color_r", "color_g", "color_b",
 ]
 
 @export var content_path: NodePath = ^"Panel/Content"
@@ -63,6 +68,12 @@ var _gene_slot_labels: Array[Label] = []
 var _macro_draft: Dictionary = {}
 var _macro_controls: Dictionary = {}
 var _genome_preview: Node = null
+## v0.17.0：模式槽真相源。_macro_draft 只是当前选中模式的可编辑镜像。
+var _modes: Array[Dictionary] = []
+var _selected_mode: int = 0
+var _mode_option: OptionButton = null
+var _mode_name_edit: LineEdit = null
+var _refreshing_modes: bool = false
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
@@ -100,27 +111,26 @@ func _reset_draft() -> void:
 	draft.set("loci", PackedByteArray())
 	draft.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
 	draft.call("set_development_program", default_dev_program())
-	draft.set("division_mass", 1.0)
-	draft.set("split_ratio", 0.5)
-	draft.set("max_divisions", 3)
-	draft.set("child_types", PackedByteArray([0, 2, 4, 10]))
-	draft.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+	# v0.17.0：默认 5 模式链接体；顶层字段仍保留，供 v0.14–v0.16 旧存档/命令兼容。
+	_modes = GENOME_SCRIPT.call("demo_modes") as Array[Dictionary]
+	_selected_mode = 0
 	_macro_draft = default_macro_draft()
 	_sync_macro_to_draft()
 	_selected_instruction = 0
 
 static func default_macro_draft() -> Dictionary:
-	return {
-		"cell_type": 0, "make_glue": true,
-		"child1": 0, "child2": 2, "child3": 4, "child4": 10,
-		"child1_angle": 0.0, "child2_angle": 0.25, "child3_angle": 0.5, "child4_angle": 0.75,
-		"division_mass": 1.0, "split_ratio": 0.5, "max_divisions": 3,
-		"split_mass": 0.5, "invert_split_mass": false, "nutrition_priority": 0.5,
-		"split_angle": 0.0, "split_angle2": 0.25, "ratio": 0.5, "ratio2": 0.5,
-		"stiffness": 0.5, "cell_size": 1.0, "max_connections": 4, "min_connections": 0,
-		"stay_alive": true, "initial": false,
-		"color_r": 0.36, "color_g": 0.88, "color_b": 0.75,
-	}
+	var modes: Array = GENOME_SCRIPT.call("demo_modes") as Array
+	var draft_value: Dictionary = (modes[0] as Dictionary).duplicate(true)
+	# 顶层 max_divisions 是个体细胞数上限；每个模式的层数用 mode_max_divisions 单独编辑。
+	draft_value["max_divisions"] = 3
+	draft_value["division_mass"] = 1.0
+	draft_value["mode_max_divisions"] = int(draft_value.get("max_divisions", 1))
+	draft_value["child3"] = 4
+	draft_value["child4"] = 10
+	draft_value["child3_angle"] = 0.5
+	draft_value["child4_angle"] = 0.75
+	draft_value["split_mass"] = 0.5
+	return draft_value
 
 static func default_dev_program() -> Array[Dictionary]:
 	# v0.15.0 默认基因模式：不写指令。连接由黏附素决定，分化由 child_types 决定。
@@ -129,12 +139,12 @@ static func default_dev_program() -> Array[Dictionary]:
 
 static func gene_help_text() -> String:
 	return (
-		"基因驱动发育（模仿 Cell Lab，无指令序列）\n"
-		+ "① 分裂质量 = 细胞能量达到该值时分裂（Cell Lab Gene.b）。截图里能量 87 不分裂，是因为旧模式被 dev_program 发育状态门控；本模式直接按阈值分裂。\n"
-		+ "② 分裂即分化：子代 1–4 类型对应 Cell Lab Gene.i/j 子槽，按分裂次数依次分配，无需 DIFFERENTIATE 指令。\n"
-		+ "③ 连接由「生成黏附素」决定（flags bit0）；勾选后亲子自动建立弹性连接，无需 LINK 指令（已移除）。\n"
-		+ "④ 分裂质量比 / 子代角度 / 最大分裂次数控制每次分裂的能量分配、方向与总次数。\n"
-		+ "⑤ v0.16.0 表型：营养优先级调摄能权重、骨架强度调接触分离、细胞大小调半径、连接数约束黏附、RGB 为细胞基色；0.5/1.0 保持旧版等价。"
+		"基因驱动发育（模仿 Cell Lab Macro，无指令序列）\n"
+		+ "① 一个基因组由多个「模式」组成（左栏列表，默认 5 个）。每个模式独立保存细胞类型、行为、两个子代、连接/镜像/角度、分裂质量与特殊控制。\n"
+		+ "② 分裂即分化：母细胞变成一个子代模式，新细胞是另一子代模式；每个模式只选择「子代 1 / 子代 2」。\n"
+		+ "③ 发育预览里的细胞可点击，直接跳到它所属模式继续编辑；预览只读，不跑第二套模拟。\n"
+		+ "④ 连接由逐模式的黏附素与保留黏附素决定；连接传递率让相连细胞按能量差守恒转移，生态报告会显示转出/转入。\n"
+		+ "⑤ Macro 40 Gene 槽/完整行为总线未穷尽；本页字段只作为版本化追加写入 payload/schema，不进冻结 GNP1。"
 	)
 
 ## 分裂模板：每条 DIVIDE 增加 1 个细胞；a=被分裂的母细胞索引，b=角度(0..255→0..360°)，
@@ -297,6 +307,8 @@ func _build_left_panel() -> Control:
 	box.add_child(_make_section_title("GENOME PREVIEW · 发育预览（只读，不跑第二套模拟）"))
 	_genome_preview = (GENOME_PREVIEW_SCENE as PackedScene).instantiate()
 	_genome_preview.name = "GenomePreview"
+	if _genome_preview.has_signal("mode_selected") and not _genome_preview.is_connected("mode_selected", Callable(self, "_on_preview_mode_selected")):
+		_genome_preview.connect("mode_selected", Callable(self, "_on_preview_mode_selected"))
 	box.add_child(_genome_preview)
 	box.add_child(_make_section_title("GENE SLOTS · 40 槽（前 8 槽 = GNP1 八性状）"))
 	box.add_child(_build_gene_slots())
@@ -468,27 +480,32 @@ func _build_right_panel() -> Control:
 	note.add_theme_font_size_override("font_size", 10)
 	box.add_child(note)
 
-	box.add_child(_make_section_title("TYPE / ADHESIN · 类型与黏附"))
+	box.add_child(_make_section_title("MODE · 模式槽（点击预览细胞也可跳转）"))
+	box.add_child(_build_mode_bar())
+
+	box.add_child(_make_section_title("TYPE / ADHESIN · 当前模式类型与黏附"))
 	box.add_child(_make_macro_type_option("cell_type", "细胞类型", "spinner_types → Gene.C"))
 	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E；本项目 v0.14.1 写入 flags bit0：子代自动连接，无需 LINK 指令"))
 	box.add_child(_make_macro_check("stay_alive", "保持存活", "checkbox_stay_alive → Gene.H"))
 	box.add_child(_make_macro_check("initial", "初始细胞", "radio_initial → Gene.I"))
 
-	box.add_child(_make_section_title("CHILD 1–4 · 子代类型与角度"))
-	for child_index in range(1, 5):
-		var key: String = "child%d" % child_index
-		box.add_child(_make_macro_type_option(key, "子代 %d 类型" % child_index, "spinner_child%d → Gene.f778r/s/t/u" % child_index))
-		var angle_key: String = "child%d_angle" % child_index
-		box.add_child(_make_macro_slider(angle_key, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
+	box.add_child(_make_section_title("CHILD 1 / 2 · 当前模式的两个子代"))
+	for child_index in range(1, 3):
+		var key: String = "child%d_type" % child_index
+		box.add_child(_make_macro_type_option(key, "子代 %d 类型" % child_index, "spinner_child%d → 模式内子代类型" % child_index))
+		box.add_child(_make_macro_mode_option("child%d_mode" % child_index, "子代 %d 模式" % child_index, "选择该子代进入哪个模式槽继续分裂/分化"))
+		box.add_child(_make_macro_check("child%d_glue" % child_index, "子代 %d 保留黏附素" % child_index, "该子代保留/建立黏附连接"))
+		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index, "角度取相反方向（本项目版本化追加）"))
+		box.add_child(_make_macro_slider("child%d_angle" % child_index, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
 			"seek_child%d_angle → Gene.f771k/f772l/z/A ÷ TAU" % child_index, 2))
 
-	box.add_child(_make_section_title("GENE · 分裂规则（无指令序列）"))
+	box.add_child(_make_section_title("GENE · 当前模式分裂规则（无指令序列）"))
 	box.add_child(_make_macro_slider("division_mass", "分裂质量（能量阈值）", 0.05, 100.0, 0.05,
-		"Gene.b：细胞能量达到该值即分裂；截图能量 87 不分裂正是旧模式缺此设置。", 2))
+		"Gene.b：该模式细胞能量达到该值即分裂。", 2))
 	box.add_child(_make_macro_slider("split_ratio", "分裂质量比（母细胞保留）", 0.05, 0.95, 0.01,
 		"Gene.c：亲子能量按此比例分配，子代获得 1-ratio。", 2))
-	box.add_child(_make_macro_slider("max_divisions", "最大分裂次数", 0.0, 8.0, 1.0,
-		"最多分裂几次；最终细胞数 = 1 + 此值。", 0))
+	box.add_child(_make_macro_slider("mode_max_divisions", "本模式最大分裂层数", 0.0, 8.0, 1.0,
+		"该模式最多再分裂几层；0 表示终末模式。个体总细胞数仍受顶层最大分裂次数约束。", 0))
 
 	box.add_child(_make_section_title("SPLIT · Macro 参考字段（仅草案）"))
 	box.add_child(_make_macro_slider("split_mass", "分裂质量（Macro 比例）", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)，仅草案", 2))
@@ -497,6 +514,8 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_section_title("PHENOTYPE · Macro 表型字段（v0.16.0 基因模式生效）"))
 	box.add_child(_make_macro_slider("nutrition_priority", "营养优先级", 0.0, 1.0, 0.01,
 		"seek_prio → Gene.f773m（运行时消费点未证实）；本项目调异养/光合摄能权重，0.5 等价旧版。", 2))
+	box.add_child(_make_macro_slider("transfer_rate", "连接传递率", 0.0, 1.0, 0.01,
+		"v0.17.0：按当前模式决定连接内能量流速度；0 关闭转移，默认 0.12。", 2))
 	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU（仅草案）", 2))
 	box.add_child(_make_macro_slider("split_angle2", "分裂角度 2", 0.0, 1.0, 0.01, "seek_splitangle2 → Gene.B ÷ TAU（仅草案）", 2))
 	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i（仅草案）", 2))
@@ -511,6 +530,12 @@ func _build_right_panel() -> Control:
 		"Gene.u[9]：阻止新增连接；0 表示禁止连接。", 0))
 	box.add_child(_make_macro_slider("min_connections", "最小连接数", 0.0, 16.0, 1.0,
 		"Cell Lab 未证实独立控件；本项目追加分裂后确定性补连，受最大连接数约束。", 0))
+	box.add_child(_make_macro_slider("adhesion_strength", "黏附素强度", 0.0, 1.0, 0.01,
+		"Macro 截图字段；本项目以连接存在与传递率表达，强度值仅草案/hash。", 2))
+	box.add_child(_make_macro_slider("adhesion_length", "黏附素长度", 0.0, 1.0, 0.01,
+		"Macro 截图字段；静息长度当前由亲子间距派生。", 2))
+	box.add_child(_make_macro_slider("adhesion_stretch", "黏附素拉伸", 0.0, 1.0, 0.01,
+		"Macro 截图字段；当前仅存模式草案，不臆造弹簧语义。", 2))
 	box.add_child(_make_macro_slider("color_r", "颜色 R", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
 	box.add_child(_make_macro_slider("color_g", "颜色 G", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
 	box.add_child(_make_macro_slider("color_b", "颜色 B", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
@@ -542,6 +567,53 @@ func _build_right_panel() -> Control:
 
 func _make_macro_section_label(text_value: String) -> Label:
 	return _make_section_title(text_value)
+
+## v0.17.0：模式槽列表。每次切换先把当前控件值写回槽，再载入另一槽，避免串数据。
+func _build_mode_bar() -> Control:
+	var box: VBoxContainer = VBoxContainer.new()
+	var row: HBoxContainer = HBoxContainer.new()
+	var label: Label = Label.new()
+	label.text = "模式"
+	label.custom_minimum_size = Vector2(34, 0)
+	_mode_option = OptionButton.new()
+	_mode_option.custom_minimum_size = Vector2(150, 0)
+	_mode_option.item_selected.connect(_on_mode_selected)
+	row.add_child(label)
+	row.add_child(_mode_option)
+	var add_button: Button = _make_button("+ 模式", "追加一个模式槽（最多 %d）" % int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENOME_MODES", 16)))
+	add_button.pressed.connect(_on_add_mode)
+	var remove_button: Button = _make_button("− 模式", "删除当前模式槽（至少保留一个）")
+	remove_button.pressed.connect(_on_remove_mode)
+	row.add_child(add_button)
+	row.add_child(remove_button)
+	box.add_child(row)
+	var name_row: HBoxContainer = HBoxContainer.new()
+	var name_label: Label = Label.new()
+	name_label.text = "名称"
+	name_label.custom_minimum_size = Vector2(34, 0)
+	_mode_name_edit = LineEdit.new()
+	_mode_name_edit.custom_minimum_size = Vector2(150, 0)
+	_mode_name_edit.text_changed.connect(_on_mode_name_changed)
+	name_row.add_child(name_label)
+	name_row.add_child(_mode_name_edit)
+	box.add_child(name_row)
+	_refresh_mode_bar()
+	return box
+
+func _make_macro_mode_option(key: String, label_text: String, tip: String) -> HBoxContainer:
+	var row: HBoxContainer = HBoxContainer.new()
+	var label: Label = Label.new()
+	label.text = label_text
+	label.custom_minimum_size = Vector2(104, 0)
+	label.tooltip_text = tip
+	var option: OptionButton = OptionButton.new()
+	option.custom_minimum_size = Vector2(130, 0)
+	option.tooltip_text = tip
+	option.item_selected.connect(_on_macro_option_changed.bind(key))
+	_macro_controls[key] = {"mode_option": option}
+	row.add_child(label)
+	row.add_child(option)
+	return row
 
 func _make_macro_check(key: String, label_text: String, tip: String) -> CheckBox:
 	var check: CheckBox = CheckBox.new()
@@ -592,6 +664,82 @@ func _make_macro_slider(key: String, label_text: String, minimum: float, maximum
 	row.add_child(value_label)
 	return row
 
+func _refresh_mode_bar() -> void:
+	_refreshing_modes = true
+	if _mode_option != null:
+		_mode_option.clear()
+		for i in range(_modes.size()):
+			_mode_option.add_item(str((_modes[i] as Dictionary).get("name", "M%d" % (i + 1))))
+		_selected_mode = clampi(_selected_mode, 0, maxi(0, _modes.size() - 1))
+		if _modes.is_empty():
+			_mode_option.add_item("M1")
+		_mode_option.select(_selected_mode)
+	if _mode_name_edit != null:
+		_mode_name_edit.text = str(_macro_draft.get("name", "M%d" % (_selected_mode + 1)))
+	_refreshing_modes = false
+
+func _on_mode_selected(index: int) -> void:
+	_load_mode(index)
+
+func _on_add_mode() -> void:
+	var maximum: int = int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENOME_MODES", 16))
+	if _modes.size() >= maximum:
+		return
+	_commit_current_mode()
+	var created: Dictionary = GENOME_SCRIPT.call("normalized_mode", {}, _modes.size())
+	_modes.append(created)
+	_load_mode(_modes.size() - 1)
+	_set_macro_status("mode")
+
+func _on_remove_mode() -> void:
+	if _modes.size() <= 1:
+		return
+	_commit_current_mode()
+	_modes.remove_at(_selected_mode)
+	_load_mode(clampi(_selected_mode, 0, _modes.size() - 1))
+	_set_macro_status("mode")
+
+func _on_mode_name_changed(value: String) -> void:
+	if _refreshing_modes:
+		return
+	_macro_draft["name"] = value
+	if not _modes.is_empty():
+		_modes[_selected_mode]["name"] = value
+	_sync_macro_to_draft()
+	_refresh_mode_bar()
+	_sync_preview()
+	_set_macro_status("mode")
+
+## 供 GenomePreview 点击回调使用：跳到细胞所属模式槽。
+func select_mode(index: int) -> void:
+	_load_mode(index)
+
+func _load_mode(index: int) -> void:
+	if not _modes.is_empty():
+		_commit_current_mode()
+	_selected_mode = clampi(index, 0, maxi(0, _modes.size() - 1))
+	if _modes.is_empty():
+		_macro_draft = default_macro_draft()
+	else:
+		_macro_draft = (_modes[_selected_mode] as Dictionary).duplicate(true)
+		_macro_draft["max_divisions"] = 3
+		_macro_draft["mode_max_divisions"] = int((_modes[_selected_mode] as Dictionary).get("max_divisions", 1))
+		_macro_draft["stiffness"] = float(_macro_draft.get("cell_stiffness", 0.5))
+		for legacy_key in ["child3", "child4", "child3_angle", "child4_angle", "split_mass"]:
+			if not _macro_draft.has(legacy_key):
+				_macro_draft[legacy_key] = default_macro_draft().get(legacy_key, 0)
+	_refresh_mode_bar()
+	_refresh_macro_controls()
+	_sync_preview()
+	if _status_label != null:
+		_status_label.text = "已切换到模式 %d：%s（点击预览细胞可直接跳到对应模式）" % [
+			_selected_mode + 1, str(_macro_draft.get("name", "?"))]
+
+func _on_preview_mode_selected(mode_index: int) -> void:
+	if mode_index < 0 or mode_index >= _modes.size():
+		return
+	select_mode(mode_index)
+
 func _refresh_macro_controls() -> void:
 	for key in MACRO_FIELD_KEYS:
 		if not _macro_draft.has(key) or not _macro_controls.has(key):
@@ -600,6 +748,12 @@ func _refresh_macro_controls() -> void:
 		var value: Variant = _macro_draft[key]
 		if control.has("check"):
 			(control["check"] as CheckBox).set_pressed_no_signal(bool(value))
+		elif control.has("mode_option"):
+			var option: OptionButton = control["mode_option"] as OptionButton
+			option.clear()
+			for i in range(maxi(1, _modes.size())):
+				option.add_item(str((_modes[i] as Dictionary).get("name", "M%d" % (i + 1))) if i < _modes.size() else "M%d" % (i + 1))
+			option.select(clampi(int(value), 0, option.item_count - 1))
 		elif control.has("option"):
 			(control["option"] as OptionButton).select(clampi(int(value), 0, (control["option"] as OptionButton).item_count - 1))
 		elif control.has("slider"):
@@ -615,42 +769,64 @@ func _on_macro_bool_changed(value: bool, key: String) -> void:
 	_sync_macro_to_draft()
 	_set_macro_status(key)
 
-## v0.14.1/v0.15.0：把 Macro 草案中真正落地的字段写入 Genome。
-## bit0 = 黏附素自动连接；bit1 = 基因模式（无指令序列）。
-## 分裂质量 / 质量比 / 最大分裂次数 / 子代类型 / 分裂角度对应 Cell Lab Gene.b/c/i/j。
+## v0.17.0：把当前模式控件写回模式槽，并同步顶层兼容字段。
+## bit0 = 黏附素自动连接；bit1 = 基因模式。modes 只在基因模式下参与 hash。
 func _sync_macro_to_draft() -> void:
 	if draft == null:
 		return
+	_commit_current_mode()
+
+func _commit_current_mode() -> void:
+	if draft == null:
+		return
 	var constants: Dictionary = (GENOME_SCRIPT as Script).get_script_constant_map()
+	var global_divisions: int = clampi(int(round(float(_macro_draft.get("max_divisions", 3)))), 0, 8)
+	var mode_data: Dictionary = _macro_draft.duplicate(true)
+	mode_data["max_divisions"] = clampi(int(round(float(_macro_draft.get("mode_max_divisions", 1)))), 0, int(constants.get("MAX_GENE_DIVISIONS", 8)))
+	if _macro_draft.has("stiffness"):
+		mode_data["cell_stiffness"] = _macro_draft["stiffness"]
+	var normalized: Dictionary = GENOME_SCRIPT.call("normalized_mode", mode_data, _selected_mode)
+	if _modes.is_empty():
+		_modes.append(normalized)
+	else:
+		_modes[_selected_mode] = normalized
+	draft.call("set_modes", _modes)
+	for key in normalized:
+		if key != "max_divisions":
+			_macro_draft[key] = normalized[key]
+	_macro_draft["max_divisions"] = global_divisions
+	_macro_draft["mode_max_divisions"] = int(normalized.get("max_divisions", 1))
+	_macro_draft["stiffness"] = float(normalized.get("cell_stiffness", 0.5))
+
 	var glue_flag: int = int(constants.get("FLAG_GLUE_LINKS", 1))
 	var gene_flag: int = int(constants.get("FLAG_GENE_MODE", 2))
 	var flags_value: int = gene_flag
-	if bool(_macro_draft.get("make_glue", false)):
+	if bool(normalized.get("make_glue", false)):
 		flags_value |= glue_flag
 	draft.set("flags", flags_value)
-	draft.set("division_mass", clampf(float(_macro_draft.get("division_mass", 1.0)), 0.05, 100.0))
-	draft.set("split_ratio", clampf(float(_macro_draft.get("split_ratio", 0.5)), 0.05, 0.95))
-	draft.set("max_divisions", clampi(int(round(float(_macro_draft.get("max_divisions", 3)))), 0, int(constants.get("MAX_GENE_DIVISIONS", 8))))
+	# 顶层字段保留给 v0.14–v0.16 存档/GNP1 兼容路径；运行时优先读当前模式槽。
+	draft.set("division_mass", float(normalized.get("division_mass", 1.0)))
+	draft.set("split_ratio", float(normalized.get("split_ratio", 0.5)))
+	draft.set("max_divisions", global_divisions)
 	var child_types: PackedByteArray = PackedByteArray()
 	var split_angles: PackedByteArray = PackedByteArray()
+	child_types.append(clampi(int(normalized.get("child1_type", 0)), 0, 255))
+	child_types.append(clampi(int(normalized.get("child2_type", 2)), 0, 255))
+	child_types.append(clampi(int(_macro_draft.get("child3", 4)), 0, 255))
+	child_types.append(clampi(int(_macro_draft.get("child4", 10)), 0, 255))
 	for child_index in range(1, 5):
-		child_types.append(clampi(int(_macro_draft.get("child%d" % child_index, 0)), 0, 255))
 		split_angles.append(clampi(int(round(clampf(float(_macro_draft.get("child%d_angle" % child_index, 0.0)), 0.0, 1.0) * 255.0)), 0, 255))
 	draft.set("child_types", child_types)
 	draft.set("split_angles", split_angles)
-	# v0.16.0：Macro 表型字段写入 Genome（基因模式生效，旧模式清零时保持默认）。
-	var max_links: int = clampi(int(round(float(_macro_draft.get("max_connections", 4)))), 0, 16)
-	var min_links: int = clampi(int(round(float(_macro_draft.get("min_connections", 0)))), 0, max_links)
-	_macro_draft["max_connections"] = max_links
-	_macro_draft["min_connections"] = min_links
-	draft.set("nutrition_priority", clampf(float(_macro_draft.get("nutrition_priority", 0.5)), 0.0, 1.0))
-	draft.set("cell_stiffness", clampf(float(_macro_draft.get("stiffness", 0.5)), 0.0, 1.0))
-	draft.set("cell_size", clampf(float(_macro_draft.get("cell_size", 1.0)), 0.5, 2.0))
-	draft.set("max_connections", max_links)
-	draft.set("min_connections", min_links)
-	draft.set("color_r", clampf(float(_macro_draft.get("color_r", 0.36)), 0.0, 1.0))
-	draft.set("color_g", clampf(float(_macro_draft.get("color_g", 0.88)), 0.0, 1.0))
-	draft.set("color_b", clampf(float(_macro_draft.get("color_b", 0.75)), 0.0, 1.0))
+	draft.set("nutrition_priority", float(normalized.get("nutrition_priority", 0.5)))
+	draft.set("cell_stiffness", float(normalized.get("cell_stiffness", 0.5)))
+	draft.set("cell_size", float(normalized.get("cell_size", 1.0)))
+	draft.set("max_connections", int(normalized.get("max_connections", 4)))
+	draft.set("min_connections", int(normalized.get("min_connections", 0)))
+	draft.set("color_r", float(normalized.get("color_r", 0.36)))
+	draft.set("color_g", float(normalized.get("color_g", 0.88)))
+	draft.set("color_b", float(normalized.get("color_b", 0.75)))
+	draft.set("transfer_rate", clampf(float(normalized.get("transfer_rate", 0.12)), 0.0, 1.0))
 	# 基因模式下 dev_program 恒为空，指令仅存在于旧存档。
 	draft.call("set_development_program", [])
 
@@ -660,7 +836,7 @@ func _on_macro_option_changed(index: int, key: String) -> void:
 	_set_macro_status(key)
 
 func _on_macro_value_changed(value: float, key: String) -> void:
-	if key == "max_connections" or key == "min_connections":
+	if key == "max_connections" or key == "min_connections" or key == "mode_max_divisions":
 		_macro_draft[key] = int(round(value))
 	else:
 		_macro_draft[key] = value
@@ -677,6 +853,12 @@ func _set_macro_status(key: String) -> void:
 		var on: bool = bool(_macro_draft.get("make_glue", false))
 		_status_label.text = "生成黏附素%s：子代自动连接（写入 flags bit0，影响该基因组 hash）。" % ("已开启" if on else "已关闭")
 		return
+	if key == "mode" or key.begins_with("child") and (key.ends_with("_mode") or key.ends_with("_glue") or key.ends_with("_mirror")):
+		_status_label.text = "模式槽已改：%s · 当前模式 %d，影响 hash；预览细胞可点击跳转。" % [key, _selected_mode + 1]
+		return
+	if key == "transfer_rate":
+		_status_label.text = "连接传递率已改：%.2f · 相连细胞按能量差守恒转移，生态报告可看转出/转入。" % float(_macro_draft.get("transfer_rate", 0.0))
+		return
 	if key == "division_mass" or key == "split_ratio" or key == "max_divisions" or key.begins_with("child"):
 		_status_label.text = "基因模式参数已改：%s · 写入 Genome（Cell Lab Gene.b/c/i/j），影响 hash。" % key
 		return
@@ -687,6 +869,12 @@ func _set_macro_status(key: String) -> void:
 
 func get_macro_draft() -> Dictionary:
 	return (_macro_draft as Dictionary).duplicate(true)
+
+func get_modes() -> Array:
+	return (_modes as Array).duplicate(true)
+
+func get_selected_mode() -> int:
+	return _selected_mode
 
 func _refresh_all() -> void:
 	_refresh_tree()
@@ -701,7 +889,7 @@ func _sync_preview() -> void:
 	if _genome_preview == null or not _genome_preview.has_method("set_program"):
 		return
 	var gene_mode: bool = draft != null and bool((GENOME_SCRIPT as Script).call("is_gene_mode", draft))
-	_genome_preview.call("set_program", _program(), _macro_draft, gene_mode)
+	_genome_preview.call("set_program", _program(), _macro_draft, gene_mode, _modes)
 
 func _program() -> Array:
 	return [] if draft == null else draft.get("dev_program")
@@ -962,4 +1150,6 @@ func draft_summary() -> String:
 	var mass_text: String = str(_macro_draft.get("division_mass", 1.0))
 	var divisions: int = int(round(float(_macro_draft.get("max_divisions", 3))))
 	var glue_text: String = " · 黏附连接" if bool(_macro_draft.get("make_glue", false)) else ""
-	return "基因模式：分裂质量 %s · 最多 %d 次分裂%s" % [mass_text, divisions, glue_text]
+	return "多模式(%d)：当前 %s · 分裂质量 %s · 最多 %d 次分裂 · 传递率 %.2f%s" % [
+		_modes.size(), str(_macro_draft.get("name", "?")), mass_text, divisions,
+		float(_macro_draft.get("transfer_rate", 0.0)), glue_text]

@@ -780,3 +780,28 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - 新基因字段显式混入 hash（仅 `FLAG_GENE_MODE` 置位）；`flags` 清零时 hash 与行为与 v0.15.0 逐位一致；颜色只改视图、不进 hash。
 - 规格先行：v1.1 §5.3、v2.1 §0.3 / §11 已于代码前修订，风险表新增「逐细胞数组改变存档与回放」条目。
 - 验证：新增 SmokeTest 覆盖编辑器写入/hash 边界、旧模式 hash 不变、预览 caption 与补连、逐细胞半径/刚度/颜色、颜色真实渲染到 `CellBase` Body、连接上下限、schema v3 与旧快照回退；发布与 D 盘工程均 `SCRIPTS=51 FAILURES=0`。
+
+## 27. v0.17.0：多模式基因组、两子代与连接传递（2026-11-18）
+
+### 27.1 证据来源与边界
+
+- 用户提供的 Cell Lab Macro 基因组编辑截图（`clipboard-2026-11-18T07-40-17-965Z-d1506c5a.jpg`）可直接核对页面结构：模式选择/编辑、当前细胞类型、子代 1 / 子代 2 的模式与角度、分裂质量/反转、分裂角度/比例、营养优先级、RGB、黏附强度/长度/拉伸、骨架强度、细胞大小、连接上下限；上方为可交互的发育预览。
+- 静态证据仍沿用 §20 / §25：`Gene.b/c/i/j` 对应分裂阈值、质量比、分化树子槽；`Gene.f773m` 只有控件映射、无运行时消费点；40 Gene 槽、行为总线全索引、特殊控件逐项语义未穷尽。
+- 因此本版是**版本化追加**，不是 Cell Lab Gene 表的全量复制：只把截图可核对的字段做成模式槽，并把「一个模式只有两个子代」作为本项目明确规则。
+
+### 27.2 现象根因：连接转出/转入恒为 0
+
+- `OrganismManager.advance_physics_tick()` 旧代码 `rates.fill(default_transfer_rate)`，而 `default_transfer_rate = 0.0`；`CellMetabolism` 公式 `flow = rate[b]*energy[a] - rate[a]*energy[b]` 因而恒为 0。`link_out / link_in` 诊断本身正确。
+- 修复不改变守恒公式：新增逐细胞 `_build_transfer_rates()`，新多模式基因组按 `cell_mode` 取模式 `transfer_rate`（默认 0.12）；空 modes / 非基因模式仍读 `default_transfer_rate = 0.0`，保持 v0.14–v0.16 回放。默认演示体改为多模式，用户打开即能看到能量流。
+
+### 27.3 模式运行时与预览口径
+
+- `Genome.modes` 保存逐模式类型、行为、两子代模式/类型、黏附/镜像/角度、阈值/比例、特殊控制与表型；不进 GNP1，经 `genome_gene` payload 与 `schema_version=4` 保存，仅非空时混入 hash。
+- `CellArray.cell_mode / cell_mode_depth` 逐细胞派生。分裂后母细胞索引成为子代 1、新细胞成为子代 2；切到不同模式时该模式分裂层数从 0 开始，同模式连续分裂才递增。每个个体每 tick 最多分裂一次，顶层 `max_divisions + 1` 仍是细胞总数上限。
+- `GenomePreview` 按同一口径只读派生状态，并把 `mode` 写入每个预览细胞；画布左键命中细胞后 `mode_selected(mode_index)` 信号让 `DevEditorPanel.select_mode()` 直接跳转。
+- `DevEditorPanel` 的模式切换遵循「先提交当前槽，再载入新槽」；`stiffness` 等旧键保留为兼容别名，避免 v0.16 编辑器回归断裂。
+
+### 27.4 验证
+
+- 新增 SmokeTest：两子代模式与逐模式编辑不串数据、预览点击跳转、hash 兼容边界（空 modes / flags 清零仍保持旧 hash）、模式分裂与表型继承、跨连接能量守恒、`genome_gene` payload 往返、schema v4 与旧快照缺字段回退。
+- 同步更新旧断言：默认演示体改为多模式、速度探针使用单细胞避免中途分裂、模式子代类型按集合而非固定索引校验、schema 版本从 3 升到 4。

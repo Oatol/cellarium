@@ -28,6 +28,9 @@ var cell_stiffness: PackedFloat32Array = PackedFloat32Array()
 var cell_color_r: PackedFloat32Array = PackedFloat32Array()
 var cell_color_g: PackedFloat32Array = PackedFloat32Array()
 var cell_color_b: PackedFloat32Array = PackedFloat32Array()
+## v0.17.0：逐细胞所属模式槽与该模式已分裂层数。默认 0，旧细胞/旧存档行为不变。
+var cell_mode: PackedByteArray = PackedByteArray()
+var cell_mode_depth: PackedByteArray = PackedByteArray()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -53,6 +56,8 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_color_r.append(-1.0)
 	cell_color_g.append(-1.0)
 	cell_color_b.append(-1.0)
+	cell_mode.append(0)
+	cell_mode_depth.append(0)
 	return index
 
 func size() -> int:
@@ -83,6 +88,8 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	cell_color_r[child_index] = cell_color_r[index]
 	cell_color_g[child_index] = cell_color_g[index]
 	cell_color_b[child_index] = cell_color_b[index]
+	cell_mode[child_index] = cell_mode[index]
+	cell_mode_depth[child_index] = cell_mode_depth[index]
 	return child_index
 
 func get_position(index: int) -> Vector2:
@@ -115,6 +122,24 @@ func get_color(index: int) -> Color:
 	if index < 0 or index >= cell_color_r.size():
 		return Color(-1.0, -1.0, -1.0, 1.0)
 	return Color(cell_color_r[index], cell_color_g[index], cell_color_b[index], 1.0)
+
+## v0.17.0：模式槽写入/读取；越界返回安全默认值，不改变其他 SoA 数组。
+func set_cell_mode(index: int, mode_index: int, depth: int) -> bool:
+	if index < 0 or index >= size():
+		return false
+	cell_mode[index] = clampi(mode_index, 0, 255)
+	cell_mode_depth[index] = clampi(depth, 0, 255)
+	return true
+
+func get_mode(index: int) -> int:
+	if index < 0 or index >= cell_mode.size():
+		return 0
+	return int(cell_mode[index])
+
+func get_mode_depth(index: int) -> int:
+	if index < 0 or index >= cell_mode_depth.size():
+		return 0
+	return int(cell_mode_depth[index])
 
 func set_position(index: int, position: Vector2) -> bool:
 	if index < 0 or index >= size():

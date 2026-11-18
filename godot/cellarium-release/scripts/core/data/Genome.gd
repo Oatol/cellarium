@@ -23,11 +23,106 @@ const FLAG_GLUE_LINKS: int = 1 << 0
 ## 该模式下 dev_program 为空；清零则保持 v0.14.x 的指令模式（旧存档完全兼容）。
 const FLAG_GENE_MODE: int = 1 << 1
 
+## v0.17.0 版本化追加：一个基因模式基因组由多个「模式槽」组成，对应 Macro 的 Gene 模式页。
+## 每个模式有自己的类型、行为/特殊控制、两个子代模式；GNP1 布局仍冻结，modes 只随
+## CommandBus 的 genome_gene payload 与存档 schema v4 走，且仅在基因模式下参与 hash。
+const MAX_GENOME_MODES: int = 16
+const DEFAULT_TRANSFER_RATE: float = 0.12
+
+## v0.17.0：证据边界——Macro 的 40 Gene 槽/完整行为总线未穷尽；本模型只把截图中可核对的
+## 模式切换、两子代、黏附/镜像、分裂质量/角度/比例、营养优先级、RGB、黏附与骨架/大小/连接数
+## 作为版本化追加字段。其余 Macro 专有控件不臆造运行时语义。
+const MODE_FIELD_KEYS: Array[String] = [
+	"name", "cell_type", "make_glue", "stay_alive", "initial",
+	"child1_type", "child2_type", "child1_mode", "child2_mode",
+	"child1_glue", "child2_glue", "child1_mirror", "child2_mirror",
+	"child1_angle", "child2_angle", "division_mass", "invert_split_mass",
+	"split_ratio", "max_divisions", "split_angle", "split_angle2", "ratio", "ratio2",
+	"nutrition_priority", "transfer_rate", "cell_stiffness", "cell_size",
+	"max_connections", "min_connections", "color_r", "color_g", "color_b",
+	"adhesion_strength", "adhesion_length", "adhesion_stretch",
+]
+
 static func has_glue_links(genome: RefCounted) -> bool:
 	return genome != null and (int(genome.get("flags")) & FLAG_GLUE_LINKS) != 0
 
 static func is_gene_mode(genome: RefCounted) -> bool:
 	return genome != null and (int(genome.get("flags")) & FLAG_GENE_MODE) != 0
+
+static func has_modes(genome: RefCounted) -> bool:
+	if genome == null:
+		return false
+	var modes: Variant = genome.get("modes")
+	return modes is Array and not (modes as Array).is_empty()
+
+static func default_mode(index: int = 0) -> Dictionary:
+	return normalized_mode({}, index)
+
+## v0.17.0：默认 5 模式链接体：M1 → M2/M3，M2 → M4/M5，M3 → M3/M3；
+## 共 3 次分裂得到 4 细胞/3 黏附连接，替代旧的 9 条 dev_program 演示。
+static func demo_modes() -> Array[Dictionary]:
+	return [
+		normalized_mode({"name": "M1_Pg", "cell_type": 0, "child1_type": 2, "child2_type": 4,
+			"child1_mode": 1, "child2_mode": 2, "child1_angle": 0.0, "child2_angle": 0.25,
+			"division_mass": 0.05, "max_divisions": 1}, 0),
+		normalized_mode({"name": "M2_Mv", "cell_type": 2, "child1_type": 2, "child2_type": 5,
+			"child1_mode": 3, "child2_mode": 4, "child1_angle": 0.0, "child2_angle": 0.5,
+			"division_mass": 0.05, "max_divisions": 1}, 1),
+		normalized_mode({"name": "M3_En", "cell_type": 4, "child1_type": 4, "child2_type": 4,
+			"child1_mode": 2, "child2_mode": 2, "child1_angle": 0.0, "child2_angle": 0.75,
+			"division_mass": 0.05, "max_divisions": 1}, 2),
+		normalized_mode({"name": "M4_Mv", "cell_type": 2, "max_divisions": 0}, 3),
+		normalized_mode({"name": "M5_Info", "cell_type": 5, "max_divisions": 0}, 4),
+	]
+
+static func normalized_mode(value: Variant, index: int = 0) -> Dictionary:
+	var source: Dictionary = value if value is Dictionary else {}
+	var result: Dictionary = {}
+	result["name"] = str(source.get("name", "M%d" % (index + 1)))
+	result["cell_type"] = clampi(int(source.get("cell_type", 0)), 0, 255)
+	result["make_glue"] = bool(source.get("make_glue", true))
+	result["stay_alive"] = bool(source.get("stay_alive", true))
+	result["initial"] = bool(source.get("initial", index == 0))
+	result["child1_type"] = clampi(int(source.get("child1_type", 0)), 0, 255)
+	result["child2_type"] = clampi(int(source.get("child2_type", 2)), 0, 255)
+	result["child1_mode"] = clampi(int(source.get("child1_mode", 0)), 0, MAX_GENOME_MODES - 1)
+	result["child2_mode"] = clampi(int(source.get("child2_mode", 0)), 0, MAX_GENOME_MODES - 1)
+	result["child1_glue"] = bool(source.get("child1_glue", true))
+	result["child2_glue"] = bool(source.get("child2_glue", true))
+	result["child1_mirror"] = bool(source.get("child1_mirror", false))
+	result["child2_mirror"] = bool(source.get("child2_mirror", false))
+	for key in ["child1_angle", "child2_angle", "split_angle", "split_angle2", "ratio", "ratio2",
+			"nutrition_priority", "cell_stiffness", "color_r", "color_g", "color_b"]:
+		result[key] = clampf(float(source.get(key, 0.5)), 0.0, 1.0)
+	result["child1_angle"] = clampf(float(source.get("child1_angle", 0.0)), 0.0, 1.0)
+	result["child2_angle"] = clampf(float(source.get("child2_angle", 0.25)), 0.0, 1.0)
+	result["split_angle"] = clampf(float(source.get("split_angle", 0.0)), 0.0, 1.0)
+	result["split_angle2"] = clampf(float(source.get("split_angle2", 0.25)), 0.0, 1.0)
+	result["ratio"] = clampf(float(source.get("ratio", 0.5)), 0.0, 1.0)
+	result["ratio2"] = clampf(float(source.get("ratio2", 0.5)), 0.0, 1.0)
+	result["nutrition_priority"] = clampf(float(source.get("nutrition_priority", 0.5)), 0.0, 1.0)
+	result["cell_stiffness"] = clampf(float(source.get("cell_stiffness", 0.5)), 0.0, 1.0)
+	result["color_r"] = clampf(float(source.get("color_r", 0.36)), 0.0, 1.0)
+	result["color_g"] = clampf(float(source.get("color_g", 0.88)), 0.0, 1.0)
+	result["color_b"] = clampf(float(source.get("color_b", 0.75)), 0.0, 1.0)
+	result["division_mass"] = clampf(float(source.get("division_mass", 0.05)), 0.05, 100.0)
+	result["invert_split_mass"] = bool(source.get("invert_split_mass", false))
+	result["split_ratio"] = clampf(float(source.get("split_ratio", 0.5)), 0.05, 0.95)
+	result["max_divisions"] = clampi(int(source.get("max_divisions", 1)), 0, MAX_GENE_DIVISIONS)
+	result["transfer_rate"] = clampf(float(source.get("transfer_rate", DEFAULT_TRANSFER_RATE)), 0.0, 1.0)
+	result["cell_size"] = clampf(float(source.get("cell_size", 1.0)), 0.5, 2.0)
+	result["max_connections"] = clampi(int(source.get("max_connections", 4)), 0, 16)
+	result["min_connections"] = clampi(int(source.get("min_connections", 0)), 0, result["max_connections"])
+	for key in ["adhesion_strength", "adhesion_length", "adhesion_stretch"]:
+		result[key] = clampf(float(source.get(key, 0.0)), 0.0, 1.0)
+	return result
+
+static func get_mode(genome: RefCounted, index: int) -> Dictionary:
+	if not has_modes(genome):
+		return {}
+	var modes: Array = genome.get("modes") as Array
+	var clamped: int = clampi(index, 0, modes.size() - 1)
+	return normalized_mode(modes[clamped], clamped)
 
 var version: int = 1
 var flags: int = 0
@@ -53,6 +148,9 @@ var min_connections: int = 0
 var color_r: float = 0.36
 var color_g: float = 0.88
 var color_b: float = 0.75
+## v0.17.0：多模式基因组与全基因组传递率缺省。modes 为空时所有旧字段/旧 hash 完全不变。
+var modes: Array[Dictionary] = []
+var transfer_rate: float = DEFAULT_TRANSFER_RATE
 ## 运行时谱系元数据（阶段 4）：不进 GNP1 二进制编解码（格式已冻结）。
 var species_id: int = 0
 var lineage_id: int = -1
@@ -102,6 +200,23 @@ static func distance(a: RefCounted, b: RefCounted) -> float:
 		program_distance += absi(int(round(float(a.get("cell_size")) * 10.0)) - int(round(float(b.get("cell_size")) * 10.0)))
 		program_distance += absi(int(a.get("max_connections")) - int(b.get("max_connections")))
 		program_distance += absi(int(a.get("min_connections")) - int(b.get("min_connections")))
+		# v0.17.0：模式数量与逐模式类型/子代模式差异参与物种判定；旧空 modes 不加分。
+		var raw_modes_a: Variant = a.get("modes")
+		var raw_modes_b: Variant = b.get("modes")
+		var modes_a: Array = []
+		var modes_b: Array = []
+		if raw_modes_a is Array:
+			modes_a = raw_modes_a as Array
+		if raw_modes_b is Array:
+			modes_b = raw_modes_b as Array
+		program_distance += absi(modes_a.size() - modes_b.size())
+		for i in range(mini(modes_a.size(), modes_b.size())):
+			var mode_a: Dictionary = normalized_mode(modes_a[i], i)
+			var mode_b: Dictionary = normalized_mode(modes_b[i], i)
+			program_distance += absi(int(mode_a.get("cell_type")) - int(mode_b.get("cell_type")))
+			program_distance += absi(int(mode_a.get("child1_mode")) - int(mode_b.get("child1_mode")))
+			program_distance += absi(int(mode_a.get("child2_mode")) - int(mode_b.get("child2_mode")))
+			program_distance += absi(int(round(float(mode_a.get("transfer_rate")) * 10.0)) - int(round(float(mode_b.get("transfer_rate")) * 10.0)))
 	return float(locus_distance) * 1.0 + float(trait_distance) * 0.05 + float(program_distance) * 0.5
 
 func is_valid() -> bool:
@@ -138,6 +253,31 @@ func is_valid() -> bool:
 		return false
 	if min_connections > max_connections:
 		return false
+	if modes.size() > MAX_GENOME_MODES:
+		return false
+	if transfer_rate < 0.0 or transfer_rate > 1.0:
+		return false
+	for i in range(modes.size()):
+		if not modes[i] is Dictionary:
+			return false
+		var normalized: Dictionary = normalized_mode(modes[i], i)
+		if int(normalized.get("min_connections")) > int(normalized.get("max_connections")):
+			return false
+	return true
+
+func set_modes(values: Array) -> bool:
+	if values.size() > MAX_GENOME_MODES:
+		return false
+	var normalized: Array[Dictionary] = []
+	for i in range(values.size()):
+		if not values[i] is Dictionary:
+			return false
+		normalized.append(normalized_mode(values[i], i))
+	var previous: Array[Dictionary] = modes
+	modes = normalized
+	if not is_valid():
+		modes = previous
+		return false
 	return true
 
 func set_development_program(instructions: Array) -> bool:
@@ -163,6 +303,12 @@ func division_count() -> int:
 		if int(instruction.get("opcode", -1)) == OP_DIVIDE:
 			count += 1
 	return count
+
+static func _mix_quantized(current: int, quantized: int) -> int:
+	var value: int = current
+	for shift in [0, 8, 16, 24]:
+		value = int((value ^ ((quantized >> shift) & 255)) * 16777619) & 0x7fffffff
+	return value
 
 func hash() -> int:
 	var encoded: PackedByteArray = load("res://scripts/core/data/GenomeCodec.gd").call("encode", self)
@@ -192,6 +338,25 @@ func hash() -> int:
 		for quantized in macro_quantized:
 			for shift in [0, 8, 16, 24]:
 				value = int((value ^ ((quantized >> shift) & 255)) * 16777619) & 0x7fffffff
+		# v0.17.0：多模式只在 modes 非空时混入，空 modes 的旧基因模式 hash 与 v0.16.0 逐位一致。
+		if not modes.is_empty():
+			value = _mix_quantized(value, modes.size())
+			value = _mix_quantized(value, int(round(transfer_rate * 1000000.0)))
+			for mode_index in range(modes.size()):
+				var mode_data: Dictionary = normalized_mode(modes[mode_index], mode_index)
+				for key in MODE_FIELD_KEYS:
+					var entry: Variant = mode_data.get(key, 0)
+					var quantized: int = 0
+					if entry is bool:
+						quantized = 1 if bool(entry) else 0
+					elif entry is int:
+						quantized = int(entry)
+					elif entry is float:
+						quantized = int(round(float(entry) * 1000000.0))
+					elif entry is String:
+						for byte_value in str(entry).to_utf8_buffer():
+							quantized = int((quantized ^ int(byte_value)) * 16777619) & 0x7fffffff
+					value = _mix_quantized(value, quantized)
 	return value
 
 func duplicate_genome() -> RefCounted:
@@ -217,6 +382,8 @@ func duplicate_genome() -> RefCounted:
 	copy.set("color_r", color_r)
 	copy.set("color_g", color_g)
 	copy.set("color_b", color_b)
+	copy.call("set_modes", modes.duplicate(true))
+	copy.set("transfer_rate", transfer_rate)
 	copy.set("species_id", species_id)
 	copy.set("lineage_id", lineage_id)
 	return copy

@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 3
+const SCHEMA_VERSION: int = 4
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -18,6 +18,9 @@ const CELL_ARRAY_NAMES: Array[String] = [
 const PHENOTYPE_ARRAY_NAMES: Array[String] = [
 	"cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b",
 ]
+
+## v0.17.0：schema 1–3 的旧快照没有逐细胞模式槽，恢复时按 0 补齐。
+const MODE_ARRAY_NAMES: Array[String] = ["cell_mode", "cell_mode_depth"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -47,6 +50,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 		var source: Variant = cells.get(array_name)
 		snapshot["cells"][array_name] = _copy_array(source)
 	for array_name in PHENOTYPE_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in MODE_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -79,6 +84,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 			"color_r": float(genome.get("color_r")),
 			"color_g": float(genome.get("color_g")),
 			"color_b": float(genome.get("color_b")),
+			"modes": (genome.get("modes") as Array).duplicate(true),
+			"transfer_rate": float(genome.get("transfer_rate")),
 			"species_id": int(genome.get("species_id")),
 			"lineage_id": int(genome.get("lineage_id")),
 		})
@@ -164,6 +171,14 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			restored_values.fill(default_value)
 			cells.set(array_name, restored_values)
 
+	for array_name in MODE_ARRAY_NAMES:
+		if cell_data.has(array_name):
+			cells.set(array_name, _copy_array(cell_data[array_name]))
+		else:
+			var restored_mode_values: PackedByteArray = PackedByteArray()
+			restored_mode_values.resize(int(cells.get("cell_pos_x").size()))
+			cells.set(array_name, restored_mode_values)
+
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary
 	for array_name in ORGANISM_ARRAY_NAMES:
@@ -195,6 +210,11 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		genome.set("color_r", clampf(float(record.get("color_r", 0.36)), 0.0, 1.0))
 		genome.set("color_g", clampf(float(record.get("color_g", 0.88)), 0.0, 1.0))
 		genome.set("color_b", clampf(float(record.get("color_b", 0.75)), 0.0, 1.0))
+		# 旧快照缺 transfer_rate 时填 0.0：保持 v0.16.0 及更早的连接传递行为不变。
+		genome.set("transfer_rate", clampf(float(record.get("transfer_rate", 0.0)), 0.0, 1.0))
+		if not bool(genome.call("set_modes", record.get("modes", []))):
+			push_error("SaveManager: invalid genome modes in save")
+			return false
 		genome.set("species_id", int(record.get("species_id", 0)))
 		genome.set("lineage_id", int(record.get("lineage_id", -1)))
 		if not bool(genome.call("set_development_program", record.get("dev_program", []))):

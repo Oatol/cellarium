@@ -807,6 +807,9 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 			"color_r": float(_draft_genome.get("color_r")),
 			"color_g": float(_draft_genome.get("color_g")),
 			"color_b": float(_draft_genome.get("color_b")),
+			# v0.17.0：多模式槽与传递率仍只走 CommandBus payload，不进 GNP1 冻结二进制。
+			"modes": (_draft_genome.get("modes") as Array).duplicate(true),
+			"transfer_rate": float(_draft_genome.get("transfer_rate")),
 		}
 	if tool_id == "INJECT_COLOR":
 		command["color_type"] = _inject_color_type

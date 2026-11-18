@@ -55,20 +55,17 @@ func _ready() -> void:
 		organism_manager.set("tick_core", tick_core)
 	_setup_agent_bridge()
 	if create_demo_organism and organism_manager != null and int(organism_manager.call("get_organism_count")) == 0:
-		var genome: RefCounted = load("res://scripts/core/data/Genome.gd").new() as RefCounted
+		var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+		var genome: RefCounted = genome_script.new() as RefCounted
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-		# 默认演示一个 4 细胞协作体：结构核 + 运动/能量/信息三类分化细胞，并用 Link 连成一体。
-		genome.call("set_development_program", [
-			{"opcode": 0, "a": 0, "b": 0,   "c": 14},
-			{"opcode": 0, "a": 0, "b": 85,  "c": 14},
-			{"opcode": 0, "a": 1, "b": 170, "c": 14},
-			{"opcode": 1, "a": 1, "b": 2,   "c": 0},
-			{"opcode": 1, "a": 2, "b": 4,   "c": 0},
-			{"opcode": 1, "a": 3, "b": 5,   "c": 0},
-			{"opcode": 2, "a": 0, "b": 1,   "c": 14},
-			{"opcode": 2, "a": 0, "b": 2,   "c": 14},
-			{"opcode": 2, "a": 0, "b": 3,   "c": 14},
-		])
+		# v0.17.0 默认演示：5 个模式槽按「分裂即分化」生成 4 细胞/3 黏附连接，
+		# 不再使用旧的 9 条 dev_program；每个模式自带两子代与连接传递率。
+		genome.set("flags", int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2)))
+		genome.set("division_mass", 0.05)
+		genome.set("max_divisions", 3)
+		genome.set("child_types", PackedByteArray([2, 4, 5, 10]))
+		genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+		genome.call("set_modes", genome_script.call("demo_modes"))
 		var org_id: int = int(organism_manager.call("register_zygote", 0, 0, -1, genome, Vector2(250, 250), 0.8, 0))
 		if org_id >= 0 and status_label != null:
 			status_label.text = "cellarium | tick 0 | demo multicellular organism"

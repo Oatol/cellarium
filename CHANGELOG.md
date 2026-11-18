@@ -4,6 +4,33 @@
 
 ---
 
+## 0.17.0 — 2026-11-18
+
+**类型**：玩法机制版本化追加（多模式基因组 / 两子代分裂 / 连接能量传递；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）
+**触发**：用户反馈「连接的细胞没有能量转出/转入；细胞编辑为什么不能编辑细胞模式了，一个基因组由多个模式组成，每个模式存自己的类型、行为、子代与特殊控制；一个模式分裂为两个子代；发育预览中的细胞可点击跳转到对应模式编辑」。
+
+### 根因与证据边界
+
+- 连接转账为 0 的根因在调用端：`OrganismManager.default_transfer_rate = 0.0` 被 `rates.fill()` 传给 `CellMetabolism.redistribute_link_energy()`，诊断本身正确。
+- 用户提供的 Cell Lab Macro 截图可核对模式列表、两子代模式、黏附/镜像/角度、分裂阈值/比例、营养优先级、RGB、黏附/骨架/大小/连接数与可点击发育预览；40 Gene 槽全量语义、行为总线全索引与 `Gene.f773m` 运行时消费点仍无逐行证据，本版只做版本化追加，不复制全量实现。
+- 规格先行：v1.1 §5.3、v2.1 §0.3 / §11 与风险表、分析文档 §27 已先修订。
+
+### 实现
+
+- `Genome.gd` 新增 `modes: Array[Dictionary]` 与逐模式字段（类型、黏附、两子代模式/类型/角度/镜像、分裂质量/比例/层数、营养优先级、传递率、表型、颜色、黏附强度/长度/拉伸、特殊控制），并新增 `normalized_mode / get_mode / set_modes / demo_modes`；仅在 `modes` 非空时混入 hash，空 modes / flags 清零保持旧 hash。
+- `CellArray.gd` 新增 `cell_mode / cell_mode_depth`；分裂后母细胞作为子代 1、新细胞作为子代 2，切模式层数归零，同模式连续分裂才递增；顶层最大分裂次数仍限制个体细胞数。
+- `OrganismManager` 按模式派生传递率、阈值、质量比、子代模式/类型/表型与黏附连接；每个个体每 tick 最多分裂一次；`CellMetabolism` 守恒公式不变。默认演示体改为 5 模式 / 3 次分裂 / 4 细胞 / 3 连接。
+- `SaveManager` 升 `schema_version=4` 保存 `modes / transfer_rate / cell_mode / cell_mode_depth`；schema 1–3 旧快照缺字段填空/空数组。
+- `DevEditorPanel` 增加模式列表（新增/删除/切换/改名），当前 Macro 字段改为编辑当前模式，只显示子代 1 / 2；`GenomePreview` 每个派生细胞带模式索引，左键点击发出 `mode_selected` 跳转编辑。
+- `GameHUD` 将 `modes / transfer_rate` 继续经 `CommandBus` 的 `genome_gene` payload 传入，不进冻结 GNP1。
+
+### 验证 / 同步
+
+- 新增 SmokeTest：逐模式编辑不串数据、两子代模式、预览点击跳转、hash 兼容边界、模式分裂与表型继承、连接转账守恒、payload 往返、schema v4 与旧档回退。
+- 发布工程与 D 盘运行工程分别 `SCRIPTS=51 FAILURES=0 EXITCODE=0`；D 盘同步仅脚本，保留 autoload / `.uid` / 场景 `unique_id`。
+
+---
+
 ## 0.16.0 — 2026-11-18
 
 **类型**：玩法机制版本化追加（基因模式补齐 Macro 表型字段；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）

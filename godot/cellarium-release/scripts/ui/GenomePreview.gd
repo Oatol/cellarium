@@ -1,11 +1,13 @@
 extends PanelContainer
 ## 只读基因组发育预览（v0.13.1）。
+signal mode_selected(mode_index: int)
 ## 静态证据：Macro `GenomePreviewView` 是 GLSurfaceView，持有 j4 渲染器与 SimulationWorld/Gene[]，
 ## 用 FloatBuffer/ShortBuffer 程序化绘制真实细胞，支持触摸平移/缩放/选中回调（REA 证据见分析文档 §22）。
 ## 本项目派生实现：不跑第二套模拟、不写 CommandBus/field/hash；只把 draft.dev_program 逐条翻译成
 ## 可视化状态（分裂/分化/连接），用于「看见自己编辑的细胞如何发育」。
 
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
+const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 
 const STEP_SECONDS: float = 0.75
 const BASE_RADIUS: float = 15.0
@@ -32,8 +34,12 @@ func _ready() -> void:
 	_play_button = get_node_or_null(play_button_path) as Button
 	var previous: Button = get_node_or_null(prev_button_path) as Button
 	var following: Button = get_node_or_null(next_button_path) as Button
-	if _canvas != null and not _canvas.is_connected("draw", Callable(self, "_on_canvas_draw")):
-		_canvas.draw.connect(_on_canvas_draw)
+	if _canvas != null:
+		_canvas.mouse_filter = Control.MOUSE_FILTER_STOP
+		if not _canvas.is_connected("draw", Callable(self, "_on_canvas_draw")):
+			_canvas.draw.connect(_on_canvas_draw)
+		if not _canvas.is_connected("gui_input", Callable(self, "_on_canvas_gui_input")):
+			_canvas.gui_input.connect(_on_canvas_gui_input)
 	if _play_button != null:
 		_play_button.pressed.connect(_on_play_pressed)
 	if previous != null:
@@ -45,8 +51,9 @@ func _ready() -> void:
 ## 只读取 dev_program / 基因模式参数 / Macro 草案；相同参数重复调用不会重置播放进度。
 ## v0.15.0：基因模式按分裂质量阈值推导分裂序列，子代类型来自 child1–4（分裂即分化），
 ## 亲子连接来自黏附素 flag；不再有 LINK 指令阶段。
-func set_program(program: Array, macro_draft: Dictionary = {}, gene_mode: bool = false) -> void:
+func set_program(program: Array, macro_draft: Dictionary = {}, gene_mode: bool = false, modes: Array = []) -> void:
 	var signature: String = str(program) + "|" + str(gene_mode)
+	var has_modes: bool = gene_mode and not modes.is_empty()
 	if gene_mode:
 		signature += "|" + str(macro_draft.get("cell_type", 0)) + "|" + str(macro_draft.get("division_mass", 1.0))
 		signature += "|" + str(macro_draft.get("max_divisions", 3)) + "|" + str(macro_draft.get("make_glue", false))
@@ -56,13 +63,18 @@ func set_program(program: Array, macro_draft: Dictionary = {}, gene_mode: bool =
 		signature += "|" + str(macro_draft.get("color_g", 0.88)) + "|" + str(macro_draft.get("color_b", 0.75))
 		for child_index in range(1, 5):
 			signature += "|" + str(macro_draft.get("child%d" % child_index, 0)) + ":" + str(macro_draft.get("child%d_angle" % child_index, 0.0))
+		if has_modes:
+			signature += "|modes=" + str(modes)
 	else:
 		signature += "|" + str(macro_draft.get("cell_type", 0))
 	if signature == _program_signature and not _states.is_empty():
 		return
 	_program_signature = signature
 	if gene_mode:
-		_rebuild_gene_states(macro_draft)
+		if has_modes:
+			_rebuild_mode_states(macro_draft, modes)
+		else:
+			_rebuild_gene_states(macro_draft)
 	else:
 		_rebuild_states_from(program, int(macro_draft.get("cell_type", 0)))
 
@@ -90,6 +102,15 @@ func get_cell_type_at(state_index: int, cell_index: int) -> int:
 	if cell_index < 0 or cell_index >= cells.size():
 		return -1
 	return int((cells[cell_index] as Dictionary).get("type", -1))
+
+## v0.17.0：预览细胞所属模式槽；旧模式/旧指令状态返回 -1（不可点击跳转）。
+func get_mode_at(state_index: int, cell_index: int) -> int:
+	if state_index < 0 or state_index >= _states.size():
+		return -1
+	var cells: Array = _states[state_index].get("cells", []) as Array
+	if cell_index < 0 or cell_index >= cells.size():
+		return -1
+	return int((cells[cell_index] as Dictionary).get("mode", -1))
 
 ## v0.16.0：只读 caption，供 "预览显示表型" 的回归断言使用。
 func get_state_caption_at(state_index: int) -> String:
@@ -124,7 +145,96 @@ func _process(delta: float) -> void:
 func _rebuild_states() -> void:
 	_rebuild_states_from([], 0)
 
-## v0.15.0 基因模式：按分裂阈值/次数派生状态，子代类型即分化，黏附素即连接。
+## v0.17.0 多模式：只读派生「当前模式 → 两个子代模式」的分裂序列。
+## 与运行时同口径：母细胞索引作为子代 1，新细胞为子代 2；逐模式层数限制分裂。
+func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
+	_states.clear()
+	_cursor = 0
+	_elapsed = 0.0
+	var modes: Array[Dictionary] = []
+	for i in range(raw_modes.size()):
+		modes.append(GENOME_SCRIPT.call("normalized_mode", raw_modes[i], i))
+	if modes.is_empty():
+		_rebuild_gene_states(draft)
+		return
+	var global_divisions: int = clampi(int(round(float(draft.get("max_divisions", 3)))), 0, 8)
+	var root: Dictionary = modes[0]
+	var initial: Array[Dictionary] = [{
+		"index": 0, "pos": Vector2.ZERO, "type": int(root.get("cell_type", 0)),
+		"parent": -1, "born": true, "mode": 0, "depth": 0,
+	}]
+	_append_state(initial, [], "%s · 阈值 %.2f · 传递率 %.2f" % [
+		str(root.get("name", "M1")), float(root.get("division_mass", 0.05)), float(root.get("transfer_rate", 0.12))], 0)
+	var links: Array = []
+	for _division in range(global_divisions):
+		var previous: Array[Dictionary] = _states[_states.size() - 1].get("cells", []) as Array[Dictionary]
+		var cells: Array[Dictionary] = []
+		for source in previous:
+			cells.append((source as Dictionary).duplicate(true))
+		var parent_index: int = -1
+		var parent_mode: Dictionary = {}
+		var parent_mode_index: int = -1
+		for cell_index in range(cells.size()):
+			var cell: Dictionary = cells[cell_index]
+			var candidate_index: int = clampi(int(cell.get("mode", 0)), 0, modes.size() - 1)
+			var candidate: Dictionary = modes[candidate_index]
+			var depth: int = int(cell.get("depth", 0))
+			if depth < int(candidate.get("max_divisions", 0)):
+				parent_index = cell_index
+				parent_mode = candidate
+				parent_mode_index = candidate_index
+				break
+		if parent_index < 0:
+			break
+		var parent: Dictionary = cells[parent_index]
+		var child1_mode: int = clampi(int(parent_mode.get("child1_mode", 0)), 0, modes.size() - 1)
+		var child2_mode: int = clampi(int(parent_mode.get("child2_mode", 0)), 0, modes.size() - 1)
+		var mode1: Dictionary = modes[child1_mode]
+		var mode2: Dictionary = modes[child2_mode]
+		var child1_angle: float = clampf(float(parent_mode.get("child1_angle", 0.0)), 0.0, 1.0)
+		var child2_angle: float = clampf(float(parent_mode.get("child2_angle", 0.25)), 0.0, 1.0)
+		if bool(parent_mode.get("child2_mirror", false)):
+			child2_angle = fposmod(-child1_angle, 1.0)
+		var angle: float = TAU * child2_angle
+		var separation: float = 14.0 * maxf(0.5, float(parent_mode.get("cell_size", 1.0)))
+		var direction: Vector2 = Vector2(cos(angle), sin(angle))
+		parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
+		parent["type"] = int(mode1.get("cell_type", 0))
+		parent["mode"] = child1_mode
+		parent["depth"] = int(parent.get("depth", 0)) + 1 if child1_mode == parent_mode_index else 0
+		parent["born"] = false
+		for cell in cells:
+			if int((cell as Dictionary).get("index", -1)) != parent_index:
+				(cell as Dictionary)["born"] = false
+		var child_index: int = cells.size()
+		cells.append({
+			"index": child_index,
+			"pos": (parent.get("pos", Vector2.ZERO) as Vector2) + direction * separation,
+			"type": int(mode2.get("cell_type", 0)),
+			"parent": parent_index, "born": true,
+			"mode": child2_mode, "depth": 0,
+		})
+		var link_limit: int = clampi(int(mode1.get("max_connections", 4)), 0, 16)
+		if (bool(parent_mode.get("child1_glue", false)) or bool(parent_mode.get("child2_glue", true))) \
+			and _preview_can_link(links, parent_index, child_index, link_limit):
+			links.append({"a": parent_index, "b": child_index, "rest": separation})
+		var min_links: int = clampi(int(mode1.get("min_connections", 0)), 0, link_limit)
+		if min_links > 0:
+			for peer_index in range(cells.size() - 1):
+				if peer_index == child_index or not _preview_can_link(links, child_index, peer_index, link_limit):
+					continue
+				links.append({"a": child_index, "b": peer_index, "rest": separation})
+				if _preview_link_count(links, child_index) >= min_links:
+					break
+		var caption: String = "%s → %s / %s · 类型 %d → %d/%d · 连接 %d" % [
+			str(parent_mode.get("name", "?")), str(mode1.get("name", "?")), str(mode2.get("name", "?")),
+			int(parent.get("type", 0)), int(mode1.get("cell_type", 0)), int(mode2.get("cell_type", 0)), links.size()]
+		_append_state(cells, links.duplicate(true), caption, 0)
+	_sync_caption()
+	if _canvas != null:
+		_canvas.queue_redraw()
+
+## v0.15.0 基因模式（无 modes）：保留旧派生逻辑，供旧存档/旧命令回放。
 func _rebuild_gene_states(draft: Dictionary) -> void:
 	_states.clear()
 	_cursor = 0
@@ -287,6 +397,31 @@ func _sync_caption() -> void:
 	_caption.text = "%s · 状态 %d/%d %s" % [caption, _cursor + 1, _states.size(), "▶" if _playing else "⏸"]
 	if _play_button != null:
 		_play_button.text = "暂停" if _playing else "播放"
+
+func _on_canvas_gui_input(event: InputEvent) -> void:
+	if not (event is InputEventMouseButton) or not (event as InputEventMouseButton).pressed \
+		or (event as InputEventMouseButton).button_index != MOUSE_BUTTON_LEFT:
+		return
+	if _states.is_empty() or _canvas == null:
+		return
+	var local_position: Vector2 = (event as InputEventMouseButton).position
+	var center: Vector2 = _canvas.size * 0.5
+	var cells: Array = (_states[_cursor] as Dictionary).get("cells", []) as Array
+	var best_index: int = -1
+	var best_distance: float = INF
+	for cell_index in range(cells.size()):
+		var cell: Dictionary = cells[cell_index] as Dictionary
+		var cell_position: Vector2 = center + (cell.get("pos", Vector2.ZERO) as Vector2) * WORLD_SCALE
+		var distance_value: float = local_position.distance_to(cell_position)
+		if distance_value < best_distance:
+			best_distance = distance_value
+			best_index = cell_index
+	if best_index < 0 or best_distance > BASE_RADIUS + 8.0:
+		return
+	var mode_index: int = int((cells[best_index] as Dictionary).get("mode", -1))
+	if mode_index >= 0:
+		mode_selected.emit(mode_index)
+		_canvas.accept_event()
 
 func _on_canvas_draw() -> void:
 	if _canvas == null or _states.is_empty():
