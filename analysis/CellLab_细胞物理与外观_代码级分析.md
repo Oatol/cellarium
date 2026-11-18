@@ -970,3 +970,23 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 分裂：`w>division_mass`、`o>0.5`、连接数<=max_connections、`p>0.2`、池有空位；母子各偏 `0.1r`、能量按 split_ratio 分；`D=child1_mode`（母）/`child2_mode`（子）；合子画 4 指示器（child1..4），非合子画 2。
 - 半径低通、接触排斥、连接弹簧按 §32.4 原式。
 - 内核为 `RefCounted`、无 `class_name`、固定种子、不写 CommandBus/field/hash/save，纯只读派生，保证主模拟确定性不受影响。
+
+### 32.7 v0.24.0：细胞膜弦接入预览 + 手动时间轴
+
+**用户诉求**：发育预览中也应有细胞膜弦（贴合效果），且应可手动调整时间轴而非自动播放（复杂细胞便于逐时刻观察）。
+
+**膜弦机制（本轮全量反编译 `CellWorld.a(FFFF)` 方法体精读）**：
+- 弦端点 `cell.A[]`（`u` 对象）：`a/b`=一端、`c/d`=另一端、`e`=剔除标记、`f`=被截断标记、`g`=对端索引；在接触阶段 `d(int)` 由圆-圆相交面积解析式写入（端点顺序 `endpoint1=middle-perp*h`、`endpoint2=middle+perp*h`）。
+- `a(FFFF)` 构建膜多边形：先把两两弦求交、剔除完全遮挡弦（`e=true`）与自相交弦，再用 `u.compareTo`（按角度，`e` 排末尾）排序；圆心作扇形顶点 0，每个有效弦端点作顶点，相邻端点间用圆方程求弧中点插值（`v[1..3]/w[1..3]`）补出圆弧楔（3 或 4 顶点），扇形连成整膜。
+- 弦连接桥：两个 Link 细胞的接触点间画四边形，把两张膜缝在一起（`link.g/h`、`link.i/j`）。
+- 无接触（`cell.B==0`）时画包围盒 `±r`，由 fragment shader `discard(ds>r²)` 裁成圆——「物理与渲染共享同一组弦端点」是本作外观精密贴合的根本。
+
+**落地**：
+- `PreviewWorld`：接触阶段（推开前）按同一解析式算弦端点，记 `owner_a/owner_b/kind`（0=细胞间、1=皿壁），快照随细胞输出；不写模拟状态、不进 hash。
+- `GenomePreview`：复用运行时 `CellContactChords.gd` 管线（`make_unit_chords` → `prepare_for_render` → `clip_unit_circle`），有弦时画切平膜多边形、无弦时画正圆；分裂指示器仍按 §32.2 的 `j4.I()` 公式叠加。
+
+**手动时间轴**：
+- 场景 `GenomePreview.tscn` 新增 `Timeline/Slider`（HSlider）+ `TimeLabel`；默认暂停（`_playing=false`），播放到末态即停不循环。
+- 拖动滑块直接跳到对应分裂时刻并暂停；按钮/播放与滑块双向同步；时刻标签显示真实 tick 与细胞数（如 `t=49 · 4胞`）。
+- 每个快照记录内核 `get_tick()`，便于复杂细胞逐时刻定位。
+- 验证：探针断言弦在分裂接触时生成、滑块/标签存在、默认暂停、拖动跳转生效；双工程 `SCRIPTS=53 FAILURES=0 ERRORS=0`，探针 `FAILURES=0`。

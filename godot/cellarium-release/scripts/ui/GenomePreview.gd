@@ -12,6 +12,8 @@ signal mode_selected(mode_index: int)
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const PREVIEW_WORLD: Script = preload("res://scripts/core/data/PreviewWorld.gd")
+## 复用运行时的 Cell Lab 弦工具：物理与渲染共享同一组圆-圆相交弦端点。
+const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd")
 
 const STEP_SECONDS: float = 0.75
 const BASE_RADIUS: float = 15.0
@@ -32,15 +34,21 @@ var _zoom: float = 1.0
 @export var play_button_path: NodePath = ^"Margin/VBox/Controls/PlayButton"
 @export var prev_button_path: NodePath = ^"Margin/VBox/Controls/PrevButton"
 @export var next_button_path: NodePath = ^"Margin/VBox/Controls/NextButton"
+@export var timeline_path: NodePath = ^"Margin/VBox/Timeline/Slider"
+@export var time_label_path: NodePath = ^"Margin/VBox/Timeline/TimeLabel"
 
 var _canvas: Control = null
 var _caption: Label = null
 var _play_button: Button = null
+var _timeline: HSlider = null
+var _time_label: Label = null
 var _program_signature: String = ""
 var _states: Array[Dictionary] = []
 var _cursor: int = 0
 var _elapsed: float = 0.0
-var _playing: bool = true
+## v0.24.0：默认手动时间轴（暂停），需要动态观察时再点播放。复杂细胞逐时刻查看更高效。
+var _playing: bool = false
+var _syncing_timeline: bool = false
 
 func _ready() -> void:
 	_canvas = get_node_or_null(canvas_path) as Control
@@ -48,6 +56,10 @@ func _ready() -> void:
 	_play_button = get_node_or_null(play_button_path) as Button
 	var previous: Button = get_node_or_null(prev_button_path) as Button
 	var following: Button = get_node_or_null(next_button_path) as Button
+	_timeline = get_node_or_null(timeline_path) as HSlider
+	_time_label = get_node_or_null(time_label_path) as Label
+	if _timeline != null:
+		_timeline.value_changed.connect(_on_timeline_changed)
 	if _canvas != null:
 		_canvas.mouse_filter = Control.MOUSE_FILTER_STOP
 		if not _canvas.is_connected("draw", Callable(self, "_on_canvas_draw")):
@@ -166,10 +178,38 @@ func _process(delta: float) -> void:
 	_elapsed += delta
 	if _elapsed >= STEP_SECONDS:
 		_elapsed = 0.0
-		_cursor = (_cursor + 1) % _states.size()
-		_sync_caption()
+		if _cursor < _states.size() - 1:
+			_cursor += 1
+			_sync_caption()
+			_sync_timeline()
+		else:
+			_playing = false  # 播放到末态即停，不循环回合子
+			_sync_caption()
 	if _canvas != null:
 		_canvas.queue_redraw()
+
+## 手动拖动时间轴：直接跳到对应分裂时刻并暂停。
+func _on_timeline_changed(value: float) -> void:
+	if _syncing_timeline or _states.is_empty():
+		return
+	_playing = false
+	_cursor = clampi(int(round(value)), 0, _states.size() - 1)
+	_elapsed = 0.0
+	_sync_caption()
+	if _canvas != null:
+		_canvas.queue_redraw()
+
+func _sync_timeline() -> void:
+	if _timeline == null or _states.is_empty():
+		return
+	_syncing_timeline = true
+	_timeline.max_value = float(_states.size() - 1)
+	_timeline.value = float(_cursor)
+	_syncing_timeline = false
+	var tick: int = int((_states[_cursor] as Dictionary).get("tick", 0))
+	var cells: int = int((_states[_cursor] as Dictionary).get("cells", []).size())
+	if _time_label != null:
+		_time_label.text = "t=%d · %d胞" % [tick, cells]
 
 func _rebuild_states() -> void:
 	# 无指令时用默认基因跑真实内核，给出 Cells Lab 式发育演示。
@@ -233,9 +273,11 @@ func _make_snapshot(step_index: int, caption: String, splits: Array[Dictionary])
 			cell["born"] = int(cell.get("index", -1)) >= maxi(0, _states.size() - 1)
 			cells.append(cell)
 	var links: Array[Dictionary] = []
+	var tick: int = 0
 	if _world != null:
 		links = _world.snapshot_links()
-	return {"cells": cells, "links": links, "caption": caption, "opcode": 0, "splits": splits, "step": step_index}
+		tick = int(_world.get_tick())
+	return {"cells": cells, "links": links, "caption": caption, "opcode": 0, "splits": splits, "step": step_index, "tick": tick}
 
 func _rebuild_gene_states(draft: Dictionary) -> void:
 	# 用真实内核跑单基因模式；子代类型按 child1/child2 轮转（对应 Cell Lab 分化树 i/j）。
@@ -370,10 +412,11 @@ func _on_play_pressed() -> void:
 	_sync_caption()
 
 func _sync_caption() -> void:
+	_sync_timeline()
 	if _caption == null:
 		return
 	var caption: String = "" if _states.is_empty() else str(_states[_cursor].get("caption", ""))
-	_caption.text = "%s · 状态 %d/%d %s" % [caption, _cursor + 1, _states.size(), "▶" if _playing else "⏸"]
+	_caption.text = "%s · 时刻 %d/%d %s（拖动时间轴或点播放）" % [caption, _cursor + 1, _states.size(), "▶" if _playing else "⏸"]
 	if _play_button != null:
 		_play_button.text = "暂停" if _playing else "播放"
 
@@ -477,12 +520,9 @@ func _on_canvas_draw() -> void:
 		var type_id: int = int(cell.get("type", 0))
 		var fill: Color = (VISUALS.call("role_color", type_id) as Color)
 		fill.a = 0.55 * appear
-		_canvas.draw_circle(pos, radius, fill)
 		var membrane: Color = (VISUALS.call("accent_color", type_id) as Color)
 		membrane.a = appear
-		_canvas.draw_arc(pos, radius, 0.0, TAU, 32, membrane, 2.0, true)
-		# 细胞核按 Cell Lab NR=0.25 半径比绘制
-		_canvas.draw_circle(pos, radius * 0.25, Color(0.9, 0.96, 0.92, 0.85 * appear))
+		_draw_membrane(cell, pos, radius, world_radius, fill, membrane, appear)
 	# Cell Lab j4.I() 逐方法等价的分裂指示器：子代将出现的位置画圆点。
 	if not show_split_indicators:
 		return
@@ -523,6 +563,32 @@ func _on_canvas_draw() -> void:
 				var dist: float = (1.0 - ratio) * f10 if k < 2 else ratio * f10
 				var pp: Vector2 = split_center + dir2 * dist * 14.0 * WORLD_SCALE * _zoom * sign
 				_canvas.draw_circle(pp, dot_radius_px * 0.8, Color(gcol.r, gcol.g, gcol.b, 0.85))
+
+## Cell Lab a(FFFF)/d(int) 复刻：物理与渲染共享同一组圆-圆相交弦端点。
+## 有弦时用 CellContactChords 把解析圆按公共弦切平（细胞膜贴合），无弦时用正圆。
+func _draw_membrane(cell: Dictionary, screen_pos: Vector2, radius: float, world_radius: float,
+		fill: Color, membrane: Color, appear: float) -> void:
+	var world_chords: Array = cell.get("chords", []) as Array
+	var cell_center: Vector2 = cell.get("pos", Vector2.ZERO)
+	var outline_points: PackedVector2Array = PackedVector2Array()
+	if not world_chords.is_empty():
+		var unit_chords: Array = CHORDS.call("make_unit_chords", world_chords, cell_center, 0.0, world_radius)
+		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
+		outline_points = CHORDS.call("clip_unit_circle", prepared, 48)
+	if outline_points.size() >= 3:
+		var world_poly: PackedVector2Array = PackedVector2Array()
+		for point in outline_points:
+			world_poly.append(screen_pos + point * radius)
+		_canvas.draw_colored_polygon(world_poly, fill)
+		# 膜：折线闭合
+		var closed: PackedVector2Array = world_poly.duplicate()
+		closed.append(world_poly[0])
+		_canvas.draw_polyline(closed, membrane, 2.0, true)
+	else:
+		_canvas.draw_circle(screen_pos, radius, fill)
+		_canvas.draw_arc(screen_pos, radius, 0.0, TAU, 32, membrane, 2.0, true)
+	# 细胞核 CELL Lab NR=0.25
+	_canvas.draw_circle(screen_pos, radius * 0.25, Color(0.9, 0.96, 0.92, 0.85 * appear))
 
 func _gene_color(gene: Dictionary, mode_key: String, fallback: int) -> Color:
 	var slot: int = clampi(int(gene.get(mode_key, fallback)), 0, 7)

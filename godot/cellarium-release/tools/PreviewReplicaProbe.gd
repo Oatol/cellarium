@@ -67,7 +67,8 @@ func _initialize() -> void:
 	_check(pv_script != null and pv_script.can_instantiate(), "GenomePreview.gd parse")
 	var ps: PackedScene = ResourceLoader.load("res://scenes/ui/GenomePreview.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
 	var inst = ps.instantiate()
-	var root = Node.new(); root.add_child(inst)
+	root.add_child(inst)  # SceneTree.root：触发 _ready 连接时间轴信号
+	await process_frame   # 等 _ready 完成，时间轴信号才连上
 	var modes: Array = [
 		{"name": "M1", "cell_type": 0, "division_mass": 0.05, "split_ratio": 0.5,
 		 "child1_mode": 0, "child2_mode": 0, "child1_angle": 0.0, "child2_angle": 0.25,
@@ -78,5 +79,21 @@ func _initialize() -> void:
 	_check(nstate >= 2, "GenomePreview 多模式真实模拟状态 >=2 (got " + str(nstate) + ")")
 	var cells_last: int = int(inst.call("get_cell_count_at", nstate - 1))
 	_check(cells_last >= 2, "GenomePreview 末态细胞 >=2 (got " + str(cells_last) + ")")
+	# 5) v0.24.0：细胞膜弦——分裂时刻应有圆-圆相交弦（世界坐标端点）。
+	var w3 = _make_world(script, [gene])
+	var chord_seen: bool = false
+	for t in range(60):
+		w3.step()
+		if not w3.snapshot_chords().is_empty():
+			chord_seen = true; break
+	_check(chord_seen, "细胞膜弦在分裂接触时生成")
+	# 6) v0.24.0：手动时间轴——滑块/时刻标签存在，默认暂停，拖动跳转生效。
+	var slider = inst.find_child("Slider", true, false)
+	var time_label = inst.find_child("TimeLabel", true, false)
+	_check(slider != null and time_label != null, "时间轴滑块与时刻标签存在")
+	_check(not bool(inst.call("is_playing")), "默认暂停（手动时间轴）")
+	if slider != null and nstate >= 2:
+		slider.set_value(float(nstate - 1))
+		_check(int(inst.call("get_cursor")) == nstate - 1, "拖动时间轴跳转到末态")
 	print("PreviewReplica: FAILURES=", _failures)
 	quit()

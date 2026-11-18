@@ -29,6 +29,22 @@ layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
+[node name="Timeline" type="HBoxContainer" parent="Margin/VBox"]
+layout_mode = 2
+
+[node name="TimeLabel" type="Label" parent="Margin/VBox/Timeline"]
+layout_mode = 2
+text = "t=0"
+custom_minimum_size = Vector2(64, 0)
+
+[node name="Slider" type="HSlider" parent="Margin/VBox/Timeline"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 0.0
+max_value = 1.0
+step = 1.0
+value = 0.0
+
 [node name="Caption" type="Label" parent="Margin/VBox"]
 layout_mode = 2
 text = "GENOME PREVIEW · 只读"

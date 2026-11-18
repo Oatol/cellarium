@@ -54,6 +54,11 @@ var _zygote_type: int = 0
 # 本帧新产生的分裂事件（供指示器）；清理由 consume_splits 完成
 var _pending_splits: Array[Dictionary] = []
 
+# 本帧接触弦（世界坐标 a/b + peer + kind），与 Cell Lab cell.A[] 同源：
+# 在接触阶段（推开之前）按圆-圆相交计算，供预览层用 CellContactChords 重建压平膜。
+# kind: 0=细胞间接触弦，1=皿壁弦。
+var _contact_chords: Array[Dictionary] = []
+
 func _init() -> void:
 	_reset_arrays()
 
@@ -147,6 +152,7 @@ func get_tick() -> int:
 func step() -> void:
 	_tick += 1
 	_pending_splits.clear()
+	_contact_chords.clear()
 	_metabolize(DT)
 	_relax_radius(DT)
 	_divide(DT)
@@ -283,7 +289,7 @@ func _link_count_for(i: int) -> int:
 ## Cell Lab d(int) 在接触阶段算公共弦 + 写 A[]，力写 g/h 累加器；这里用简化径向排斥保持视觉一致。
 func _resolve_contacts() -> void:
 	var iterations: int = 2
-	for _it in range(iterations):
+	for it in range(iterations):
 		for a in range(_count):
 			if _alive[a] == 0:
 				continue
@@ -295,10 +301,48 @@ func _resolve_contacts() -> void:
 				var min_dist: float = REST_DISTANCE * maxf(0.5, maxf(_radius[a], _radius[b]) / 14.0)
 				if dist >= min_dist or dist < 1e-5:
 					continue
+				# 第一次迭代、推开之前记录圆-圆相交弦（与 Cell Lab d(int) A[] 同源）。
+				if it == 0:
+					var chord: Dictionary = _circle_chord(_pos[a], _radius[a], _pos[b], _radius[b], a, b)
+					if not chord.is_empty():
+						_contact_chords.append(chord)
 				var overlap: float = min_dist - dist
 				var push: Vector2 = delta / dist * (overlap * 0.5)
 				_pos[a] -= push
 				_pos[b] += push
+	# 皿壁弦：细胞圆与皿壁圆（内切）相交时记录（kind=1）。
+	var wall_r: float = DISH_RADIUS * 10.0
+	for a in range(_count):
+		if _alive[a] == 0:
+			continue
+		var s: float = _pos[a].length()
+		if s < 1e-5 or s + _radius[a] <= wall_r:
+			continue
+		var direction: Vector2 = -_pos[a] / s  # 指向皿心
+		var d: float = (_radius[a] * _radius[a] - wall_r * wall_r + s * s) / (2.0 * s)
+		var h_sq: float = _radius[a] * _radius[a] - d * d
+		if h_sq <= 0.0:
+			continue
+		var middle: Vector2 = _pos[a] + direction * d
+		var perp: Vector2 = Vector2(-direction.y, direction.x)
+		var h: float = sqrt(h_sq)
+		_contact_chords.append({"a": middle - perp * h, "b": middle + perp * h, "owner_a": a, "owner_b": -1, "kind": 1})
+
+## 两圆相交弦（Cell Lab d(int) d51/d54..d56）：返回世界坐标端点 a/b + 两端 owner。
+func _circle_chord(p0: Vector2, r0: float, p1: Vector2, r1: float, owner_a: int, owner_b: int) -> Dictionary:
+	var delta: Vector2 = p1 - p0
+	var s: float = delta.length()
+	if s < 0.000001 or s >= r0 + r1 or s <= absf(r0 - r1):
+		return {}
+	var direction: Vector2 = delta / s
+	var d: float = (s * s - r1 * r1 + r0 * r0) / (2.0 * s)
+	var h_sq: float = r0 * r0 - d * d
+	if h_sq <= 0.0:
+		return {}
+	var middle: Vector2 = p0 + direction * d
+	var perp: Vector2 = Vector2(-direction.y, direction.x)
+	var h: float = sqrt(h_sq)
+	return {"a": middle - perp * h, "b": middle + perp * h, "owner_a": owner_a, "owner_b": owner_b, "kind": 0}
 
 func _integrate_positions(dt: float) -> void:
 	for i in range(_count):
@@ -326,13 +370,26 @@ func snapshot_cells() -> Array[Dictionary]:
 	for i in range(_count):
 		if _alive[i] == 0:
 			continue
+		var cell_chords: Array[Dictionary] = []
+		for chord in _contact_chords:
+			var c: Dictionary = chord as Dictionary
+			if int(c.get("owner_a", -1)) == i or int(c.get("owner_b", -1)) == i:
+				cell_chords.append(c)
 		result.append({
 			"index": i, "pos": _pos[i], "radius": _radius[i],
 			"energy": _energy[i], "age": _age[i], "orientation": _orientation[i],
 			"gene_slot": _gene_slot[i], "mode": _gene_slot[i],
 			"type": int((_genes[clampi(_gene_slot[i], 0, _genes.size() - 1)] as Dictionary).get("cell_type", 0)),
 			"phase": _phase[i], "telomere": _telomere[i],
+			"chords": cell_chords,
 		})
+	return result
+
+## 只读：本帧全部接触弦（世界坐标），供连接板/诊断使用。
+func snapshot_chords() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for chord in _contact_chords:
+		result.append((chord as Dictionary).duplicate(true))
 	return result
 
 func snapshot_links() -> Array[Dictionary]:
