@@ -4,6 +4,31 @@
 
 ---
 
+## 0.21.0 — 2026-11-19
+
+**类型**：分裂机制对齐 Cell Lab（per-cell 并行倍增 + 半圆出生形状）+ 发育预览分裂指示器
+**触发**：用户观察到 Godot 细胞链是 1/2/3/4 线性增长而非 Cell Lab 的倍增，分裂后细胞不再分裂；且分裂看不到 Cell Lab 的两个半圆效果，发育预览也没有分裂线/方向。静态查证确认：Cell Lab `e(double)` 对每个细胞独立判定分裂（无 per-organism cooldown），出生时母子各沿分裂轴移 0.1r（中心距 0.2r、半径不变→重叠半圆），分裂施加零力、下一 tick 接触排斥弹开；Macro `GenomeEditorFragment` 有 `checkbox_show_split_indicators` 控件。
+
+### 实现
+
+- **v0.20.0 并行倍增**：分裂调度从「按 org_id 每 tick 一次 + 个体级 cooldown=300」改为「每细胞独立 cooldown」。`CellArray` 新增确定性状态 `cell_division_tick`（上次分裂 sim_tick，进 hash/存档）；候选阶段用逐细胞 cooldown 取代 per-org 闸门并保留单细胞首帧宽限；分裂后母子各自重置 tick，刚出生的子细胞当 tick 不再分裂。实测单模式 M1→M1+M1 走 1→2→4→8→16→32，能量守恒。schema 升 v7（旧档 `cell_division_tick` 填 -2）。
+- **v0.21.0 半圆出生形状**：出生间距从 `max(14, 2r)=14`（正好相切，看不到半圆）改为 Cell Lab 口径 `0.2r`；分裂后母子各沿分裂轴偏 `0.1r`（中点在原母细胞位置），半径当帧保持母半径 → 高度重叠，共享弦渲染成两个贴靠半圆。连接静止长度仍为 `2r`，分裂在 metabolism 阶段（碰撞之后），下一 tick 的接触排斥把两细胞弹开至 `2r`，与 Cell Lab「分裂零力、靠接触排斥分离」一致。
+- **v0.21.0 发育预览分裂指示器**：`GenomePreview` 新增 `show_split_indicators` 导出（对应 Macro `checkbox_show_split_indicators`）。三条派生路径（多模式/基因模式/旧指令）均记录每次分裂的 `angle` 与亲子索引，`_on_canvas_draw` 叠加垂直于分裂轴的切面线（黄）与母→子的方向箭头（橙）。纯绘制，不写 CommandBus/field/hash/模拟状态。新增只读 `get_split_count_at` / `get_split_angle_at`。
+
+### 验证
+
+- SmokeTest 新增 `OK v0.21.0`：per-cell 倍增经过 2/4/8；出生帧母子中心距/接触距=0.1（即 0.2r）且半径保持 1.0；下一 tick 被排斥拉开。另在基因预览测试内断言分裂指示器数量随分裂递增、角度在 0..TAU。
+- 程序化探针 `HalfCircleProbe.gd`：`BIRTH_FRAME dist=1.4 contact=14.0 ratio=0.1`；`NEXT_TICK dist=14.0 pushed_apart=true`。`DivisionProbe.gd` 复核倍增 1→2→4→8→16→32、能量守恒。
+- 双工程（发布工程 + D 盘运行工程）均 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
+
+### 边界
+
+- 并行倍增改变默认演示体与旧快照的细胞数轨迹（由 `max_divisions` 链与能量减半约束上限），GNP1 二进制布局、tick 顺序、单帧 12 tick 上限不动。
+- 半圆效果基于共享弦对重叠圆的自然裁剪，分裂零力；视觉持续时间由接触排斥速度决定，未在渲染层额外加动画。
+- 证据均来自静态反编译（APK 未执行），性能/形状数字来自 headless CPU 回退探针；GPU 实际观感需窗口环境复核。
+
+---
+
 ## 0.19.0 — 2026-11-18
 
 **类型**：玩法机制补齐（半径-能量低通）+ 视图热点优化；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动

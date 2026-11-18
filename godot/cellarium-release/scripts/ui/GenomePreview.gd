@@ -13,6 +13,10 @@ const STEP_SECONDS: float = 0.75
 const BASE_RADIUS: float = 15.0
 const WORLD_SCALE: float = 5.0
 
+## v0.21.0：对应 Cell Lab Macro `checkbox_show_split_indicators`。
+## 预览里叠加分裂线（垂直分裂轴的切面）与分裂方向箭头（母→子）。纯绘制，不写模拟状态。
+@export var show_split_indicators: bool = true
+
 @export var canvas_path: NodePath = ^"Margin/VBox/Canvas"
 @export var caption_path: NodePath = ^"Margin/VBox/Caption"
 @export var play_button_path: NodePath = ^"Margin/VBox/Controls/PlayButton"
@@ -95,6 +99,21 @@ func get_link_count_at(state_index: int) -> int:
 		return 0
 	return int((_states[state_index].get("links", []) as Array).size())
 
+## v0.21.0：只读分裂指示器数量；供回归检查预览确实记录了分裂线与方向。
+func get_split_count_at(state_index: int) -> int:
+	if state_index < 0 or state_index >= _states.size():
+		return 0
+	return int((_states[state_index].get("splits", []) as Array).size())
+
+## v0.21.0：只读某条分裂指示器的角度（弧度）。无记录返回 -INF。
+func get_split_angle_at(state_index: int, split_index: int) -> float:
+	if state_index < 0 or state_index >= _states.size():
+		return -INF
+	var splits: Array = _states[state_index].get("splits", []) as Array
+	if split_index < 0 or split_index >= splits.size():
+		return -INF
+	return float((splits[split_index] as Dictionary).get("angle", -INF))
+
 func get_cell_type_at(state_index: int, cell_index: int) -> int:
 	if state_index < 0 or state_index >= _states.size():
 		return -1
@@ -166,6 +185,7 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 	_append_state(initial, [], "%s · 阈值 %.2f · 传递率 %.2f" % [
 		str(root.get("name", "M1")), float(root.get("division_mass", 0.05)), float(root.get("transfer_rate", 0.12))], 0)
 	var links: Array = []
+	var splits: Array = []
 	for _division in range(global_divisions):
 		var previous: Array[Dictionary] = _states[_states.size() - 1].get("cells", []) as Array[Dictionary]
 		var cells: Array[Dictionary] = []
@@ -198,7 +218,8 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 		var angle: float = TAU * child2_angle
 		var separation: float = 14.0 * maxf(0.5, float(parent_mode.get("cell_size", 1.0)))
 		var direction: Vector2 = Vector2(cos(angle), sin(angle))
-		parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
+		var split_center: Vector2 = parent.get("pos", Vector2.ZERO) as Vector2
+		parent["pos"] = split_center - direction * separation * 0.5
 		parent["type"] = int(mode1.get("cell_type", 0))
 		parent["mode"] = child1_mode
 		parent["depth"] = int(parent.get("depth", 0)) + 1 if child1_mode == parent_mode_index else 0
@@ -229,7 +250,8 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 		var caption: String = "%s → %s / %s · 类型 %d → %d/%d · 连接 %d" % [
 			str(parent_mode.get("name", "?")), str(mode1.get("name", "?")), str(mode2.get("name", "?")),
 			int(parent.get("type", 0)), int(mode1.get("cell_type", 0)), int(mode2.get("cell_type", 0)), links.size()]
-		_append_state(cells, links.duplicate(true), caption, 0)
+		splits.append({"pos": split_center, "angle": angle, "parent": parent_index, "child": child_index})
+		_append_state(cells, links.duplicate(true), caption, 0, splits.duplicate(true))
 	_sync_caption()
 	if _canvas != null:
 		_canvas.queue_redraw()
@@ -253,6 +275,7 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 	}]
 	_append_state(initial_cells, [], "合子 · 阈值 %.2f · 大小 %.2f · %s" % [mass, cell_size, rgb_text], 0)
 	var links: Array = []
+	var splits: Array = []
 	for division_index in range(divisions):
 		var cells: Array[Dictionary] = []
 		for source in _states[_states.size() - 1].get("cells", []):
@@ -263,8 +286,9 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 		var angle: float = TAU * clampf(float(draft.get("child%d_angle" % (division_index + 1), 0.0)), 0.0, 1.0)
 		var separation: float = 14.0 * cell_size
 		var direction: Vector2 = Vector2(cos(angle), sin(angle))
-		var child_pos: Vector2 = (parent.get("pos", Vector2.ZERO) as Vector2) + direction * separation * 0.5
-		parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
+		var split_center: Vector2 = parent.get("pos", Vector2.ZERO) as Vector2
+		var child_pos: Vector2 = split_center + direction * separation * 0.5
+		parent["pos"] = split_center - direction * separation * 0.5
 		for cell in cells:
 			cell["born"] = false
 		var child_index: int = cells.size()
@@ -286,7 +310,8 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 					break
 		var caption: String = "分裂 %d · 质量 %.2f · 子代类型 %d · 连接 %d · %s" % [
 			division_index + 1, mass, child_type, links.size(), rgb_text]
-		_append_state(cells, links.duplicate(true), caption, 0)
+		splits.append({"pos": split_center, "angle": angle, "parent": parent_index, "child": child_index})
+		_append_state(cells, links.duplicate(true), caption, 0, splits.duplicate(true))
 	_sync_caption()
 	if _canvas != null:
 		_canvas.queue_redraw()
@@ -319,6 +344,7 @@ func _rebuild_states_from(program: Array, cell_type: int) -> void:
 		"index": 0, "pos": Vector2.ZERO, "type": cell_type, "parent": -1, "born": true,
 	}]
 	_append_state(initial_cells, [], "单细胞 · 合子（0）", -1)
+	var splits: Array = []
 	for i in range(program.size()):
 		var instruction: Dictionary = program[i] as Dictionary
 		var opcode: int = int(instruction.get("opcode", -1))
@@ -338,8 +364,9 @@ func _rebuild_states_from(program: Array, cell_type: int) -> void:
 			if separation <= 0.0:
 				separation = 14.0
 			var direction: Vector2 = Vector2(cos(angle), sin(angle))
-			var child_pos: Vector2 = (parent.get("pos", Vector2.ZERO) as Vector2) + direction * separation * 0.5
-			parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
+			var split_center: Vector2 = parent.get("pos", Vector2.ZERO) as Vector2
+			var child_pos: Vector2 = split_center + direction * separation * 0.5
+			parent["pos"] = split_center - direction * separation * 0.5
 			for cell in cells:
 				cell["born"] = false
 			cells.append({
@@ -347,6 +374,7 @@ func _rebuild_states_from(program: Array, cell_type: int) -> void:
 				"parent": parent_index, "born": true,
 			})
 			caption = "DIVIDE %d · 母细胞 %d → %d 细胞" % [i, parent_index, cells.size()]
+			splits.append({"pos": split_center, "angle": angle, "parent": parent_index, "child": cells.size() - 1})
 		elif opcode == 1:
 			if a >= 0 and a < cells.size():
 				cells[a]["type"] = b
@@ -360,13 +388,13 @@ func _rebuild_states_from(program: Array, cell_type: int) -> void:
 			caption = "旧存档 LINK %d（已由黏附素决定连接）" % i
 		else:
 			caption = "未知指令 %d（忽略）" % i
-		_append_state(cells, links, caption, opcode)
+		_append_state(cells, links, caption, opcode, splits.duplicate(true))
 	_sync_caption()
 	if _canvas != null:
 		_canvas.queue_redraw()
 
-func _append_state(cells: Array[Dictionary], links: Array, caption: String, opcode: int) -> void:
-	_states.append({"cells": cells, "links": links, "caption": caption, "opcode": opcode})
+func _append_state(cells: Array[Dictionary], links: Array, caption: String, opcode: int, splits: Array = []) -> void:
+	_states.append({"cells": cells, "links": links, "caption": caption, "opcode": opcode, "splits": splits})
 
 func _step_forward() -> void:
 	if _states.is_empty():
@@ -453,3 +481,22 @@ func _on_canvas_draw() -> void:
 		membrane.a = appear
 		_canvas.draw_arc(pos, radius, 0.0, TAU, 32, membrane, 2.0, true)
 		_canvas.draw_circle(pos, radius * 0.28, Color(0.9, 0.96, 0.92, 0.85 * appear))
+	# v0.21.0：分裂指示器叠加在细胞之上。
+	# 分裂线 = 垂直分裂轴的切面；方向箭头 = 母细胞 → 子细胞（Cell Lab show_split_indicators 对应）。
+	if not show_split_indicators:
+		return
+	var splits: Array = state.get("splits", []) as Array
+	for entry in splits:
+		var indicator: Dictionary = entry as Dictionary
+		var split_center: Vector2 = center + (indicator.get("pos", Vector2.ZERO) as Vector2) * WORLD_SCALE
+		var axis: Vector2 = Vector2.RIGHT.rotated(float(indicator.get("angle", 0.0)))
+		var tangent: Vector2 = Vector2(-axis.y, axis.x)
+		var half_line: float = BASE_RADIUS * 1.15
+		var cut_color: Color = Color(1.0, 0.80, 0.26, 0.92)
+		_canvas.draw_line(split_center - tangent * half_line, split_center + tangent * half_line, cut_color, 2.0)
+		var arrow_tip: Vector2 = split_center + axis * (BASE_RADIUS * 0.95)
+		var arrow_color: Color = Color(1.0, 0.42, 0.20, 0.95)
+		_canvas.draw_line(split_center, arrow_tip, arrow_color, 2.0)
+		var wing: float = 5.0
+		_canvas.draw_line(arrow_tip, arrow_tip + axis.rotated(2.5) * wing, arrow_color, 2.0)
+		_canvas.draw_line(arrow_tip, arrow_tip + axis.rotated(-2.5) * wing, arrow_color, 2.0)

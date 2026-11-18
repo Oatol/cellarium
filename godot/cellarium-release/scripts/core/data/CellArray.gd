@@ -41,6 +41,10 @@ var cell_mode: PackedByteArray = PackedByteArray()
 var cell_mode_depth: PackedByteArray = PackedByteArray()
 ## v0.18.0：逐细胞剩余谱系分裂次数，-1 无限，旧细胞默认 -1。
 var cell_telomere: PackedInt32Array = PackedInt32Array()
+## v0.20.0：逐细胞上次分裂的 sim_tick。-2=从未分裂且未过资格宽限，-1=已过宽限但未分裂，
+## >=0=上次分裂 tick。取代旧「按个体」串行闸门，让每个细胞独立 cooldown → 链按 1/2/4/8 倍增。
+## 属于确定性状态，进 hash/存档。
+var cell_division_tick: PackedInt32Array = PackedInt32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -73,6 +77,7 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_mode.append(0)
 	cell_mode_depth.append(0)
 	cell_telomere.append(-1)
+	cell_division_tick.append(-2)
 	return index
 
 func size() -> int:
@@ -112,6 +117,7 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	cell_mode[child_index] = cell_mode[index]
 	cell_mode_depth[child_index] = cell_mode_depth[index]
 	cell_telomere[child_index] = cell_telomere[index]
+	cell_division_tick[child_index] = cell_division_tick[index]
 	return child_index
 
 func get_position(index: int) -> Vector2:
@@ -207,6 +213,18 @@ func decrement_telomere(index: int) -> int:
 	remaining = maxi(0, remaining - 1)
 	cell_telomere[index] = remaining
 	return remaining
+
+## v0.20.0：逐细胞分裂 tick 读写。-2=未过资格宽限，-1=已过宽限，>=0=上次分裂 tick。
+func get_division_tick(index: int) -> int:
+	if index < 0 or index >= cell_division_tick.size():
+		return -2
+	return int(cell_division_tick[index])
+
+func set_division_tick(index: int, tick_value: int) -> bool:
+	if index < 0 or index >= cell_division_tick.size():
+		return false
+	cell_division_tick[index] = tick_value
+	return true
 
 func set_position(index: int, position: Vector2) -> bool:
 	if index < 0 or index >= size():

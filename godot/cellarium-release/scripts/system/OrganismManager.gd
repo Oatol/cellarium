@@ -63,8 +63,8 @@ const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AR
 var _sim_tick: int = 0
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
-## 自主生命周期：发育程序完成后仍按能量阈值分裂/耗尽死亡，避免"建成即静止"。
-var _autonomous_division_tick: Dictionary = {}
+## v0.20.0：分裂调度改为逐细胞 CellArray.cell_division_tick；旧的按个体串行字典已移除，
+## 让所有成熟且能量达标的细胞在同一 tick 各自分裂，得到 Cell Lab 式 1/2/4/8 倍增。
 ## 最近一次工具的业务反馈（ADHERE 选点、INSPECT 摘要等），由 HUD 读取显示。
 var last_tool_message: String = ""
 var adhesion_anchor: int = -1
@@ -459,12 +459,13 @@ func _apply_autonomous_lifecycle() -> void:
 			continue
 		if energies[cell_index] < threshold or (max_cells >= 0 and int(cell_counts[org_id]) >= max_cells):
 			continue
-		# 首次具备分裂资格时记录起点并跳过本 tick：给发育完成一个 cooldown 宽限期，
-		# 否则成熟当 tick 就分裂，会打破旧版「发育程序 9 指令 → 4 细胞 3 连接」快照。
-		if not _autonomous_division_tick.has(org_id):
-			_autonomous_division_tick[org_id] = _sim_tick
+		# v0.20.0：逐细胞 cooldown。首次具备资格记录宽限（-2 → -1）并跳过本 tick，
+		# 保持旧版「成熟当 tick 不立刻分裂」的节奏；此后每个细胞独立计时，不再按个体串行。
+		var division_tick: int = int(cells.call("get_division_tick", cell_index))
+		if division_tick == -2:
+			cells.call("set_division_tick", cell_index, -1)
 			continue
-		if _sim_tick - int(_autonomous_division_tick[org_id]) < autonomous_division_cooldown:
+		if division_tick >= 0 and _sim_tick - division_tick < autonomous_division_cooldown:
 			continue
 		candidates.append({"cell": cell_index, "org": org_id, "genome": genome, "gene": gene_mode,
 			"modes": has_modes, "mode": mode_data, "mode_index": mode_index, "depth": depth})
@@ -474,14 +475,11 @@ func _apply_autonomous_lifecycle() -> void:
 		var genome: RefCounted = candidate["genome"] as RefCounted
 		var gene_mode: bool = bool(candidate["gene"])
 		var has_modes: bool = bool(candidate["modes"])
-		if alive[cell_index] == 0:
-			continue
-		# 一个个体每 tick 最多分裂一次：多模式不再让所有合格细胞在同一 tick 连锁分化。
-		if _autonomous_division_tick.has(org_id) and _sim_tick - int(_autonomous_division_tick[org_id]) < autonomous_division_cooldown:
-			continue
 		var max_cells: int = _resolve_max_cells(genome)
 		if max_cells >= 0 and int(cell_counts[org_id]) >= max_cells:
 			continue
+		# v0.20.0：移除「一个个体每 tick 最多分裂一次」的串行闸门。
+		# 每个合格细胞都在本 tick 分裂；能量按 Gene.c 减半 + 逐细胞 cooldown 提供自然节流。
 		var division_index: int = maxi(0, int(cell_counts[org_id]) - 1)
 		var angle: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
 		if gene_mode and not has_modes:
@@ -512,13 +510,23 @@ func _apply_autonomous_lifecycle() -> void:
 			radius_scale = float(cells.call("get_radius_scale", cell_index))
 			ratio = clampf(float(genome.get("split_ratio")), 0.05, 0.95)
 		var division_separation: float = maxf(autonomous_division_separation, cell_radius * 2.0 * radius_scale)
-		var child_index: int = int(cells.call("divide_cell", cell_index, angle, division_separation))
+		# v0.21.0：Cell Lab e(double) 还原——出生中心距 0.2r（半径当帧保持母半径 → 两个贴靠半圆），
+		# 连接静止长度仍为 2r，下一 tick 的接触排斥/弹簧把它们弹开。分裂本身零力。
+		var birth_separation: float = maxf(0.5, cell_radius * 0.2 * radius_scale)
+		var birth_origin: Vector2 = cells.call("get_position", cell_index)
+		var child_index: int = int(cells.call("divide_cell", cell_index, angle, birth_separation))
 		if child_index < 0:
 			continue
 		var add_limit: int = maxi(int(cell_counts[org_id]) + 1, max_cells)
 		if not bool(organisms.call("add_developed_cell", org_id, child_index, add_limit)):
 			cells.call("remove_cell", child_index)
 			continue
+		# v0.21.0：母子各沿分裂轴偏 0.1r（中心距 0.2r，中点在原母细胞位置）。
+		# 半径当帧保持母半径 → 高度重叠 → 共享弦渲染成两个贴靠半圆；下一 tick 接触排斥弹开。
+		var split_dir: Vector2 = Vector2.RIGHT.rotated(angle)
+		var half_offset: float = birth_separation * 0.5
+		cells.call("set_position", cell_index, birth_origin - split_dir * half_offset)
+		cells.call("set_position", child_index, birth_origin + split_dir * half_offset)
 		if has_modes:
 			var current_mode_index: int = clampi(int(candidate.get("mode_index", 0)), 0, 15)
 			var parent_depth: int = int(candidate["depth"]) + 1 if int(candidate["child1_mode"]) == current_mode_index else 0
@@ -561,7 +569,12 @@ func _apply_autonomous_lifecycle() -> void:
 			org_state[org_id] = mature_state
 			organisms.set("org_state", org_state)
 		cell_counts = organisms.get("cell_count")
-		_autonomous_division_tick[org_id] = _sim_tick
+		# v0.20.0：母子各自重置 cooldown；刚出生的子细胞因此不会在同一 tick 立刻再分裂。
+		var latest_alive: PackedByteArray = cells.get("cell_alive")
+		if cell_index < latest_alive.size() and latest_alive[cell_index] != 0:
+			cells.call("set_division_tick", cell_index, _sim_tick)
+		if child_index >= 0 and child_index < latest_alive.size() and latest_alive[child_index] != 0:
+			cells.call("set_division_tick", child_index, _sim_tick)
 
 ## v0.19.0：半径-能量低通。Cell Lab `f(double)` 对 d² 做低通、稳态 d ∝ sqrt(w)；
 ## 本项目以该细胞所属模式的 division_mass 作参考能量 E_ref：
@@ -1382,7 +1395,7 @@ func get_state_hash() -> int:
 	for value in cells.get("behavior_intents"):
 		hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
 	# v0.19.0：半径低通的确定性状态（有效半径参与碰撞/分裂间距）。缺省空数组不参与，旧档无影响。
-	for array_name in ["cell_radius_baseline", "cell_energy_scale"]:
+	for array_name in ["cell_radius_baseline", "cell_energy_scale", "cell_division_tick"]:
 		for value in cells.get(array_name):
 			hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
 	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length"]:

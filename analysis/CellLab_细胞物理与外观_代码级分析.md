@@ -851,3 +851,25 @@ Cell Lab `CellWorld.f(double)` 已证实（§2）：半径 `d` 不随能量直�
 - 视图优化后探针：15 细胞 1453 µs/帧、30 细胞 3707 µs/帧，较基线下降约 20%；模拟 tick 成本不受影响。
 - 双工程验证：发布工程与 D 盘工程均 `SCRIPTS=51 FAILURES=0 EXITCODE=0`。
 - 证据边界：性能数字来自 headless CPU 回退与同步循环，GPU 实际帧率与 `_process` 逐帧收益需窗口环境复核。
+
+---
+
+## 30. v0.20.0 / v0.21.0：分裂倍增与半圆出生形状、发育预览分裂指示器
+
+### 30.1 查证结论
+
+- **倍增**：Cell Lab `CellWorld.e(double)` 对**每个细胞独立判定**分裂，无 per-organism cooldown，同一 tick 所有成熟且能量达阈值的细胞同时分裂 → 细胞链按 1/2/4/8 倍增。本项目原实现有两处 per-org 闸门（个体级 cooldown=300、每体每 tick 一次分裂），造成 1/2/3/4 线性增长。用户实测「分裂后细胞不再分裂」的根因即在调度层，非能量传递。
+- **半圆**：`e(double)` 出生时母子各沿分裂轴偏 `0.1r`（中心距 `0.2r`），**半径保留母半径**、速度增量为 0.0（零力）；因两圆高度重叠、接触弦近圆心，渲染成两个贴靠半圆；分离来自下一 tick 的接触排斥 `d(int)`（力 ∝ 相交面积）。本项目原出生间距 `max(14, 2r)=14` 正好相切，从无重叠阶段，故看不到半圆。
+- **分裂指示器**：Macro `GenomeEditorFragment.onCreateView()` 控件族含 `checkbox_show_split_indicators`（分析文档 §20.1）；`GenomePreviewView` 是持 `SimulationWorld`/`Gene[]` 的实时 GL 预览（§22）。分裂角来自 `Gene.d/e/f`、质量比 `Gene.c`。
+
+### 30.2 实现口径
+
+- **per-cell 分裂调度**（v0.20.0）：`CellArray` 新增确定性状态 `cell_division_tick`（上次分裂 sim_tick，进 hash/存档）；候选阶段用逐细胞 cooldown 取代 per-org 闸门，保留单细胞首帧宽限；分裂后母子各重置 tick。schema v7（旧档填 -2）。GNP1、tick 顺序、单帧 12 tick 上限不动。
+- **半圆出生形状**（v0.21.0）：出生间距改为 `max(0.5, 0.2·r·scale)`，母子各沿分裂轴偏 `0.1r`（中点在原母细胞位置），半径当帧保持母半径 → 重叠半圆；连接静止长度仍为 `2r`。分裂在 metabolism 阶段（碰撞之后），下一 tick 接触排斥弹开至 `2r`。
+- **发育预览指示器**（v0.21.0）：`GenomePreview.show_split_indicators` 导出（默认 true，对应 Macro 控件）；三条状态派生路径（多模式/基因模式/旧指令）均记录每次分裂的 `angle` 与亲子索引；画布叠加垂直分裂轴的切面线（黄）与母→子方向箭头（橙）。纯绘制，不写 CommandBus/field/hash/模拟状态。新增只读 `get_split_count_at` / `get_split_angle_at`。
+
+### 30.3 验证
+
+- SmokeTest `OK v0.21.0`：倍增经过 2/4/8；出生帧 `dist/contact=0.1`（即 0.2r）且半径保持 1.0；下一 tick 排斥拉开。基因预览测试断言指示器数量随分裂递增、角度在 0..TAU。双工程 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
+- 探针 `HalfCircleProbe.gd`：`BIRTH_FRAME dist=1.4 contact=14.0 ratio=0.1`；`NEXT_TICK dist=14.0 pushed_apart=true`。`DivisionProbe.gd`：1→2→4→8→16→32、能量守恒。
+- 证据边界：静态反编译 + headless CPU 回退探针；半圆持续帧数由接触排斥速度决定，未在渲染层加动画；GPU 实际观感需窗口环境复核。

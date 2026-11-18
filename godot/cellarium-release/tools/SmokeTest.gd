@@ -206,6 +206,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0190_energy_radius_relaxation():
 		failures += 1
+	if not await _check_v0210_division_doubling_and_split_shape():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -3304,6 +3306,15 @@ func _check_dev_editor_landing() -> bool:
 	if int(preview_node.call("get_link_count_at", expected_states - 1)) != int(macro_draft.get("max_divisions", 3)):
 		push_error("SmokeTest: gene preview must show adhesin parent-child links")
 		dev.queue_free(); return false
+	# v0.21.0：分裂线与方向必须随每次分裂派生；角度与子代朝向一致。
+	for split_state in range(1, expected_states):
+		if int(preview_node.call("get_split_count_at", split_state)) != split_state:
+			push_error("SmokeTest: split indicator count must match divisions")
+			dev.queue_free(); return false
+	var first_angle: float = float(preview_node.call("get_split_angle_at", 1, 0))
+	if first_angle < 0.0 or first_angle > TAU:
+		push_error("SmokeTest: split indicator angle out of range")
+		dev.queue_free(); return false
 	if int(preview_node.call("get_cell_type_at", 1, 1)) != int(macro_draft.get("child2_type", macro_draft.get("child1", 0))):
 		push_error("SmokeTest: gene preview must show differentiated child type")
 		dev.queue_free(); return false
@@ -3747,8 +3758,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 6:
-		push_error("SmokeTest: save schema must be version 6")
+	if int(snapshot.get("schema_version", -1)) != 7:
+		push_error("SmokeTest: save schema must be version 7")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -3761,7 +3772,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v6)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v7)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3944,8 +3955,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 6 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v6 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != 7 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v7 must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -3958,7 +3969,7 @@ func _check_v0160_runtime_phenotype() -> bool:
 		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v6 fallback")
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v7 fallback")
 	return true
 
 ## v0.17.0：模式列表逐模式编辑、两个子代模式、预览点击跳转，以及 hash 兼容边界。
@@ -4074,7 +4085,7 @@ func _check_v0170_mode_remove() -> bool:
 	print("SmokeTest: OK v0.17.1 mode removal")
 	return true
 
-## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v6 存档往返。
+## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v7 存档往返。
 func _check_v0170_runtime_transfer_and_modes() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -4155,10 +4166,10 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		instance.queue_free(); return false
 
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 6 \
+	if int(snapshot.get("schema_version", -1)) != 7 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
 		or (snapshot.get("genomes", []) as Array).is_empty():
-		push_error("SmokeTest: schema v6 must persist modes and cell_mode")
+		push_error("SmokeTest: schema v7 must persist modes and cell_mode")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.call("set_modes", [])
@@ -4185,7 +4196,7 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		push_error("SmokeTest: legacy snapshot must default cell_mode to 0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v6")
+	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v7")
 	return true
 
 ## v0.18.0：构造「单模式光合带」基因组；cell_cap=-1 表示无限，link_limit=-1 不抑制。
@@ -4233,7 +4244,7 @@ static func _v0180_prepare_manager(instance: Node) -> Dictionary:
 	manager.set("autonomous_division_cooldown", 1)
 	return {"manager": manager, "env": env, "tick": tick_core, "cells": manager.get("cells")}
 
-## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v6 与编辑器同测。
+## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v7 与编辑器同测。
 func _check_v0180_population_limits() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var cell_array_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
@@ -4331,7 +4342,7 @@ func _check_v0180_population_limits() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 
-	# 5) 端粒：每次母子同减，归零死亡；schema v6 保存新字段并兼容旧快照。
+	# 5) 端粒：每次母子同减，归零死亡；schema v7 保存新字段并兼容旧快照。
 	var mortal: RefCounted = _v0180_mode_genome(genome_script, -1, 5, -1, false)
 	instance = scene.instantiate()
 	instance.set("create_demo_organism", false)
@@ -4367,10 +4378,10 @@ func _check_v0180_population_limits() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 6 \
+	if int(snapshot.get("schema_version", -1)) != 7 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere") \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_energy_scale"):
-		push_error("SmokeTest: schema v6 must persist telomere and energy-radius arrays")
+		push_error("SmokeTest: schema v7 must persist telomere and energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	(legacy.get("cells", {}) as Dictionary).erase("cell_telomere")
@@ -4454,11 +4465,11 @@ func _check_v0180_population_limits() -> bool:
 		push_error("SmokeTest: cell cap must affect gene-mode hash when modes exist")
 		return false
 
-	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v6 / editor")
+	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v7 / editor")
 	return true
 
 ## v0.19.0：半径-能量低通。稳态 = sqrt(E / E_ref)，一阶平滑；基线×因子 = 有效倍率；
-## 非基因模式与关闭开关保持固定半径；schema v6 保存新数组且旧档逐位兼容。
+## 非基因模式与关闭开关保持固定半径；schema v7 保存新数组且旧档逐位兼容。
 func _check_v0190_energy_radius_relaxation() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
@@ -4531,12 +4542,12 @@ func _check_v0190_energy_radius_relaxation() -> bool:
 		push_error("SmokeTest: disabled growth must freeze energy factor")
 		instance.queue_free(); return false
 
-	# 5) schema v6 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
+	# 5) schema v7 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
 	var snap_cells: Dictionary = snapshot.get("cells", {}) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 6 \
+	if int(snapshot.get("schema_version", -1)) != 7 \
 		or not snap_cells.has("cell_radius_baseline") or not snap_cells.has("cell_energy_scale"):
-		push_error("SmokeTest: schema v6 must persist energy-radius arrays")
+		push_error("SmokeTest: schema v7 must persist energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	var legacy_cells: Dictionary = legacy.get("cells", {}) as Dictionary
@@ -4562,5 +4573,94 @@ func _check_v0190_energy_radius_relaxation() -> bool:
 		instance.queue_free(); return false
 
 	instance.queue_free()
-	print("SmokeTest: OK v0.19.0 energy-radius lowpass / schema v6")
+	print("SmokeTest: OK v0.19.0 energy-radius lowpass / schema v7")
 	return true
+
+## v0.20.0/v0.21.0：per-cell 并行分裂（1/2/4/8 倍增）+ Cell Lab e(double) 半圆出生形状。
+## 分裂在 metabolism 阶段、碰撞之后：出生帧母子中心距 0.2r（重叠半圆），下一 tick 被接触排斥弹到 2r。
+func _check_v0210_division_doubling_and_split_shape() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var context: Dictionary = _v0180_prepare_manager(instance)
+	var manager: Node = context["manager"]
+	var tick_core: Node = context["tick"]
+	var cells: RefCounted = context["cells"]
+	manager.set("default_transfer_rate", 0.0)
+	manager.set("autonomous_division_enabled", true)
+	var genome: RefCounted = _v0180_mode_genome(genome_script, -1, -1, -1, false)
+	var modes: Array = genome.get("modes") as Array
+	var tuned: Dictionary = (modes[0] as Dictionary).duplicate()
+	tuned["transfer_rate"] = 0.0
+	modes[0] = tuned
+	genome.call("set_modes", modes)
+	manager.call("register_zygote", 91, 91, -1, genome, Vector2(250, 250), 8.0, 0)
+	var radii: PackedFloat32Array = PackedFloat32Array()
+	var doublings: Dictionary = {}
+	var ok: bool = true
+	var prev_size: int = 1
+	for tick in range(80):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		var current_size: int = int(cells.call("size"))
+		if current_size != prev_size:
+			doublings[current_size] = true
+			if current_size == 2:
+				# 出生帧：母子中心距≈0.2r，半径保持母半径（1.0）。
+				var px: PackedFloat32Array = cells.get("cell_pos_x") as PackedFloat32Array
+				var py: PackedFloat32Array = cells.get("cell_pos_y") as PackedFloat32Array
+				var scales: PackedFloat32Array = cells.get("cell_radius_scale") as PackedFloat32Array
+				var d: float = Vector2(px[1] - px[0], py[1] - py[0]).length()
+				var contact: float = float(manager.get("cell_radius")) * (scales[0] + scales[1])
+				if absf(d / contact - 0.1) > 0.02 or absf(scales[0] - 1.0) > 0.01 or absf(scales[1] - 1.0) > 0.01:
+					push_error("SmokeTest: v0.21.0 newborn pair must be overlapping half-circles (0.2r)")
+					ok = false
+			var next_size: int = int(cells.call("size"))
+			prev_size = current_size
+			if next_size >= 8:
+				break
+	# 断言出现过 2/4/8 三个规模（per-cell 并行 → 倍增，而非 1/2/3/4 线性）。
+	if not (doublings.has(2) and doublings.has(4) and doublings.has(8)):
+		push_error("SmokeTest: v0.20.0 division must double 1->2->4->8, got=%s" % str(doublings.keys()))
+		ok = false
+	# 出生后下一 tick 接触排斥应把重叠圆弹开（用已存在的两细胞场景另测一段）。
+	var check_instance: Node = scene.instantiate()
+	check_instance.set("create_demo_organism", false)
+	root.add_child(check_instance)
+	await process_frame
+	var ctx2: Dictionary = _v0180_prepare_manager(check_instance)
+	var mgr2: Node = ctx2["manager"]
+	var cells2: RefCounted = ctx2["cells"]
+	mgr2.set("default_transfer_rate", 0.0)
+	var genome2: RefCounted = _v0180_mode_genome(genome_script, 2, -1, -1, false)
+	var modes2: Array = genome2.get("modes") as Array
+	var t2: Dictionary = (modes2[0] as Dictionary).duplicate()
+	t2["transfer_rate"] = 0.0
+	modes2[0] = t2
+	genome2.call("set_modes", modes2)
+	mgr2.call("register_zygote", 99, 99, -1, genome2, Vector2(250, 250), 2.0, 0)
+	var born_dist: float = -1.0
+	for tick in range(20):
+		mgr2.call("advance_physics_tick", 1.0 / 60.0)
+		if int(cells2.call("size")) == 2 and born_dist < 0.0:
+			var px2: PackedFloat32Array = cells2.get("cell_pos_x") as PackedFloat32Array
+			var py2: PackedFloat32Array = cells2.get("cell_pos_y") as PackedFloat32Array
+			born_dist = Vector2(px2[1] - px2[0], py2[1] - py2[0]).length()
+			mgr2.call("advance_physics_tick", 1.0 / 60.0)
+			px2 = cells2.get("cell_pos_x") as PackedFloat32Array
+			py2 = cells2.get("cell_pos_y") as PackedFloat32Array
+			var pushed: float = Vector2(px2[1] - px2[0], py2[1] - py2[0]).length()
+			if pushed <= born_dist + 1.0:
+				push_error("SmokeTest: v0.21.0 split pair must be pushed apart next tick")
+				ok = false
+			break
+	if born_dist < 0.0:
+		push_error("SmokeTest: v0.21.0 two-cell split never observed")
+		ok = false
+	instance.queue_free()
+	check_instance.queue_free()
+	if ok:
+		print("SmokeTest: OK v0.21.0 division doubling / half-circle birth / contact separation")
+	return ok

@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 6
+const SCHEMA_VERSION: int = 7
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -28,6 +28,9 @@ const TELOMERE_ARRAY_NAMES: Array[String] = ["cell_telomere"]
 ## v0.19.0：schema 1–5 的旧快照没有半径低通基线/能量因子。
 ## 恢复时 baseline = 旧 cell_radius_scale，energy_scale = 1.0，逐位保持旧半径。
 const ENERGY_RADIUS_ARRAY_NAMES: Array[String] = ["cell_radius_baseline", "cell_energy_scale"]
+
+## v0.20.0：schema 1–6 的旧快照没有逐细胞分裂 tick，恢复时填 -2（未过宽限）。
+const DIVISION_TICK_ARRAY_NAMES: Array[String] = ["cell_division_tick"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -63,6 +66,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in TELOMERE_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 	for array_name in ENERGY_RADIUS_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in DIVISION_TICK_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -218,6 +223,15 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 	restored_energy.resize(cell_count)
 	cells.set("cell_radius_baseline", restored_baseline)
 	cells.set("cell_energy_scale", restored_energy)
+
+	for array_name in DIVISION_TICK_ARRAY_NAMES:
+		if cell_data.has(array_name):
+			cells.set(array_name, _copy_array(cell_data[array_name]))
+		else:
+			var restored_ticks: PackedInt32Array = PackedInt32Array()
+			restored_ticks.resize(cell_count)
+			restored_ticks.fill(-2)
+			cells.set(array_name, restored_ticks)
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary
