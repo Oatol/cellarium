@@ -897,3 +897,76 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - SmokeTest `OK v0.22.0`：单模式 max_divisions=1 自增殖突破旧上限达 ≥8、depth 恒 0；双工程 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
 - GateProbe：修复后 tick=3 为 8 细胞（修复前 4）、tick=55 为 128 细胞。
 - 证据边界：能量不足时仍按门槛停分裂（GrowthProbe 显示真实代谢下产能弱属参数平衡）；静态反编译 + headless CPU 探针，GPU 观感需窗口复核。
+
+---
+
+## 32. v0.23.0：全量反编译落地与发育预览真实模拟内核（2026-11-19）
+
+### 32.1 全量源码落地（本轮新增证据等级：方法体全文）
+
+此前所有结论均来自 MCP 逐方法片段读取。本轮把两个 DEX **全量反编译成 Java 文件**落地本地，逐行精读完整方法体：
+
+- 官方版 `cell-lab-zh/classes.dex` → `decompiled_zh/`，33 个核心类全部 `OK`，其中 `CellWorld.java` 199,230 B、`Gene.java` 19,764 B、`Cell.java` 18,492 B、`n.java`（预览渲染器）6,067 B。
+- Macro 版 `cell-lab-macro-beta-latest/classes.dex` → `decompiled_macro/`，554 个核心类全部 `OK`，其中 `SimulationWorld.java` 2,492,398 B、`GenomeEditorFragment.java` 610,250 B、`J4.java`（预览渲染器）46,462 B、`GenomePreviewView.java` 8,117 B。
+- 反编译中间产物位于 `analysis/cell_lab_apk_extract/decompiled_zh|macro/`，已被 `.gitignore` 覆盖，不入库。
+- 工具链：`D:\Tools\JADX-MCP\jadx-headless-mcp-0.7.1-all.jar`，通过 stdio MCP `tools/call` → `get_class_source({class_name, max_bytes, smali_fallback:true})` 批量导出；驱动脚本 `mcp_export.py` 同目录（本地工具，不入库）。
+
+### 32.2 发育预览：完整机制（对照 v0.21 派生实现）
+
+**承载链路**：`GenomePreviewView`（GLSurfaceView）→ `n`（官方）/ `j4`（Macro）渲染器 → 持真实 `CellWorld`/`SimulationWorld`。
+
+**模拟器初始化**（官方 `n.a(float[])`，Macro `j4.e` 同构）：
+- `Environment` 特化：`bg=true`（无食物实验室）、`c=0`（无突变）、`r=128` 容量、`k=1.0`（皿半径）、`g=75`（粘度）、`z=1`（浓度补给）；Macro `g=2.5`、`k=2.5`。
+- 合子构造：`cell.I=v`（编辑器传入 Gene[]），扫描 40 槽取 `p==true` 者作 `D`；`w=0.288`（非合子）或 `0.36`（ZYGOCYTE）；LIPOCYTE 额外 `S=1.8`；`d=sqrt(w/400)`；`J[0..2]=Gene.a[3]` 颜色；`p=1.0`、`T=-1`、`U[0..3]=0.01`。
+- **固定种子 `setSeed(1337L)`**，每帧跑 `u/0.02` 步，每步 `a(false,1.0)`（dt=0.02）；`this.t` 缓存已完成结果，Macro 额外 `Z/V==X/Y>=0` 断点续算 + 6 秒超时保护。
+
+**分裂指示器 `j4.I(float[])`（Macro，`show_split_indicators` 对应，逐方法等价）**：
+- 遍历 `simulationWorld.S5[0..U5]`；条件 `cell!=null && cell.s!=null && 0<=D<len`。
+- 分裂轴 `d4 = (镜像 f1 ? -1 : 1) * gene.f770j + cell.y0`（朝向）；方向 `(cos,sin)`。
+- 圆点半径 `fMax = max(0.006, cell.q0 * 0.27)`；偏移基准 `f2 = cell.q0 + 0.42*fMax`。
+- 质量比 `ratio = clamp(gene.f769i, 0.1, 0.9)`；两子中心距 `f3=f2*2`，`f4=(1-ratio)*f3`，`f5=ratio*f3`；两标记位于 `center ± dir*(对应距离)`。
+- 非合子：画 2 个圆点，颜色取 `child1=f778r`、`child2=s` 槽的 Gene.a[3]。
+- 合子 ZYGOCYTE：第二分裂轴 `d12=(镜像? -1:1)*gene.B + y0`，第二比例 `ratio2=clamp(gene.C,0.1,0.9)`，`f10=1.5*fMax`，画 4 个圆点（child1..4 = `f778r/s/t/u`）。
+- 关闭 GL depth/blend 后与细胞、连接、纤毛同帧绘制（`e()` 末段依次 `U/V/S/W/Z` 后调 `I()`）。
+
+**交互**（`GenomePreviewView.onTouchEvent`）：单指拖动平移、双指缩放（`|log(scale)|<0.3` 才生效，中心锚定）、`lock_preview` 默认 true 锁交互、单击命中细胞取 `D` 槽回调。
+
+### 32.3 分裂 `CellWorld.e(double)` 完整条件链与动作（全文精读）
+
+条件（全真）：`有效能量 > Gene.b && o>0.5 && P<=u[9] && p>0.2 && !死亡 && 类型!=GAMETE && 池有空位`。
+- 有效能量：LIPOCYTE 为 `0.072+((w+S)-0.072)/2.088*0.288`，其余 `w`。
+- 位置：分裂轴 `d7=k+(镜像?-1:1)*Gene.d`；`d8=0.05r*2=0.1r`；母子各偏 `±d8` 并叠加 `sin(z*10.34+43)*1e-7` 级微扰；**速度增量系数 0.0（零力）**。
+- 能量：`w_child=Gene.c*Σ - 子代类型成本 v`，`w_mother=(1-c)*Σ - 母类型成本 v`，再各减 `max(0,v[6]-1)*0.054`。
+- 分配：`U[0..3]` 按 c / (1-c) 各 +1e-4；`S=0`；`X/Y` 按比；`p` 各半；`o=0`；朝向 `k` 加 `Gene.e/f`；镜像 `y` 异或 `Gene.q/r`；`m±1`。
+- 旧连接：`J[20]` 暂存后按 `Gene.m/n` + 点积 `d14` 阈值 ±0.2（含中间带极值索引）重分配母子，双向重建并换算到各自新朝向，上限 20。
+- 新黏附 `Gene.l`：母子间建双向 Link，`b=true`、刚度 `Gene.h`、长度 `cell.a(5)`（Gene.v[5]）。
+- 分化树：`cell.D=Gene.i`、`cell2.D=Gene.j`。
+- 端粒 `T!=-1` 时母子同减，`<=0` 双亡。
+- FLAGELLOCYTE 后向连接 `cos(link.c)<-0.8` 判死。
+- 末尾能量 clamp 0.36（LIPOCYTE 超出转 `S`，上限 1.8）。
+- **倍增根因（再确认）**：`while(i4<z)` 逐细胞判定，池尾 `cell2=x[z-1]` 复制后 `z++`，新细胞当帧 `o=0` 不分裂，下一 tick 全体达标者同时分裂 → 1/2/4/8。
+
+### 32.4 物理与 3000 细胞性能：代码级机制清单
+
+- 两阶段 tick：`a(boolean,double)=b(z,d)[update1]+a(d)[update2]`；`dt=0.02*d`；阶段锁 `X`。
+- update1：`i(dt)` 食物 → `k()` 补细胞 → `f(dt)` 位置/半径 → `e(dt)` 分裂 → `j()` 回收 → `g()` 网格 → `d(dt)` 食物 → `h(dt)` → `i()` → `c(z,dt)` 逐细胞 `d(i)` 感知/接触 → `c(dt)` 速度积分 → `h()`；update2：`g(dt)` 代谢/遗传 → `b(dt)` 4 子步信号。
+- 空间哈希：`Z=min(206,k/0.03-0.1)` 偶数；每格 `aV[格]` 上限 203 细胞、`ba/bb/bc` 上限 404 气味；每细胞按包围盒写 4 格（K/L/M/N，重复置 -1）；查询只处理 `index>i`，配对唯一。
+- 接触排斥：`d50`=Heron 相交面积；`dA=(d50*500)/((0.5/a6_i)+(0.5/a6_j))/中心距`；力写 `cell.g/h` 累加器，经 `c(dt)` 做 `力/质量` 积分；约化质量 `25*w_i*w_j/(w_i+w_j)` 按连接数较大者分摊；弹性项 `1+2*disp²/0.0036`；皿壁 `dA2=(500/s)*overlap²*2*a6`。
+- 阻尼：`f()` 里半径低通 `d += ((w/400)/d - d)*0.5*10*dt`（`o>5dt` 才启动、上限 0.03）；`c(dt)` 里粘性限速 `d9=clamp(1-q*3,0,4)`。
+- 构造期一次性预分配 `Cell[d]/Food[aa]/残骸[(d+3)/4]/Link[20]` 与 Float/Short/ByteBuffer，运行期零增长。
+- 渲染：CPU 构建共享相交弦多边形（`u.compareTo()` 按角度排序 + 遮挡剔除）+ 片元 `discard(ds>col.a²)` 解析圆裁剪；`RENDERMODE_WHEN_DIRTY` 按需绘制。
+- **对 Godot 3000 细胞的落点**：性能瓶颈不在细胞数而在宿主侧固定成本（已测场扩散 18,923→1,335µs）；真复刻需 SoA + 固定池 + 空间哈希 + 按需渲染 + O(1) 场采样，而非场景树逐 CellView 实例。
+
+### 32.5 本轮决策（用户确认）
+
+1. 本轮先做**发育预览**。
+2. **接受引入第二套真实模拟内核**（预览独立跑 Cell Lab 式物理/分裂，固定种子）。
+3. 底层**全面可改**（含 tick 阶段/数据布局），GNP1/tick顺序/CommandBus/单写者可按需调整。
+
+### 32.6 预览内核映射（本项目 modes → Cell Lab Gene 槽）
+
+- 每个 mode → 一个 Gene 槽：`s=cell_type`、`b=division_mass`、`c=split_ratio`、`d/e/f=child2_angle/split_angle` 对应弧度、`i/j=child1_mode/child2_mode`、`l=make_glue`、`h=adhesion_strength*35`、`a[3]=(color_r,g,b)`、`v[6]=cell_stiffness`。
+- 合子初始槽 = `initial==true` 的 mode；能量 0.288（无食物实验室仍需产能，PHAGOCYTE/PHOTOCYTE/DEVOROCYTE/GLUEOCYTE 的 `s.s=true` 走 `Q+=280*d²*dt`）。
+- 分裂：`w>division_mass`、`o>0.5`、连接数<=max_connections、`p>0.2`、池有空位；母子各偏 `0.1r`、能量按 split_ratio 分；`D=child1_mode`（母）/`child2_mode`（子）；合子画 4 指示器（child1..4），非合子画 2。
+- 半径低通、接触排斥、连接弹簧按 §32.4 原式。
+- 内核为 `RefCounted`、无 `class_name`、固定种子、不写 CommandBus/field/hash/save，纯只读派生，保证主模拟确定性不受影响。

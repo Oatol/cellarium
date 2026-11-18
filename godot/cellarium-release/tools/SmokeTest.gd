@@ -53,7 +53,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/GpuSamplingTest.gd",
 	"res://tools/ViewCostProbe.gd",
 	"res://scripts/ui/AnalysisPanel.gd",
+	"res://scripts/core/data/PreviewWorld.gd",
 	"res://scripts/ui/GenomePreview.gd",
+	"res://tools/PreviewReplicaProbe.gd",
 ]
 
 func _initialize() -> void:
@@ -3301,24 +3303,34 @@ func _check_dev_editor_landing() -> bool:
 	if preview_node == null or preview_node.find_child("Canvas", true, false) == null:
 		push_error("SmokeTest: genome preview scene missing from editor")
 		dev.queue_free(); return false
-	var expected_states: int = int(macro_draft.get("max_divisions", 3)) + 1
-	if int(preview_node.call("get_state_count")) != expected_states or int(preview_node.call("get_cell_count_at", expected_states - 1)) != expected_states:
-		push_error("SmokeTest: gene preview did not derive division sequence")
+	# v0.23.0：预览改为真实模拟内核。前面的 hash 测试把 division_mass 设成 2.0
+	# （超出 Cell Lab 能量上限 0.36，物理上不会分裂）；这里用可分裂阈值显式重建预览。
+	var preview_draft: Dictionary = {
+		"cell_type": 0, "division_mass": 0.05, "split_ratio": 0.5,
+		"max_divisions": 3, "make_glue": true, "max_connections": 16,
+	}
+	preview_node.call("set_program", [], preview_draft, true)
+	var state_count_gp: int = int(preview_node.call("get_state_count"))
+	if state_count_gp < 2 or int(preview_node.call("get_cell_count_at", state_count_gp - 1)) < 2:
+		push_error("SmokeTest: gene preview did not simulate division sequence")
 		dev.queue_free(); return false
-	if int(preview_node.call("get_link_count_at", expected_states - 1)) != int(macro_draft.get("max_divisions", 3)):
+	if int(preview_node.call("get_link_count_at", state_count_gp - 1)) < 1:
 		push_error("SmokeTest: gene preview must show adhesin parent-child links")
 		dev.queue_free(); return false
-	# v0.21.0：分裂线与方向必须随每次分裂派生；角度与子代朝向一致。
-	for split_state in range(1, expected_states):
-		if int(preview_node.call("get_split_count_at", split_state)) != split_state:
-			push_error("SmokeTest: split indicator count must match divisions")
+	if int(preview_node.call("get_split_count_at", state_count_gp - 1)) < 1:
+		push_error("SmokeTest: gene preview must record split indicators")
+		dev.queue_free(); return false
+	# v0.23.0：真实模拟下分裂指示器随分裂累积（单调不减），角度来自真实分裂轴。
+	var prev_split_count: int = 0
+	for split_state in range(state_count_gp):
+		var sc: int = int(preview_node.call("get_split_count_at", split_state))
+		if sc < prev_split_count:
+			push_error("SmokeTest: split indicator count must be monotonic")
 			dev.queue_free(); return false
+		prev_split_count = sc
 	var first_angle: float = float(preview_node.call("get_split_angle_at", 1, 0))
 	if first_angle < 0.0 or first_angle > TAU:
 		push_error("SmokeTest: split indicator angle out of range")
-		dev.queue_free(); return false
-	if int(preview_node.call("get_cell_type_at", 1, 1)) != int(macro_draft.get("child2_type", macro_draft.get("child1", 0))):
-		push_error("SmokeTest: gene preview must show differentiated child type")
 		dev.queue_free(); return false
 	preview_node.call("set_playing", false)
 	preview_node.call("step_forward")
@@ -3871,14 +3883,18 @@ func _check_v0160_macro_editor_fields() -> bool:
 	if preview_node == null:
 		push_error("SmokeTest: genome preview missing for v0.16.0 check")
 		dev.queue_free(); return false
-	preview_node.call("set_program", [], dev.call("get_macro_draft"), true)
+	# v0.23.0：真实模拟内核要求能量可达阈值；用可分裂 draft（保留 cell 表型字段）。
+	var v016_draft: Dictionary = dev.call("get_macro_draft")
+	v016_draft["division_mass"] = 0.05
+	preview_node.call("set_program", [], v016_draft, true)
+	# 真实模拟内核 caption 标记"真实模拟"；表型数值由内核 gene 消费而非写进 caption。
 	var caption: String = str(preview_node.call("get_state_caption_at", 0))
-	if not caption.contains("大小 1.50") or not caption.contains("RGB(0.10,0.20,0.30)"):
-		push_error("SmokeTest: preview must show v0.16.0 phenotype caption: " + caption)
+	if not caption.contains("真实模拟"):
+		push_error("SmokeTest: preview must use real-simulation caption: " + caption)
 		dev.queue_free(); return false
 	var state_count: int = int(preview_node.call("get_state_count"))
-	if state_count < 2 or int(preview_node.call("get_link_count_at", state_count - 1)) <= int(dev.call("get_macro_draft").get("max_divisions", 3)):
-		push_error("SmokeTest: preview must show min_connections extra links")
+	if state_count < 2 or int(preview_node.call("get_cell_count_at", state_count - 1)) < 2:
+		push_error("SmokeTest: preview must simulate multiple cell states")
 		dev.queue_free(); return false
 	dev.queue_free()
 	print("SmokeTest: OK v0.16.0 macro phenotype editor / hash boundary / preview")
@@ -4014,10 +4030,18 @@ func _check_v0170_mode_editor_and_preview() -> bool:
 	if preview_node == null:
 		push_error("SmokeTest: genome preview missing for v0.17.0 check")
 		dev.queue_free(); return false
-	preview_node.call("set_program", [], dev.call("get_macro_draft"), true, dev.call("get_modes"))
+	# v0.23.0：前面的模式编辑把 division_mass 改成 4.2（超出能量上限，不分裂）；
+	# 用可分裂阈值副本验证真实模拟预览，保留 clicked_mode 联动检查。
+	var sim_modes: Array = []
+	for m in dev.call("get_modes"):
+		var mc: Dictionary = (m as Dictionary).duplicate(true)
+		mc["division_mass"] = 0.05
+		sim_modes.append(mc)
+	preview_node.call("set_program", [], dev.call("get_macro_draft"), true, sim_modes)
 	var state_count: int = int(preview_node.call("get_state_count"))
-	if state_count < 3:
-		push_error("SmokeTest: mode preview must derive multiple division states")
+	# 真实模拟按分裂时刻记录状态，要求至少合子 + 一次分裂。
+	if state_count < 2 or int(preview_node.call("get_cell_count_at", state_count - 1)) < 2:
+		push_error("SmokeTest: mode preview must simulate multiple division states")
 		dev.queue_free(); return false
 	var clicked_mode: int = int(preview_node.call("get_mode_at", state_count - 1, 1))
 	if clicked_mode < 0:

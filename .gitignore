@@ -32,6 +32,10 @@ godot/cellarium-public/
 godot/cellarium-snapshot/
 # APK extraction scratch dirs (decompiled intermediates, never publish)
 analysis/cell_lab_apk_extract/tmp_*/
+analysis/cell_lab_apk_extract/decompiled_zh/
+analysis/cell_lab_apk_extract/decompiled_macro/
+analysis/cell_lab_apk_extract/*.log
+analysis/cell_lab_apk_extract/mcp_*.py
 
 # OS / editor noise
 Thumbs.db
