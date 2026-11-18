@@ -192,6 +192,10 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0150_gene_save_roundtrip():
 		failures += 1
+	if not await _check_v0160_macro_editor_fields():
+		failures += 1
+	if not await _check_v0160_runtime_phenotype():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -3714,8 +3718,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 2:
-		push_error("SmokeTest: save schema must be version 2")
+	if int(snapshot.get("schema_version", -1)) != 3:
+		push_error("SmokeTest: save schema must be version 3")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -3728,7 +3732,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v2)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v3)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3777,4 +3781,153 @@ func _check_v0141_glue_link() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK v0.14.1 glue links child without LINK instruction")
+	return true
+
+## v0.16.0：Macro 表型字段写入 Genome、改变基因模式 hash、预览可见；旧模式 hash 不变。
+func _check_v0160_macro_editor_fields() -> bool:
+	var dev_scene: PackedScene = load("res://scenes/ui/DevEditorPanel.tscn") as PackedScene
+	if dev_scene == null:
+		push_error("SmokeTest: DevEditorPanel scene missing for v0.16.0 check")
+		return false
+	var dev: Node = dev_scene.instantiate()
+	root.add_child(dev)
+	await process_frame
+	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	var hash_before: int = int(draft_ref.call("hash"))
+	dev.call("_on_macro_value_changed", 1.5, "cell_size")
+	dev.call("_on_macro_value_changed", 0.8, "stiffness")
+	dev.call("_on_macro_value_changed", 0.9, "nutrition_priority")
+	dev.call("_on_macro_value_changed", 2.0, "min_connections")
+	dev.call("_on_macro_value_changed", 0.1, "color_r")
+	dev.call("_on_macro_value_changed", 0.2, "color_g")
+	dev.call("_on_macro_value_changed", 0.3, "color_b")
+	if absf(float(draft_ref.get("cell_size")) - 1.5) > 0.001 \
+		or absf(float(draft_ref.get("cell_stiffness")) - 0.8) > 0.001 \
+		or absf(float(draft_ref.get("nutrition_priority")) - 0.9) > 0.001 \
+		or int(draft_ref.get("min_connections")) != 2 \
+		or absf(float(draft_ref.get("color_r")) - 0.1) > 0.001 \
+		or absf(float(draft_ref.get("color_b")) - 0.3) > 0.001:
+		push_error("SmokeTest: v0.16.0 macro fields did not reach Genome draft")
+		dev.queue_free(); return false
+	if int(draft_ref.call("hash")) == hash_before:
+		push_error("SmokeTest: v0.16.0 macro fields must change gene-mode hash")
+		dev.queue_free(); return false
+	# 旧模式 flags=0：同样字段不得改变 hash，保证 v0.14.x 回放稳定。
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var plain: RefCounted = genome_script.new() as RefCounted
+	plain.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	var tuned: RefCounted = genome_script.new() as RefCounted
+	tuned.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	tuned.set("cell_size", 1.5)
+	tuned.set("nutrition_priority", 0.9)
+	tuned.set("color_r", 0.1)
+	if int(plain.call("hash")) != int(tuned.call("hash")):
+		push_error("SmokeTest: legacy-mode hash must ignore v0.16.0 fields")
+		dev.queue_free(); return false
+	# 预览按新字段派生 caption 与补连数量；只读，不写 Genome。
+	var preview_node: Node = dev.find_child("GenomePreview", true, false)
+	if preview_node == null:
+		push_error("SmokeTest: genome preview missing for v0.16.0 check")
+		dev.queue_free(); return false
+	preview_node.call("set_program", [], dev.call("get_macro_draft"), true)
+	var caption: String = str(preview_node.call("get_state_caption_at", 0))
+	if not caption.contains("大小 1.50") or not caption.contains("RGB(0.10,0.20,0.30)"):
+		push_error("SmokeTest: preview must show v0.16.0 phenotype caption: " + caption)
+		dev.queue_free(); return false
+	var state_count: int = int(preview_node.call("get_state_count"))
+	if state_count < 2 or int(preview_node.call("get_link_count_at", state_count - 1)) <= int(dev.call("get_macro_draft").get("max_divisions", 3)):
+		push_error("SmokeTest: preview must show min_connections extra links")
+		dev.queue_free(); return false
+	dev.queue_free()
+	print("SmokeTest: OK v0.16.0 macro phenotype editor / hash boundary / preview")
+	return true
+
+## v0.16.0：逐细胞半径/刚度/颜色生效，连接上限与补连生效，schema v3 与旧档兼容。
+func _check_v0160_runtime_phenotype() -> bool:
+	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	manager.set("autonomous_division_cooldown", 1)
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.set("flags", gene_flag | glue_flag)
+	genome.set("division_mass", 0.2)
+	genome.set("split_ratio", 0.5)
+	genome.set("max_divisions", 2)
+	genome.set("child_types", PackedByteArray([0, 2, 4, 10]))
+	genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+	genome.set("cell_size", 1.5)
+	genome.set("cell_stiffness", 0.8)
+	genome.set("nutrition_priority", 0.9)
+	genome.set("max_connections", 4)
+	genome.set("min_connections", 2)
+	genome.set("color_r", 0.1)
+	genome.set("color_g", 0.2)
+	genome.set("color_b", 0.3)
+	var base_count: int = int(cells.call("size"))
+	var org_id: int = int(manager.call("register_zygote", 1, 1, -1, genome, Vector2.ZERO, 3.0, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.16.0 zygote registration failed")
+		instance.queue_free(); return false
+	var zygote_index: int = base_count
+	if absf(float(cells.call("get_radius_scale", zygote_index)) - 1.5) > 0.001 \
+		or absf(float(cells.call("get_stiffness", zygote_index)) - 1.45) > 0.001:
+		push_error("SmokeTest: gene phenotype arrays not applied to zygote")
+		instance.queue_free(); return false
+	var cell_color: Color = cells.call("get_color", zygote_index) as Color
+	if absf(cell_color.r - 0.1) > 0.001 or absf(cell_color.g - 0.2) > 0.001 or absf(cell_color.b - 0.3) > 0.001:
+		push_error("SmokeTest: gene color not applied to zygote")
+		instance.queue_free(); return false
+	# 视图层：颜色覆写可见，半径倍率生效，而公开静息半径 API 保持兼容。
+	var cell_view_scene: PackedScene = load("res://scenes/cells/CellBase.tscn") as PackedScene
+	var view: Node2D = cell_view_scene.instantiate() as Node2D
+	root.add_child(view)
+	await process_frame
+	var no_contacts: Array[Vector2] = []
+	view.call("apply_cell", Vector2.ZERO, 0, 0, 1.0, Vector2.ZERO, no_contacts, no_contacts, no_contacts, [], 1.5, cell_color)
+	var body: Polygon2D = view.get("body") as Polygon2D
+	if body == null or absf(body.color.r - 0.1) > 0.001 or absf(body.color.g - 0.2) > 0.001:
+		push_error("SmokeTest: genome color override not rendered on cell body")
+		instance.queue_free(); view.queue_free(); return false
+	if absf(float(view.call("get_visual_rest_radius")) - 7.0) > 0.001:
+		push_error("SmokeTest: visual rest radius API must stay compatible")
+		instance.queue_free(); view.queue_free(); return false
+	view.queue_free()
+	for step_index in range(240):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	var link_counts: PackedByteArray = cells.get("cell_link_count")
+	var max_seen: int = 0
+	for cell_index in range(link_counts.size()):
+		max_seen = maxi(max_seen, int(link_counts[cell_index]))
+	if int(cells.call("size")) < base_count + 2 or max_seen > 4 or max_seen < 2:
+		push_error("SmokeTest: v0.16.0 division/link limits invalid (cells=%d max_links=%d)" % [int(cells.call("size")), max_seen])
+		instance.queue_free(); return false
+	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
+	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
+	if int(snapshot.get("schema_version", -1)) != 3 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v3 must persist phenotype arrays")
+		instance.queue_free(); return false
+	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
+	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
+		(legacy_snapshot.get("cells", {}) as Dictionary).erase(array_name)
+	if not bool(save_script.call("restore", legacy_snapshot, manager, env, tick_core)):
+		push_error("SmokeTest: legacy snapshot restore failed")
+		instance.queue_free(); return false
+	var restored_scales: PackedFloat32Array = cells.get("cell_radius_scale") as PackedFloat32Array
+	if restored_scales.is_empty() or absf(float(restored_scales[0]) - 1.0) > 0.001:
+		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v3 fallback")
 	return true

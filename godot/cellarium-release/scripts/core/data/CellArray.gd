@@ -21,6 +21,13 @@ var link_rest_length: PackedFloat32Array = PackedFloat32Array()
 var expression_weights: PackedFloat32Array = PackedFloat32Array()
 var neural_weights: PackedFloat32Array = PackedFloat32Array()
 var behavior_intents: PackedFloat32Array = PackedFloat32Array()
+## v0.16.0：逐细胞表型数组。默认 1.0（半径倍率/刚度倍率）与 -1（颜色未覆写），
+## 保证 flags 清零的旧基因组与旧存档行为逐位不变。
+var cell_radius_scale: PackedFloat32Array = PackedFloat32Array()
+var cell_stiffness: PackedFloat32Array = PackedFloat32Array()
+var cell_color_r: PackedFloat32Array = PackedFloat32Array()
+var cell_color_g: PackedFloat32Array = PackedFloat32Array()
+var cell_color_b: PackedFloat32Array = PackedFloat32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -41,6 +48,11 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 		neural_weights.append(0.0)
 	for i in range(BEHAVIOR_OUTPUT_COUNT):
 		behavior_intents.append(0.0)
+	cell_radius_scale.append(1.0)
+	cell_stiffness.append(1.0)
+	cell_color_r.append(-1.0)
+	cell_color_g.append(-1.0)
+	cell_color_b.append(-1.0)
 	return index
 
 func size() -> int:
@@ -66,12 +78,43 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	var expression_start: int = index * 8
 	for trait_index in range(8):
 		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]
+	cell_radius_scale[child_index] = cell_radius_scale[index]
+	cell_stiffness[child_index] = cell_stiffness[index]
+	cell_color_r[child_index] = cell_color_r[index]
+	cell_color_g[child_index] = cell_color_g[index]
+	cell_color_b[child_index] = cell_color_b[index]
 	return child_index
 
 func get_position(index: int) -> Vector2:
 	if index < 0 or index >= size():
 		return Vector2.ZERO
 	return Vector2(cell_pos_x[index], cell_pos_y[index])
+
+## v0.16.0：写入逐细胞表型（基因模式由 Genome 派生；旧模式保持默认值）。
+func set_cell_phenotype(index: int, radius_scale: float, stiffness: float, color: Color) -> bool:
+	if index < 0 or index >= size():
+		return false
+	cell_radius_scale[index] = clampf(radius_scale, 0.5, 2.0)
+	cell_stiffness[index] = clampf(stiffness, 0.25, 2.0)
+	cell_color_r[index] = color.r
+	cell_color_g[index] = color.g
+	cell_color_b[index] = color.b
+	return true
+
+func get_radius_scale(index: int) -> float:
+	if index < 0 or index >= cell_radius_scale.size():
+		return 1.0
+	return cell_radius_scale[index]
+
+func get_stiffness(index: int) -> float:
+	if index < 0 or index >= cell_stiffness.size():
+		return 1.0
+	return cell_stiffness[index]
+
+func get_color(index: int) -> Color:
+	if index < 0 or index >= cell_color_r.size():
+		return Color(-1.0, -1.0, -1.0, 1.0)
+	return Color(cell_color_r[index], cell_color_g[index], cell_color_b[index], 1.0)
 
 func set_position(index: int, position: Vector2) -> bool:
 	if index < 0 or index >= size():

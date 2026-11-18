@@ -89,6 +89,11 @@ func _rebuild() -> void:
 	var energies: PackedFloat32Array = cells.get("cell_energy")
 	var link_a: PackedInt32Array = cells.get("link_cell_a")
 	var link_b: PackedInt32Array = cells.get("link_cell_b")
+	## v0.16.0：逐细胞表型；数组缺省时按 1.0/-1 处理，旧模式渲染逐位不变。
+	var radius_scales: PackedFloat32Array = cells.get("cell_radius_scale")
+	var color_r: PackedFloat32Array = cells.get("cell_color_r")
+	var color_g: PackedFloat32Array = cells.get("cell_color_g")
+	var color_b: PackedFloat32Array = cells.get("cell_color_b")
 	var indices: Array[int] = []
 	for cell_index in range(alive.size()):
 		if alive[cell_index] != 0:
@@ -115,8 +120,7 @@ func _rebuild() -> void:
 	if dish_radius_value != null:
 		dish_radius = maxf(1.0, float(dish_radius_value))
 	# 接触范围必须贴近真实接触：此前 2r+1 / 0.8r 让相隔 1~5.6 世界单位的细胞提前压平。
-	var contact_range: float = radius * 2.0 + CHORDS.contact_epsilon(radius)
-	var wall_range: float = CHORDS.contact_epsilon(radius)
+	# v0.16.0：半径按逐细胞倍率派生，旧模式倍率为 1.0，结果不变。
 	var buckets: Dictionary = CELL_PHYSICS.call("build_spatial_hash", cells)
 	_last_contacts_sent = 0
 	_last_adhesions_sent = 0
@@ -124,7 +128,7 @@ func _rebuild() -> void:
 	# 共享弦：每对细胞只算一次圆-圆相交，两个端点原样分发给双方（Cell Lab A[] 机制）。
 	var chord_lists: Dictionary = _build_shared_chords(
 		cells, indices, pos_x, pos_y, org_ids, link_a, link_b,
-		buckets, radius, dish_center, dish_radius
+		buckets, radius, dish_center, dish_radius, radius_scales
 	)
 	_last_chords_sent = 0
 	for key in chord_lists.keys():
@@ -139,6 +143,9 @@ func _rebuild() -> void:
 		var velocity: Vector2 = Vector2.ZERO
 		if prev_x.size() > cell_index and prev_y.size() > cell_index:
 			velocity = Vector2(pos_x[cell_index] - prev_x[cell_index], pos_y[cell_index] - prev_y[cell_index])
+		var cell_radius_value: float = _scaled_radius(radius, radius_scales, cell_index)
+		var contact_range: float = cell_radius_value * 2.0 + CHORDS.contact_epsilon(cell_radius_value)
+		var wall_range: float = CHORDS.contact_epsilon(cell_radius_value)
 		var cell_contacts: Dictionary = _collect_contacts(
 			cells, cell_index, buckets, pos_x, pos_y, org_ids,
 			link_a, link_b, contact_range
@@ -151,7 +158,7 @@ func _rebuild() -> void:
 			adhesions.append(direction)
 		var position_value: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
 		var wall_contacts: Array[Vector2] = _collect_wall_contacts(
-			position_value, dish_center, dish_radius, radius, wall_range
+			position_value, dish_center, dish_radius, cell_radius_value, wall_range
 		)
 		_last_contacts_sent += contacts.size() + adhesions.size() + wall_contacts.size()
 		_last_adhesions_sent += adhesions.size()
@@ -167,7 +174,9 @@ func _rebuild() -> void:
 			contacts,
 			adhesions,
 			wall_contacts,
-			chords
+			chords,
+			_scaled_scale(radius_scales, cell_index),
+			_scaled_color(color_r, color_g, color_b, cell_index)
 		)
 	for i in range(indices.size(), _pool.size()):
 		_pool[i].visible = false
@@ -187,7 +196,8 @@ static func _build_shared_chords(
 	buckets: Dictionary,
 	radius: float,
 	dish_center: Vector2,
-	dish_radius: float
+	dish_radius: float,
+	radius_scales: PackedFloat32Array = PackedFloat32Array()
 ) -> Dictionary:
 	var lists: Dictionary = {}
 	for cell_index in indices:
@@ -204,7 +214,7 @@ static func _build_shared_chords(
 			seen[pair_key] = true
 			var p0: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
 			var p1: Vector2 = Vector2(pos_x[neighbor], pos_y[neighbor])
-			var chord: Dictionary = CHORDS.call("circle_chord", p0, radius, p1, radius)
+			var chord: Dictionary = CHORDS.call("circle_chord", p0, _scaled_radius(radius, radius_scales, cell_index), p1, _scaled_radius(radius, radius_scales, neighbor))
 			if not bool(chord.get("valid", false)):
 				continue
 			var adhesion: bool = (
@@ -225,7 +235,7 @@ static func _build_shared_chords(
 	# 皿壁弦：同一条弦对细胞与皿壁双方共享，这里只写细胞侧。
 	for cell_index in indices:
 		var position_value: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
-		var chord: Dictionary = CHORDS.call("wall_chord", position_value, radius, dish_center, dish_radius)
+		var chord: Dictionary = CHORDS.call("wall_chord", position_value, _scaled_radius(radius, radius_scales, cell_index), dish_center, dish_radius)
 		if bool(chord.get("valid", false)):
 			(lists[cell_index] as Array).append({
 				"a": chord["a"], "b": chord["b"], "kind": 2, "peer": -1
@@ -235,6 +245,22 @@ static func _build_shared_chords(
 		if entries.size() > CHORDS.MAX_CHORDS:
 			entries.resize(CHORDS.MAX_CHORDS)
 	return lists
+
+## v0.16.0：缺数组/越界时退回 1.0，保证旧模式与 v0.15.0 渲染一致。
+static func _scaled_scale(scales: PackedFloat32Array, index: int) -> float:
+	if index < 0 or index >= scales.size():
+		return 1.0
+	return clampf(float(scales[index]), 0.5, 2.0)
+
+static func _scaled_radius(base_radius: float, scales: PackedFloat32Array, index: int) -> float:
+	return maxf(1.0, base_radius * _scaled_scale(scales, index))
+
+static func _scaled_color(r: PackedFloat32Array, g: PackedFloat32Array, b: PackedFloat32Array, index: int) -> Color:
+	if index < 0 or index >= r.size() or index >= g.size() or index >= b.size():
+		return Color(-1.0, -1.0, -1.0, 1.0)
+	if float(r[index]) < 0.0:
+		return Color(-1.0, -1.0, -1.0, 1.0)
+	return Color(float(r[index]), float(g[index]), float(b[index]), 1.0)
 
 ## 从既有空间哈希派生接触方向：同个体且已有 Link 的邻居算黏附，其余算普通碰撞。
 ## 方向是世界坐标，与 CellView 的旋转后轮廓对齐；只读，不改变连接或物理状态。

@@ -43,6 +43,9 @@ var _stretch: float = 0.0
 var _membrane: RefCounted = null
 var _organelles: Array[Polygon2D] = []
 var _base_color: Color = Color.WHITE
+## v0.16.0：基因模式表型；旧模式保持 1.0/-1，渲染结果与 v0.15.0 一致。
+var _radius_scale: float = 1.0
+var _color_override: Color = Color(-1.0, -1.0, -1.0, 1.0)
 
 func _ready() -> void:
 	if organelle_root != null:
@@ -60,7 +63,9 @@ func apply_cell(
 	contacts: Array[Vector2] = [],
 	adhesions: Array[Vector2] = [],
 	wall_contacts: Array[Vector2] = [],
-	chords: Array = []
+	chords: Array = [],
+	radius_scale: float = 1.0,
+	color_override: Color = Color(-1.0, -1.0, -1.0, 1.0)
 ) -> void:
 	global_position = position
 	_velocity = velocity
@@ -68,13 +73,19 @@ func apply_cell(
 	_adhesions = adhesions.duplicate()
 	_wall_contacts = wall_contacts.duplicate()
 	_chords = chords.duplicate()
-	if type_id != _type_id or org_id != _org_id:
+	if type_id != _type_id or org_id != _org_id or absf(radius_scale - _radius_scale) > 0.0001:
 		_org_id = org_id
+		_radius_scale = clampf(radius_scale, 0.5, 2.0)
 		_apply_type(type_id)
 	var vitality: float = clampf(energy / 1.2, 0.35, 1.0)
-	_base_color = CATALOG.call("color", _type_id)
-	var org_hue: float = fposmod(float(org_id) * 0.173 + 0.42, 1.0)
-	_base_color = _base_color.lerp(Color.from_hsv(org_hue, 0.34, 0.95), 0.16)
+	_color_override = color_override
+	if _color_override.r >= 0.0:
+		# 基因模式：直接用 Genome 指定的 RGB，不做个体色相偏移。
+		_base_color = Color(_color_override.r, _color_override.g, _color_override.b, 1.0)
+	else:
+		_base_color = CATALOG.call("color", _type_id)
+		var org_hue: float = fposmod(float(org_id) * 0.173 + 0.42, 1.0)
+		_base_color = _base_color.lerp(Color.from_hsv(org_hue, 0.34, 0.95), 0.16)
 	_apply_vitality(vitality)
 	_refresh_shape()
 
@@ -110,14 +121,15 @@ func _refresh_shape() -> void:
 		return
 	# 只保留速度/相位状态供 API 与旧测试读取；外膜不再由呼吸膜生成。
 	# Cell Lab 的细胞外形来自物理半径与共享弦，呼吸相位只用于着色。
-	var velocity_limit: float = maxf(1.0, visual_radius * 0.5)
+	var effective_radius: float = visual_radius * _radius_scale
+	var velocity_limit: float = maxf(1.0, effective_radius * 0.5)
 	var target_stretch: float = clampf(_velocity.length() / velocity_limit, 0.0, 1.0) * max_stretch
 	_stretch += (target_stretch - _stretch) * clampf(stretch_smoothing, 0.05, 1.0)
 	# 统一基底：所有细胞外膜都是同一套 64 点解析圆。
 	# 有弦时裁剪，无弦时仅按接触法线浅压平；绝不在呼吸膜与弦膜之间切换点集。
 	var unit: PackedVector2Array = CHORDS.call("unit_circle", 64)
 	if not _chords.is_empty():
-		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, 0.0, visual_radius)
+		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, 0.0, effective_radius)
 		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
 		var chord_outline: PackedVector2Array = CHORDS.call("clip_unit_circle", prepared, 64)
 		if chord_outline.size() >= 3:
@@ -131,8 +143,8 @@ func _refresh_shape() -> void:
 			shaped = _flatten_contacts(shaped, _contacts, contact_flatten)
 			shaped = _flatten_contacts(shaped, _adhesions, adhesion_flatten)
 			shaped = _flatten_contacts(shaped, _wall_contacts, wall_flatten)
-		world_points.append(shaped * visual_radius)
-		inner_points.append(shaped * visual_radius * 0.62)
+		world_points.append(shaped * effective_radius)
+		inner_points.append(shaped * effective_radius * 0.62)
 	body.polygon = world_points
 	outline.points = world_points
 	if inner_ring != null:
@@ -177,16 +189,17 @@ func _apply_type(type_id: int) -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = maxi(1, int(_membrane.get("signature")))
 	var accent: Color = CATALOG.call("accent_color", type_id)
+	var effective_radius: float = visual_radius * _radius_scale
 	for i in range(_organelles.size()):
 		var organelle: Polygon2D = _organelles[i]
 		var angle: float = rng.randf_range(0.0, TAU)
 		var distance: float = rng.randf_range(0.22, 0.52)
-		organelle.position = Vector2(cos(angle), sin(angle)) * distance * visual_radius
-		var size_value: float = rng.randf_range(0.06, 0.12) * visual_radius
+		organelle.position = Vector2(cos(angle), sin(angle)) * distance * effective_radius
+		var size_value: float = rng.randf_range(0.06, 0.12) * effective_radius
 		organelle.polygon = _circle_polygon(size_value, 7)
 		organelle.color = Color(accent.r, accent.g, accent.b, 0.8)
 	if nucleus != null:
-		nucleus.polygon = _circle_polygon(visual_radius * 0.15, 10)
+		nucleus.polygon = _circle_polygon(effective_radius * 0.15, 10)
 
 static func _circle_polygon(radius: float, segments: int) -> PackedVector2Array:
 	var points: PackedVector2Array = PackedVector2Array()

@@ -52,13 +52,15 @@ func _draw() -> void:
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var radius: float = float(organism_manager.get("cell_radius"))
+	var radius_scales: PackedFloat32Array = cells.get("cell_radius_scale")
 	var pulse: float = 0.5 + 0.5 * sin(_pulse_phase)
 	for cell_index in selection:
 		var index: int = int(cell_index)
 		if index < 0 or index >= alive.size() or alive[index] == 0:
 			continue
 		var center: Vector2 = Vector2(pos_x[index], pos_y[index])
-		var ring_radius: float = radius + ring_radius_offset + pulse * 1.6
+		var scale_value: float = float(radius_scales[index]) if index < radius_scales.size() else 1.0
+		var ring_radius: float = radius * clampf(scale_value, 0.5, 2.0) + ring_radius_offset + pulse * 1.6
 		var alpha: float = ring_color.a * (0.7 + 0.3 * pulse)
 		draw_arc(center, ring_radius, 0.0, TAU, 48, Color(ring_color.r, ring_color.g, ring_color.b, alpha), ring_width, true)
 		# 四个方位的短刻度，强化"被选中"的读数感。

@@ -50,6 +50,10 @@ func set_program(program: Array, macro_draft: Dictionary = {}, gene_mode: bool =
 	if gene_mode:
 		signature += "|" + str(macro_draft.get("cell_type", 0)) + "|" + str(macro_draft.get("division_mass", 1.0))
 		signature += "|" + str(macro_draft.get("max_divisions", 3)) + "|" + str(macro_draft.get("make_glue", false))
+		signature += "|" + str(macro_draft.get("nutrition_priority", 0.5)) + "|" + str(macro_draft.get("stiffness", 0.5))
+		signature += "|" + str(macro_draft.get("cell_size", 1.0)) + "|" + str(macro_draft.get("max_connections", 4))
+		signature += "|" + str(macro_draft.get("min_connections", 0)) + "|" + str(macro_draft.get("color_r", 0.36))
+		signature += "|" + str(macro_draft.get("color_g", 0.88)) + "|" + str(macro_draft.get("color_b", 0.75))
 		for child_index in range(1, 5):
 			signature += "|" + str(macro_draft.get("child%d" % child_index, 0)) + ":" + str(macro_draft.get("child%d_angle" % child_index, 0.0))
 	else:
@@ -87,6 +91,12 @@ func get_cell_type_at(state_index: int, cell_index: int) -> int:
 		return -1
 	return int((cells[cell_index] as Dictionary).get("type", -1))
 
+## v0.16.0：只读 caption，供 "预览显示表型" 的回归断言使用。
+func get_state_caption_at(state_index: int) -> String:
+	if state_index < 0 or state_index >= _states.size():
+		return ""
+	return str(_states[state_index].get("caption", ""))
+
 func is_playing() -> bool:
 	return _playing
 
@@ -123,10 +133,15 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 	var mass: float = float(draft.get("division_mass", 1.0))
 	var divisions: int = clampi(int(round(float(draft.get("max_divisions", 3)))), 0, 8)
 	var glue: bool = bool(draft.get("make_glue", false))
+	var cell_size: float = clampf(float(draft.get("cell_size", 1.0)), 0.5, 2.0)
+	var max_links: int = clampi(int(round(float(draft.get("max_connections", 4)))), 0, 16)
+	var min_links: int = clampi(int(round(float(draft.get("min_connections", 0)))), 0, max_links)
+	var rgb_text: String = "RGB(%.2f,%.2f,%.2f)" % [
+		float(draft.get("color_r", 0.36)), float(draft.get("color_g", 0.88)), float(draft.get("color_b", 0.75))]
 	var initial_cells: Array[Dictionary] = [{
 		"index": 0, "pos": Vector2.ZERO, "type": cell_type, "parent": -1, "born": true,
 	}]
-	_append_state(initial_cells, [], "合子 · 达到能量 %.2f 分裂" % mass, 0)
+	_append_state(initial_cells, [], "合子 · 阈值 %.2f · 大小 %.2f · %s" % [mass, cell_size, rgb_text], 0)
 	var links: Array = []
 	for division_index in range(divisions):
 		var cells: Array[Dictionary] = []
@@ -136,7 +151,7 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 		var parent: Dictionary = cells[parent_index]
 		var child_type: int = clampi(int(draft.get("child%d" % (division_index + 1), 0)), 0, 255)
 		var angle: float = TAU * clampf(float(draft.get("child%d_angle" % (division_index + 1), 0.0)), 0.0, 1.0)
-		var separation: float = 14.0
+		var separation: float = 14.0 * cell_size
 		var direction: Vector2 = Vector2(cos(angle), sin(angle))
 		var child_pos: Vector2 = (parent.get("pos", Vector2.ZERO) as Vector2) + direction * separation * 0.5
 		parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
@@ -147,14 +162,44 @@ func _rebuild_gene_states(draft: Dictionary) -> void:
 			"index": child_index, "pos": child_pos, "type": child_type,
 			"parent": parent_index, "born": true,
 		})
-		if glue:
+		# v0.16.0：连接上限阻断，最小连接数按索引升序补连（与运行时同口径的只读派生）。
+		if glue and _preview_can_link(links, parent_index, child_index, max_links):
 			links.append({"a": parent_index, "b": child_index, "rest": separation})
-		var caption: String = "分裂 %d · 质量 %.2f · 子代类型 %d%s" % [
-			division_index + 1, mass, child_type, " · 黏附连接" if glue else " · 无连接"]
+		if min_links > 0:
+			for peer_index in range(cells.size() - 1):
+				if peer_index == child_index:
+					continue
+				if not _preview_can_link(links, child_index, peer_index, max_links):
+					continue
+				links.append({"a": child_index, "b": peer_index, "rest": separation})
+				if _preview_link_count(links, child_index) >= min_links:
+					break
+		var caption: String = "分裂 %d · 质量 %.2f · 子代类型 %d · 连接 %d · %s" % [
+			division_index + 1, mass, child_type, links.size(), rgb_text]
 		_append_state(cells, links.duplicate(true), caption, 0)
 	_sync_caption()
 	if _canvas != null:
 		_canvas.queue_redraw()
+
+static func _preview_link_count(links: Array, cell_index: int) -> int:
+	var count: int = 0
+	for entry in links:
+		var link: Dictionary = entry as Dictionary
+		if int(link.get("a", -1)) == cell_index or int(link.get("b", -1)) == cell_index:
+			count += 1
+	return count
+
+static func _preview_can_link(links: Array, a: int, b: int, limit: int) -> bool:
+	if a == b or limit <= 0:
+		return false
+	if _preview_link_count(links, a) >= limit or _preview_link_count(links, b) >= limit:
+		return false
+	for entry in links:
+		var link: Dictionary = entry as Dictionary
+		if (int(link.get("a", -1)) == a and int(link.get("b", -1)) == b) \
+			or (int(link.get("a", -1)) == b and int(link.get("b", -1)) == a):
+			return false
+	return true
 
 func _rebuild_states_from(program: Array, cell_type: int) -> void:
 	_states.clear()

@@ -6,7 +6,8 @@ extends Control
 ## Cell Lab 专有的 40 Gene 槽 / 信号 lane / 95 算子只作只读证据展示；GNP1 已冻结，
 ## 不写入编码、不臆造字段。编辑只改 draft；Apply 经 signal → GameHUD → CommandBus 进入模拟。
 ## 本面板不碰模拟状态、不改 dt；v0.14.1 起「生成黏附素」写入 draft.flags bit0，
-## v0.15.0 起基因模式写入 bit1，两者都会改变该基因组的 hash；其余 Macro 字段仍只展示。
+## v0.15.0 起基因模式写入 bit1，v0.16.0 起营养优先级/骨架强度/细胞大小/连接数/RGB 也写入 draft，
+## 两者都会改变该基因组的 hash；其余 Macro 字段（split_mass/ratio/角度等）仍只展示。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
@@ -132,7 +133,8 @@ static func gene_help_text() -> String:
 		+ "① 分裂质量 = 细胞能量达到该值时分裂（Cell Lab Gene.b）。截图里能量 87 不分裂，是因为旧模式被 dev_program 发育状态门控；本模式直接按阈值分裂。\n"
 		+ "② 分裂即分化：子代 1–4 类型对应 Cell Lab Gene.i/j 子槽，按分裂次数依次分配，无需 DIFFERENTIATE 指令。\n"
 		+ "③ 连接由「生成黏附素」决定（flags bit0）；勾选后亲子自动建立弹性连接，无需 LINK 指令（已移除）。\n"
-		+ "④ 分裂质量比 / 子代角度 / 最大分裂次数控制每次分裂的能量分配、方向与总次数。"
+		+ "④ 分裂质量比 / 子代角度 / 最大分裂次数控制每次分裂的能量分配、方向与总次数。\n"
+		+ "⑤ v0.16.0 表型：营养优先级调摄能权重、骨架强度调接触分离、细胞大小调半径、连接数约束黏附、RGB 为细胞基色；0.5/1.0 保持旧版等价。"
 	)
 
 ## 分裂模板：每条 DIVIDE 增加 1 个细胞；a=被分裂的母细胞索引，b=角度(0..255→0..360°)，
@@ -488,23 +490,30 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_macro_slider("max_divisions", "最大分裂次数", 0.0, 8.0, 1.0,
 		"最多分裂几次；最终细胞数 = 1 + 此值。", 0))
 
-	box.add_child(_make_section_title("SPLIT · Macro 参考字段（只读草案）"))
-	box.add_child(_make_macro_slider("split_mass", "分裂质量（Macro 比例）", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)", 2))
-	box.add_child(_make_macro_check("invert_split_mass", "反转分裂质量", "check_invert_split_mass → Gene.f768h"))
-	box.add_child(_make_macro_slider("nutrition_priority", "营养优先级", 0.0, 1.0, 0.01, "seek_prio → Gene.f773m", 2))
-	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU", 2))
-	box.add_child(_make_macro_slider("split_angle2", "分裂角度 2", 0.0, 1.0, 0.01, "seek_splitangle2 → Gene.B ÷ TAU", 2))
-	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i", 2))
-	box.add_child(_make_macro_slider("ratio2", "子代比例 2", 0.0, 1.0, 0.01, "seek_ratio2 → Gene.C", 2))
+	box.add_child(_make_section_title("SPLIT · Macro 参考字段（仅草案）"))
+	box.add_child(_make_macro_slider("split_mass", "分裂质量（Macro 比例）", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)，仅草案", 2))
+	box.add_child(_make_macro_check("invert_split_mass", "反转分裂质量", "check_invert_split_mass → Gene.f768h，仅草案"))
 
-	box.add_child(_make_section_title("PHYSICAL / COLOR · 数值草案"))
-	box.add_child(_make_macro_slider("stiffness", "细胞骨架强度", 0.0, 1.0, 0.01, "seek_stiff → Gene.f774n", 2))
-	box.add_child(_make_macro_slider("cell_size", "细胞大小", 0.5, 2.0, 0.01, "Macro 编辑器尺寸控件；本项目半径由 CellShape 冻结", 2))
-	box.add_child(_make_macro_slider("max_connections", "最大连接数", 0.0, 16.0, 1.0, "Macro 编辑器连接控件；仅草案", 0))
-	box.add_child(_make_macro_slider("min_connections", "最小连接数", 0.0, 16.0, 1.0, "Macro 编辑器连接控件；仅草案", 0))
-	box.add_child(_make_macro_slider("color_r", "颜色 R", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
-	box.add_child(_make_macro_slider("color_g", "颜色 G", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
-	box.add_child(_make_macro_slider("color_b", "颜色 B", 0.0, 1.0, 0.01, "Macro RGB 控件；仅草案", 2))
+	box.add_child(_make_section_title("PHENOTYPE · Macro 表型字段（v0.16.0 基因模式生效）"))
+	box.add_child(_make_macro_slider("nutrition_priority", "营养优先级", 0.0, 1.0, 0.01,
+		"seek_prio → Gene.f773m（运行时消费点未证实）；本项目调异养/光合摄能权重，0.5 等价旧版。", 2))
+	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU（仅草案）", 2))
+	box.add_child(_make_macro_slider("split_angle2", "分裂角度 2", 0.0, 1.0, 0.01, "seek_splitangle2 → Gene.B ÷ TAU（仅草案）", 2))
+	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i（仅草案）", 2))
+	box.add_child(_make_macro_slider("ratio2", "子代比例 2", 0.0, 1.0, 0.01, "seek_ratio2 → Gene.C（仅草案）", 2))
+
+	box.add_child(_make_section_title("PHYSICAL / COLOR · v0.16.0 已落地"))
+	box.add_child(_make_macro_slider("stiffness", "细胞骨架强度", 0.0, 1.0, 0.01,
+		"seek_stiff → Gene.f774n / Cell.a(6)：本项目映射接触分离系数，0.5 等价旧版。", 2))
+	box.add_child(_make_macro_slider("cell_size", "细胞大小", 0.5, 2.0, 0.01,
+		"Gene.z/A[6] 0.5–2；本项目为逐细胞半径倍率，物理与渲染共用。", 2))
+	box.add_child(_make_macro_slider("max_connections", "最大连接数", 0.0, 16.0, 1.0,
+		"Gene.u[9]：阻止新增连接；0 表示禁止连接。", 0))
+	box.add_child(_make_macro_slider("min_connections", "最小连接数", 0.0, 16.0, 1.0,
+		"Cell Lab 未证实独立控件；本项目追加分裂后确定性补连，受最大连接数约束。", 0))
+	box.add_child(_make_macro_slider("color_r", "颜色 R", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
+	box.add_child(_make_macro_slider("color_g", "颜色 G", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
+	box.add_child(_make_macro_slider("color_b", "颜色 B", 0.0, 1.0, 0.01, "Gene.a[3]：基因模式直接作为细胞基色（仅视图）。", 2))
 
 	box.add_child(_make_section_title("REFERENCE · 证据边界"))
 	var reference: Label = Label.new()
@@ -629,6 +638,19 @@ func _sync_macro_to_draft() -> void:
 		split_angles.append(clampi(int(round(clampf(float(_macro_draft.get("child%d_angle" % child_index, 0.0)), 0.0, 1.0) * 255.0)), 0, 255))
 	draft.set("child_types", child_types)
 	draft.set("split_angles", split_angles)
+	# v0.16.0：Macro 表型字段写入 Genome（基因模式生效，旧模式清零时保持默认）。
+	var max_links: int = clampi(int(round(float(_macro_draft.get("max_connections", 4)))), 0, 16)
+	var min_links: int = clampi(int(round(float(_macro_draft.get("min_connections", 0)))), 0, max_links)
+	_macro_draft["max_connections"] = max_links
+	_macro_draft["min_connections"] = min_links
+	draft.set("nutrition_priority", clampf(float(_macro_draft.get("nutrition_priority", 0.5)), 0.0, 1.0))
+	draft.set("cell_stiffness", clampf(float(_macro_draft.get("stiffness", 0.5)), 0.0, 1.0))
+	draft.set("cell_size", clampf(float(_macro_draft.get("cell_size", 1.0)), 0.5, 2.0))
+	draft.set("max_connections", max_links)
+	draft.set("min_connections", min_links)
+	draft.set("color_r", clampf(float(_macro_draft.get("color_r", 0.36)), 0.0, 1.0))
+	draft.set("color_g", clampf(float(_macro_draft.get("color_g", 0.88)), 0.0, 1.0))
+	draft.set("color_b", clampf(float(_macro_draft.get("color_b", 0.75)), 0.0, 1.0))
 	# 基因模式下 dev_program 恒为空，指令仅存在于旧存档。
 	draft.call("set_development_program", [])
 
@@ -657,6 +679,9 @@ func _set_macro_status(key: String) -> void:
 		return
 	if key == "division_mass" or key == "split_ratio" or key == "max_divisions" or key.begins_with("child"):
 		_status_label.text = "基因模式参数已改：%s · 写入 Genome（Cell Lab Gene.b/c/i/j），影响 hash。" % key
+		return
+	if key == "nutrition_priority" or key == "stiffness" or key == "cell_size" or key.begins_with("max_conn") or key.begins_with("min_conn") or key.begins_with("color_"):
+		_status_label.text = "v0.16.0 表型已改：%s · 写入 Genome（不进 GNP1），影响 hash。" % key
 		return
 	_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / 确定性 hash。" % key
 

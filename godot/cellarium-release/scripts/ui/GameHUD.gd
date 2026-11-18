@@ -798,6 +798,15 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 			"max_divisions": int(_draft_genome.get("max_divisions")),
 			"child_types": (_draft_genome.get("child_types") as PackedByteArray).duplicate(),
 			"split_angles": (_draft_genome.get("split_angles") as PackedByteArray).duplicate(),
+			# v0.16.0：Macro 表型字段同样经 CommandBus 传入，不进 GNP1 冻结二进制。
+			"nutrition_priority": float(_draft_genome.get("nutrition_priority")),
+			"cell_stiffness": float(_draft_genome.get("cell_stiffness")),
+			"cell_size": float(_draft_genome.get("cell_size")),
+			"max_connections": int(_draft_genome.get("max_connections")),
+			"min_connections": int(_draft_genome.get("min_connections")),
+			"color_r": float(_draft_genome.get("color_r")),
+			"color_g": float(_draft_genome.get("color_g")),
+			"color_b": float(_draft_genome.get("color_b")),
 		}
 	if tool_id == "INJECT_COLOR":
 		command["color_type"] = _inject_color_type

@@ -43,6 +43,16 @@ var split_ratio: float = 0.5
 var max_divisions: int = 3
 var child_types: PackedByteArray = PackedByteArray()
 var split_angles: PackedByteArray = PackedByteArray()
+## v0.16.0 基因模式表型字段（补齐 Macro 编辑器草案；不进 GNP1 冻结二进制）。
+## 证据与「本项目版本化追加」边界见 v1.1 §5.3 与 v2.1 §0.3。
+var nutrition_priority: float = 0.5
+var cell_stiffness: float = 0.5
+var cell_size: float = 1.0
+var max_connections: int = 4
+var min_connections: int = 0
+var color_r: float = 0.36
+var color_g: float = 0.88
+var color_b: float = 0.75
 ## 运行时谱系元数据（阶段 4）：不进 GNP1 二进制编解码（格式已冻结）。
 var species_id: int = 0
 var lineage_id: int = -1
@@ -87,6 +97,11 @@ static func distance(a: RefCounted, b: RefCounted) -> float:
 		for i in range(mini(types_a.size(), types_b.size())):
 			if types_a[i] != types_b[i]:
 				program_distance += 1
+		# v0.16.0：表型差异也影响物种判定，但只有基因模式参与。
+		program_distance += absi(int(round(float(a.get("nutrition_priority")) * 10.0)) - int(round(float(b.get("nutrition_priority")) * 10.0)))
+		program_distance += absi(int(round(float(a.get("cell_size")) * 10.0)) - int(round(float(b.get("cell_size")) * 10.0)))
+		program_distance += absi(int(a.get("max_connections")) - int(b.get("max_connections")))
+		program_distance += absi(int(a.get("min_connections")) - int(b.get("min_connections")))
 	return float(locus_distance) * 1.0 + float(trait_distance) * 0.05 + float(program_distance) * 0.5
 
 func is_valid() -> bool:
@@ -112,6 +127,16 @@ func is_valid() -> bool:
 	if max_divisions < 0 or max_divisions > MAX_GENE_DIVISIONS:
 		return false
 	if child_types.size() > MAX_GENE_DIVISIONS or split_angles.size() > MAX_GENE_DIVISIONS:
+		return false
+	if nutrition_priority < 0.0 or nutrition_priority > 1.0:
+		return false
+	if cell_stiffness < 0.0 or cell_stiffness > 1.0:
+		return false
+	if cell_size < 0.5 or cell_size > 2.0:
+		return false
+	if max_connections < 0 or max_connections > 16 or min_connections < 0 or min_connections > 16:
+		return false
+	if min_connections > max_connections:
 		return false
 	return true
 
@@ -154,6 +179,19 @@ func hash() -> int:
 			value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
 		for byte_value in split_angles:
 			value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
+		# v0.16.0：Macro 表型字段同样不进 GNP1，显式混入基因模式 hash。
+		var macro_quantized: Array[int] = [
+			int(round(nutrition_priority * 1000000.0)),
+			int(round(cell_stiffness * 1000000.0)),
+			int(round(cell_size * 1000000.0)),
+			max_connections, min_connections,
+			int(round(clampf(color_r, 0.0, 1.0) * 255.0)),
+			int(round(clampf(color_g, 0.0, 1.0) * 255.0)),
+			int(round(clampf(color_b, 0.0, 1.0) * 255.0)),
+		]
+		for quantized in macro_quantized:
+			for shift in [0, 8, 16, 24]:
+				value = int((value ^ ((quantized >> shift) & 255)) * 16777619) & 0x7fffffff
 	return value
 
 func duplicate_genome() -> RefCounted:
@@ -171,6 +209,14 @@ func duplicate_genome() -> RefCounted:
 	copy.set("max_divisions", max_divisions)
 	copy.set("child_types", child_types.duplicate())
 	copy.set("split_angles", split_angles.duplicate())
+	copy.set("nutrition_priority", nutrition_priority)
+	copy.set("cell_stiffness", cell_stiffness)
+	copy.set("cell_size", cell_size)
+	copy.set("max_connections", max_connections)
+	copy.set("min_connections", min_connections)
+	copy.set("color_r", color_r)
+	copy.set("color_g", color_g)
+	copy.set("color_b", color_b)
 	copy.set("species_id", species_id)
 	copy.set("lineage_id", lineage_id)
 	return copy

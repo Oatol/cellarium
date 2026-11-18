@@ -4,6 +4,33 @@
 
 ---
 
+## 0.16.0 — 2026-11-18
+
+**类型**：玩法机制版本化追加（基因模式补齐 Macro 表型字段；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）
+**触发**：用户在阶段选择中确认「补齐 Macro 基因字段」，即把此前仅作草案展示的营养优先级、细胞骨架强度、细胞大小、最大/最小连接数、RGB 颜色真正落地。
+
+### 证据边界
+
+- 静态反编译证据：`seek_prio → Gene.f773m`、`seek_stiff → Gene.f774n`、`Gene.u[9]` 连接数上限、`Gene.a[3]` 颜色插值、`Gene.z/A[6]` 0.5–2 范围、`Cell.a(6)` 接触刚度；证据 ID 见 `analysis/CellLab_细胞物理与外观_代码级分析.md` §20.1。
+- **未证实边界**：`Gene.f773m` 的运行时消费点、独立「最小连接数」控件。这两项明确记为本项目的版本化追加，不宣称等价移植。
+- 规格先行：已修订 v1.1 §5.3、v2.1 §0.3 / §11，再动代码。
+
+### 实现
+
+- `Genome.gd` 在 `FLAG_GENE_MODE` 下追加 `nutrition_priority / cell_stiffness / cell_size / max_connections / min_connections / color_r|g|b`，校验、duplicate、distance 同步；hash 显式混入新字段，`flags` 清零时逐位保持 v0.15.0 hash。
+- `CellArray.gd` 新增逐细胞 `cell_radius_scale / cell_stiffness / cell_color_*`；物理碰撞、皿壁投影、共享弦、选中环与连接桥均按同一倍率计算，旧模式默认 1.0/-1，行为不变。
+- `OrganismManager`：营养优先级调异养/光合摄能权重（0.5 等价旧版）；骨架强度映射接触分离系数 `0.25 + 1.5×stiffness`（0.5 等价旧版 1.0）；最大连接数阻断新增连接，最小连接数在分裂后按索引升序确定性补连；GNP1 不变，新参数走 `genome_gene` payload。
+- `SaveManager` 升级 `schema_version=3` 并保存表型数组；schema 1–2 的旧快照恢复时填 1.0/-1 默认值。
+- `DevEditorPanel` 将新字段写入草案（最小连接数自动钳制不超过最大连接数），提示与帮助文本标明证据边界；`GenomePreview` 显示大小/RGB/连接数并按补连派生连接，不改变模拟状态。
+- 颜色只覆写视图基色，不进确定性 hash；新基因字段进 hash 但不进 GNP1。
+
+### 验证 / 同步
+
+- 新增 SmokeTest：编辑器字段写入与 hash 边界、旧模式 hash 不变、预览 caption/补连、逐细胞半径/刚度/颜色、颜色真实渲染到 `CellBase` 的 Body、连接上下限、schema v3 与旧快照回退。
+- 发布工程与 D 盘运行工程分别 `SCRIPTS=51 FAILURES=0 EXITCODE=0`；D 盘同步 13 个脚本，保留 autoload / `.uid` / 场景 `unique_id`。
+
+---
+
 ## 0.15.0 — 2026-11-18
 
 **类型**：玩法机制版本化追加（基因驱动发育 / 移除指令序列；GNP1 二进制与单帧 12 tick 上限不动）

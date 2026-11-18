@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 2
+const SCHEMA_VERSION: int = 3
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -12,6 +12,11 @@ const CELL_ARRAY_NAMES: Array[String] = [
 	"cell_energy", "cell_alive", "cell_type", "cell_org_id", "cell_link_count",
 	"link_cell_a", "link_cell_b", "link_rest_length",
 	"expression_weights", "neural_weights", "behavior_intents",
+]
+
+## v0.16.0：schema 1–2 的旧快照没有这些数组，恢复时按默认值补齐。
+const PHENOTYPE_ARRAY_NAMES: Array[String] = [
+	"cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b",
 ]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
@@ -41,6 +46,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in CELL_ARRAY_NAMES:
 		var source: Variant = cells.get(array_name)
 		snapshot["cells"][array_name] = _copy_array(source)
+	for array_name in PHENOTYPE_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	for array_name in ORGANISM_ARRAY_NAMES:
@@ -64,6 +71,14 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 			"max_divisions": int(genome.get("max_divisions")),
 			"child_types": _copy_array(genome.get("child_types")),
 			"split_angles": _copy_array(genome.get("split_angles")),
+			"nutrition_priority": float(genome.get("nutrition_priority")),
+			"cell_stiffness": float(genome.get("cell_stiffness")),
+			"cell_size": float(genome.get("cell_size")),
+			"max_connections": int(genome.get("max_connections")),
+			"min_connections": int(genome.get("min_connections")),
+			"color_r": float(genome.get("color_r")),
+			"color_g": float(genome.get("color_g")),
+			"color_b": float(genome.get("color_b")),
 			"species_id": int(genome.get("species_id")),
 			"lineage_id": int(genome.get("lineage_id")),
 		})
@@ -139,6 +154,16 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			return false
 		cells.set(array_name, _copy_array(cell_data[array_name]))
 
+	for array_name in PHENOTYPE_ARRAY_NAMES:
+		if cell_data.has(array_name):
+			cells.set(array_name, _copy_array(cell_data[array_name]))
+		else:
+			var default_value: float = -1.0 if array_name.begins_with("cell_color") else 1.0
+			var restored_values: PackedFloat32Array = PackedFloat32Array()
+			restored_values.resize(int(cells.get("cell_pos_x").size()))
+			restored_values.fill(default_value)
+			cells.set(array_name, restored_values)
+
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary
 	for array_name in ORGANISM_ARRAY_NAMES:
@@ -162,6 +187,14 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		genome.set("max_divisions", int(record.get("max_divisions", 3)))
 		genome.set("child_types", _copy_array(record.get("child_types", [])))
 		genome.set("split_angles", _copy_array(record.get("split_angles", [])))
+		genome.set("nutrition_priority", clampf(float(record.get("nutrition_priority", 0.5)), 0.0, 1.0))
+		genome.set("cell_stiffness", clampf(float(record.get("cell_stiffness", 0.5)), 0.0, 1.0))
+		genome.set("cell_size", clampf(float(record.get("cell_size", 1.0)), 0.5, 2.0))
+		genome.set("max_connections", clampi(int(record.get("max_connections", 4)), 0, 16))
+		genome.set("min_connections", clampi(int(record.get("min_connections", 0)), 0, 16))
+		genome.set("color_r", clampf(float(record.get("color_r", 0.36)), 0.0, 1.0))
+		genome.set("color_g", clampf(float(record.get("color_g", 0.88)), 0.0, 1.0))
+		genome.set("color_b", clampf(float(record.get("color_b", 0.75)), 0.0, 1.0))
 		genome.set("species_id", int(record.get("species_id", 0)))
 		genome.set("lineage_id", int(record.get("lineage_id", -1)))
 		if not bool(genome.call("set_development_program", record.get("dev_program", []))):

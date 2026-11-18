@@ -185,8 +185,8 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
-	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius)
-	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping)
+	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius, cells.get("cell_radius_scale"), cells.get("cell_stiffness"))
+	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping, cells.get("cell_radius_scale"), cell_radius)
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
 	if environment_manager != null:
@@ -329,8 +329,13 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 	var health: PackedFloat32Array = organisms.get("org_health")
 	var respiration_values: PackedByteArray = PackedByteArray()
 	respiration_values.resize(organisms.get("org_alive").size())
+	## v0.16.0：营养优先级按个体派生，0.5 的系数恒为 1.0，旧基因组行为不变。
+	var priority_values: PackedFloat32Array = PackedFloat32Array()
+	priority_values.resize(organisms.get("org_alive").size())
+	priority_values.fill(0.5)
 	for org_id in genomes:
 		respiration_values[int(org_id)] = int(genomes[org_id].get("respiration"))
+		priority_values[int(org_id)] = clampf(float(genomes[org_id].get("nutrition_priority")), 0.0, 1.0)
 	for cell_index in range(energies.size()):
 		if alive[cell_index] == 0:
 			continue
@@ -338,13 +343,15 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 		var field_values: PackedFloat32Array = field_samples[cell_index]
 		var oxygen: float = clampf(float(field_values[2]), 0.0, 1.0)
 		var respiration: Dictionary = RESPIRATION_RULES_SCRIPT.call("evaluate", int(respiration_values[org_id]), oxygen, facultative_aerobic_efficiency)
+		var feeding_factor: float = 0.25 + 1.5 * float(priority_values[org_id])
+		var light_factor: float = 1.75 - 1.5 * float(priority_values[org_id])
 		var food_gain: float = 0.0
 		if types[cell_index] == CELL_TYPE_ZYGOTE:
-			food_gain = maxf(0.0, float(field_values[0])) * heterotrophic_intake_rate * float(respiration.get("efficiency", 0.0)) * dt
+			food_gain = maxf(0.0, float(field_values[0])) * heterotrophic_intake_rate * feeding_factor * float(respiration.get("efficiency", 0.0)) * dt
 		elif types[cell_index] == CELL_TYPE_PHOTOCYTE:
-			food_gain = maxf(0.0, float(field_values[3])) * photosynthetic_intake_rate * dt
+			food_gain = maxf(0.0, float(field_values[3])) * photosynthetic_intake_rate * light_factor * dt
 		elif types[cell_index] == CELL_TYPE_NITROCYTE:
-			food_gain = maxf(0.0, float(field_values[4])) * chemotrophic_intake_rate * dt
+			food_gain = maxf(0.0, float(field_values[4])) * chemotrophic_intake_rate * feeding_factor * dt
 		if food_gain > 0.0:
 			var consumed: float = food_gain
 			if types[cell_index] == CELL_TYPE_ZYGOTE:
@@ -422,7 +429,9 @@ func _apply_autonomous_lifecycle() -> void:
 			var angles: PackedByteArray = genome.get("split_angles")
 			if division_index < angles.size():
 				angle = TAU * float(angles[division_index]) / 256.0
-		var child_index: int = int(cells.call("divide_cell", cell_index, angle, autonomous_division_separation))
+		var radius_scale: float = float(cells.call("get_radius_scale", cell_index)) if gene_mode else 1.0
+		var division_separation: float = maxf(autonomous_division_separation, cell_radius * 2.0 * radius_scale)
+		var child_index: int = int(cells.call("divide_cell", cell_index, angle, division_separation))
 		if child_index < 0:
 			continue
 		if not bool(organisms.call("add_developed_cell", org_id, child_index, max_cells)):
@@ -442,8 +451,12 @@ func _apply_autonomous_lifecycle() -> void:
 				types_array[child_index] = clampi(int(child_types[division_index]), 0, 255)
 				cells.set("cell_type", types_array)
 		# v0.14.1：成熟后的自主分裂同样遵守黏附素语义，亲子自动建连。
-		if bool(GENOME_SCRIPT.call("has_glue_links", genome)):
-			cells.call("link_cells", cell_index, child_index, maxf(autonomous_division_separation, 14.0))
+		# v0.16.0：受基因模式 max_connections 上限约束；min_connections 为追加的软补连。
+		var rest_length: float = maxf(division_separation, cell_radius * 2.0 * radius_scale)
+		if bool(GENOME_SCRIPT.call("has_glue_links", genome)) and _can_add_link(genome, cell_index, child_index):
+			cells.call("link_cells", cell_index, child_index, rest_length)
+		if gene_mode:
+			_apply_min_connections(genome, org_id, child_index, rest_length)
 		org_state[org_id] = mature_state
 		organisms.set("org_state", org_state)
 		cell_counts = organisms.get("cell_count")
@@ -526,6 +539,7 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	stored_genome.set("species_id", species_id)
 	stored_genome.set("lineage_id", int((species_system.call("get_species", species_id) as Dictionary).get("lineage_id", -1)))
 	genomes[org_id] = stored_genome
+	_apply_cell_phenotype(stored_genome, cell_index)
 	CELL_BEHAVIOR_SCRIPT.call("initialize_weights", cells, cell_index, int(genome.call("hash")))
 	organisms.call("add_developed_cell", org_id, cell_index, int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome)))
 	# add_developed_cell 会把状态改回 DEVELOPING；基因模式出生即成熟，必须恢复初值。
@@ -592,6 +606,57 @@ func _apply_gene_payload(genome: RefCounted, payload: Variant) -> void:
 		genome.set("child_types", (child_types as PackedByteArray).duplicate())
 	if split_angles is PackedByteArray:
 		genome.set("split_angles", (split_angles as PackedByteArray).duplicate())
+	# v0.16.0：Macro 表型字段（缺省时保留 Genome 默认值，兼容旧命令 payload）。
+	genome.set("nutrition_priority", clampf(float(gene.get("nutrition_priority", genome.get("nutrition_priority"))), 0.0, 1.0))
+	genome.set("cell_stiffness", clampf(float(gene.get("cell_stiffness", genome.get("cell_stiffness"))), 0.0, 1.0))
+	genome.set("cell_size", clampf(float(gene.get("cell_size", genome.get("cell_size"))), 0.5, 2.0))
+	genome.set("max_connections", clampi(int(gene.get("max_connections", genome.get("max_connections"))), 0, 16))
+	genome.set("min_connections", clampi(int(gene.get("min_connections", genome.get("min_connections"))), 0, 16))
+	genome.set("color_r", clampf(float(gene.get("color_r", genome.get("color_r"))), 0.0, 1.0))
+	genome.set("color_g", clampf(float(gene.get("color_g", genome.get("color_g"))), 0.0, 1.0))
+	genome.set("color_b", clampf(float(gene.get("color_b", genome.get("color_b"))), 0.0, 1.0))
+
+## v0.16.0：最小连接数是本项目追加的软约束（Cell Lab 未证实独立控件）。
+## 分裂后按 cell index 升序扫描同个体细胞，确定性补连到 min_connections；仍受上限约束。
+func _apply_min_connections(genome: RefCounted, org_id: int, cell_index: int, rest_length: float) -> void:
+	var target: int = clampi(int(genome.get("min_connections")), 0, 16)
+	if target <= 0 or cell_index < 0:
+		return
+	var link_counts: PackedByteArray = cells.get("cell_link_count")
+	if cell_index >= link_counts.size() or int(link_counts[cell_index]) >= target:
+		return
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	for peer_index in range(alive.size()):
+		if peer_index == cell_index or alive[peer_index] == 0 or org_ids[peer_index] != org_id:
+			continue
+		if not _can_add_link(genome, cell_index, peer_index):
+			continue
+		if bool(cells.call("link_cells", cell_index, peer_index, rest_length)):
+			link_counts = cells.get("cell_link_count")
+			if cell_index >= link_counts.size() or int(link_counts[cell_index]) >= target:
+				return
+func _apply_cell_phenotype(genome: RefCounted, cell_index: int) -> void:
+	if genome == null or not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+		return
+	var stiffness: float = clampf(float(genome.get("cell_stiffness")), 0.0, 1.0)
+	var color: Color = Color(
+		clampf(float(genome.get("color_r")), 0.0, 1.0),
+		clampf(float(genome.get("color_g")), 0.0, 1.0),
+		clampf(float(genome.get("color_b")), 0.0, 1.0),
+		1.0
+	)
+	cells.call("set_cell_phenotype", cell_index, float(genome.get("cell_size")), 0.25 + 1.5 * stiffness, color)
+
+func _can_add_link(genome: RefCounted, a: int, b: int) -> bool:
+	if genome == null or not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+		return true
+	var limit: int = clampi(int(genome.get("max_connections")), 0, 16)
+	if limit <= 0:
+		return false
+	var link_counts: PackedByteArray = cells.get("cell_link_count")
+	return a >= 0 and b >= 0 and a < link_counts.size() and b < link_counts.size() \
+		and int(link_counts[a]) < limit and int(link_counts[b]) < limit
 
 func _command_type_id(command: Dictionary) -> int:
 	return clampi(int(command.get("type_id", 0)), 0, 17)

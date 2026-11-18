@@ -7,7 +7,7 @@ const COLLISION_ITERATIONS: int = 6
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
 
-static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, normal_damping: float) -> int:
+static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, normal_damping: float, radius_scales: PackedFloat32Array = PackedFloat32Array(), base_radius: float = 0.0) -> int:
 	if cells == null or radius <= 0.0 or normal_damping < 0.0 or normal_damping > 1.0:
 		return -1
 	var count: int = int(cells.call("size"))
@@ -20,11 +20,13 @@ static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, n
 	for cell_index in range(count):
 		if alive[cell_index] == 0:
 			continue
+		var scale: float = float(radius_scales[cell_index]) if cell_index < radius_scales.size() else 1.0
+		var effective_radius: float = maxf(1.0, radius - base_radius * (scale - 1.0))
 		var offset: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index]) - center
-		if offset.length_squared() <= radius * radius:
+		if offset.length_squared() <= effective_radius * effective_radius:
 			continue
 		var normal: Vector2 = offset.normalized()
-		var boundary: Vector2 = center + normal * radius
+		var boundary: Vector2 = center + normal * effective_radius
 		var current_position: Vector2 = Vector2(pos_x[cell_index], pos_y[cell_index])
 		var velocity: Vector2 = current_position - Vector2(prev_x[cell_index], prev_y[cell_index])
 		var tangent_velocity: Vector2 = velocity - normal * velocity.dot(normal)
@@ -41,7 +43,7 @@ static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, n
 	cells.set("cell_prev_y", prev_y)
 	return projected
 
-static func resolve_collisions(cells: RefCounted, cell_radius: float) -> int:
+static func resolve_collisions(cells: RefCounted, cell_radius: float, radius_scales: PackedFloat32Array = PackedFloat32Array(), stiffnesses: PackedFloat32Array = PackedFloat32Array()) -> int:
 	if cells == null or cell_radius <= 0.0:
 		return -1
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
@@ -60,10 +62,16 @@ static func resolve_collisions(cells: RefCounted, cell_radius: float) -> int:
 			var b: int = pair.y
 			var delta: Vector2 = Vector2(pos_x[b] - pos_x[a], pos_y[b] - pos_y[a])
 			var distance: float = delta.length()
-			if distance >= cell_radius * 2.0:
+			var scale_a: float = float(radius_scales[a]) if a < radius_scales.size() else 1.0
+			var scale_b: float = float(radius_scales[b]) if b < radius_scales.size() else 1.0
+			var contact_distance: float = cell_radius * (scale_a + scale_b)
+			if distance >= contact_distance:
 				continue
 			var normal: Vector2 = Vector2.RIGHT if distance <= 0.000001 else delta / distance
-			var correction: float = (cell_radius * 2.0 - distance) * 0.5
+			var stiffness: float = 1.0
+			if a < stiffnesses.size() and b < stiffnesses.size():
+				stiffness = clampf((float(stiffnesses[a]) + float(stiffnesses[b])) * 0.5, 0.25, 2.0)
+			var correction: float = (contact_distance - distance) * 0.5 * stiffness
 			pos_x[a] -= normal.x * correction
 			pos_y[a] -= normal.y * correction
 			pos_x[b] += normal.x * correction

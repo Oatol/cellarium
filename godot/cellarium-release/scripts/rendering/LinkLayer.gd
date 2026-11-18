@@ -46,6 +46,7 @@ func draw_cooperation_layer() -> void:
 	var link_a: PackedInt32Array = cells.get("link_cell_a")
 	var link_b: PackedInt32Array = cells.get("link_cell_b")
 	var link_rest: PackedFloat32Array = cells.get("link_rest_length")
+	var radius_scales: PackedFloat32Array = cells.get("cell_radius_scale")
 	var radius: float = SHAPE.REST_RADIUS
 	if organism_manager != null:
 		var radius_value: Variant = organism_manager.get("cell_radius")
@@ -72,7 +73,9 @@ func draw_cooperation_layer() -> void:
 		if distance_value <= 0.001:
 			continue
 		var direction: Vector2 = delta / distance_value
-		var trim_value: float = minf(radius * 0.82, distance_value * 0.35)
+		var scale_a: float = float(radius_scales[a]) if a < radius_scales.size() else 1.0
+		var scale_b: float = float(radius_scales[b]) if b < radius_scales.size() else 1.0
+		var trim_value: float = minf(radius * clampf((scale_a + scale_b) * 0.5, 0.5, 2.0) * 0.82, distance_value * 0.35)
 		var start: Vector2 = point_a + direction * trim_value
 		var end: Vector2 = point_b - direction * trim_value
 		var type_a: int = 0 if a >= cell_type.size() else int(cell_type[a])

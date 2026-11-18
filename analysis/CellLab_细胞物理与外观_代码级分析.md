@@ -753,3 +753,30 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - `LINK` / `DIFFERENTIATE` 从编辑器与新基因组移除；`DevelopmentRules` 的 opcode 2 分支仅保留给 v0.14.x 及更早存档解码，旧存档里的 LINK 仍可执行，避免破坏回放。
 - 发育预览改为按分裂次数派生状态：合子 → 逐次分裂（子代类型取 `child1–4`）→ 黏附素开启时显示亲子连接；不再有 LINK 阶段。
 - 验证：SmokeTest 覆盖分裂质量滑块写 Genome、CommandBus/GNP1 往返、能量达标后 4 细胞 / 3 黏附连接、子代类型分化、预览连接数、schema v2 存档往返；`SCRIPTS=51 FAILURES=0`。
+
+## 26. v0.16.0：Macro 表型字段落地与证据边界（2026-11-18）
+
+### 26.1 已核对的代码证据（沿用 §20.1，未重新执行 APK）
+
+- `GenomeEditorFragment.refreshControlsFromSelectedGene(boolean,boolean)`（`ev_3896a017015372230a52449ba233fdcaf267c026f0ef547286f68e74cdac85f3`）：`seek_prio → log(f773m/0.1)/log(99.99999850988391)`、`seek_stiff → f774n < 35 ? f774n/35 : 1`，`child1..4 → f778r/s/t/u`，两个分裂角 → `f770j/B ÷ TAU`。
+- `Gene` 静态范围表（`CellLab_APK_解析报告.md` §11.4）：`z[7]/A[7] = 0.5..2`（第 7 个浮点参数），`w[11]` 中连接数选项上界含 20；`Cell.d` 是半径，`Gene.a[3]` 是颜色并在 `g(double)` 中向基因色插值；分裂触发条件含「连接数 `P ≤ Gene.u[9]`」（`e(double)`，见 §11.5）。
+- 接触物理 `d(int)` 按 `Cell.a(6)` 的刚度做弹性排斥（§11.5）。
+- **仍缺证据**：`Gene.f773m` 在运行时如何被消费（未逐行展开）；Macro 是否有独立的「最小连接数」控件（控件族里只确认 `spinner_types/cells` 与连接保持类布尔，未见独立 seekbar）。因此本版只把营养优先级与最小连接数记为**本项目版本化追加**。
+
+### 26.2 落地口径（不冒充等价移植）
+
+| 字段 | 本项目语义 | 默认等价点 | 证据等级 |
+| --- | --- | --- | --- |
+| `nutrition_priority` | 异养/化能摄能 ×(0.25+1.5p)，光合 ×(1.75−1.5p) | p=0.5 → 1.0 | 控件映射有证据，消费点未证实 |
+| `cell_stiffness` | 接触分离系数 0.25+1.5s | s=0.5 → 1.0 | 控件与 `Cell.a(6)` 有证据 |
+| `cell_size` | 逐细胞半径倍率 0.5–2，物理/共享弦/选中环共用 | 1.0 | `Gene.z/A[6]` 范围有证据 |
+| `max_connections` | 阻断新增连接 | 4（默认，与 v0.15.0 一致） | `Gene.u[9]` 有证据 |
+| `min_connections` | 分裂后按 cell index 升序补连 | 0（不补连） | 本项目追加 |
+| `color_r/g/b` | 基因模式直接作为细胞基色，仅视图 | 类型色（覆写值 -1） | `Gene.a[3]` 有证据，取消插值属简化 |
+
+### 26.3 冻结边界与验证
+
+- GNP1 二进制布局、tick 顺序、单帧 12 tick 上限不动；新字段只走 `CommandBus` 的 `genome_gene` payload 与存档 `schema_version=3`（1–2 恢复填 1.0/-1 默认值）。
+- 新基因字段显式混入 hash（仅 `FLAG_GENE_MODE` 置位）；`flags` 清零时 hash 与行为与 v0.15.0 逐位一致；颜色只改视图、不进 hash。
+- 规格先行：v1.1 §5.3、v2.1 §0.3 / §11 已于代码前修订，风险表新增「逐细胞数组改变存档与回放」条目。
+- 验证：新增 SmokeTest 覆盖编辑器写入/hash 边界、旧模式 hash 不变、预览 caption 与补连、逐细胞半径/刚度/颜色、颜色真实渲染到 `CellBase` Body、连接上下限、schema v3 与旧快照回退；发布与 D 盘工程均 `SCRIPTS=51 FAILURES=0`。
