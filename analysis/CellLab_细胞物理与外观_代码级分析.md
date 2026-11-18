@@ -990,3 +990,22 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 拖动滑块直接跳到对应分裂时刻并暂停；按钮/播放与滑块双向同步；时刻标签显示真实 tick 与细胞数（如 `t=49 · 4胞`）。
 - 每个快照记录内核 `get_tick()`，便于复杂细胞逐时刻定位。
 - 验证：探针断言弦在分裂接触时生成、滑块/标签存在、默认暂停、拖动跳转生效；双工程 `SCRIPTS=53 FAILURES=0 ERRORS=0`，探针 `FAILURES=0`。
+
+### 32.8 v0.25.0：纠正预览方向——直接复用真实模拟（而非另写近似内核）
+
+**用户诉求（方向性纠正）**：「发育预览应作为一个独立的细胞模拟，可直接调用已有的模拟；此前效果完全与 Cell Lab 不一样，与实际模拟也大相径庭。」这是对本轮此前实现的根本性否定。
+
+**Cell Lab 源码再核对（两版全量反编译源码）**：
+- 官方版渲染器 `GenomePreviewView.a = n`：`n.java:37` `new CellWorld(true, environment)`——预览持有一个**真实 CellWorld 实例**，构造参数 `true` 即实验室/背景模式；`n.java:80-127` 用编辑器 `Gene[]` 造一个真 Cell（w=0.288、d=sqrt(w/400)、p=1、T=-1）塞进该世界，`Y.setSeed(1337L)`，跑 `p.a(false,1.0)` 真实 tick（`u/0.02` 步、细胞≥64 后收尾）；`n.java:147-157` 渲染直接调 CellWorld 的 `b()/d()/c()/e()`——**没有第二套预览算法**。
+- Macro 版渲染器 `j4`：`J4.java:67` `new SimulationWorld(environment, true)`；`J4.java:850-944` `S.I()` 清空 + `u0.setSeed(1337L)` + 用 `Gene[]`（`ja.h(V)`）造合子 `cell.d1=0.36/0.288`、`cell.q0=SimulationWorld.h1(cell)`、`S.c(cell)` 入世界，跑 `S.z2(true,1.0)` + `S.A2(1.0)` 真实 tick（6 秒超时 `6000000L` ns 保护），结束后把真实 `S5/U5/T5` 细胞与连接数组 `a()` 深拷贝到渲染快照 `O7`。
+- 结论：Cell Lab 预览的「真实」不是形似，而是**同一个模拟类的独立实例 + 实验室环境 + 从合子起跑真实 tick**。
+
+**此前实现的根本缺陷（v0.23/v0.24）**：`PreviewWorld.gd` 是一套手拼近似公式——产能 `280·d²·dt`、半径 `sqrt(w/400)*500`、能量上限 0.36、接触软排斥等，标度与公式都非主模拟口径；主模拟实际走 `OrganismManager`（光合率 0.08、营养优先级、半径-能量低通 `E/ref`、SoA 碰撞/弹簧/黏附、五通道场）。两套系统导致预览与 Cell Lab、与实际运行都大相径庭。
+
+**v0.25.0 落地（对齐 Cell Lab 的复用思路）**：
+- `PreviewWorld.gd` 重写为**隔离真实模拟的薄封装**：`OrganismManager.new()` + `EnvironmentManager.new()` 实例，不入场景树；环境=实验室模式（无食物投放、全皿均匀光照、场 `prefer_compute=false` 强制 CPU），`register_zygote` 用编辑器 modes 构造的真正 `Genome`（FLAG_GENE_MODE + 黏附素），`step()` 直接调用真实 `advance_physics_tick(1/60)` + `advance_field_tick`。细胞的位置/半径/类型/颜色/连接/分裂全部来自真实 `CellArray`，无任何手拼标度。
+- 隔离性：`tick_core=null`、独立 genomes/cells/organisms/energy_ledger，不写主 CommandBus/field/hash/存档；预览状态 hash 可单独读取验证确定性。
+- 规模保护：Cell Lab 预览有超时+64 细胞收尾；本项目 `MAX_CELLS=96`/`MAX_TICKS=4000`，`DIVISION_COOLDOWN=12` 缩短节流使发育在短时间可见。
+- 共享弦：快照用与运行时 `CellSceneRenderer._build_shared_chords` 同源的几何（`circle_chord`/`wall_chord` + peer/kind），每对相邻细胞只算一次弦、端点分发双方——预览膜与培养皿渲染切平方式一致。
+- 渲染：`GenomePreview` 用快照里的真实逐细胞表型色（缺省回退类型色）；分裂指示器仍按 §32.2 的 `j4.I()` 公式叠加；手动时间轴与膜弦管线保持不变。
+- 验证：双工程 `SCRIPTS=53 FAILURES=0 ERRORS=0`，预览探针 19 项断言全过（倍增、状态 hash 非零且逐位一致、真实表型色、半径在 7×scale 区间、共享弦端点/peer/kind、时间轴）；主场景 boot ok、EXITCODE=0。

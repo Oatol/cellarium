@@ -1,13 +1,15 @@
 extends PanelContainer
-## 只读基因组发育预览（v0.23.0：真实模拟内核复刻）。
+## 只读基因组发育预览（v0.25.0：直接复用项目已有的真实模拟）。
 signal mode_selected(mode_index: int)
-## Cell Lab 静态证据：Macro `GenomePreviewView` 是 GLSurfaceView，持 j4 渲染器 + 真实 SimulationWorld，
-## 固定种子 1337，从单合子跑真实物理/分裂/代谢，程序化绘制真实细胞 + 分裂指示器 + 平移缩放选中回调
-## （完整方法体见 analysis/细胞物理与外观 第32章；两版源码已全量反编译落地）。
+## Cell Lab 证据：`GenomePreviewView` 用真实模拟类的独立实例（官方版 new CellWorld(true,env)、
+## Macro 版 new SimulationWorld(env,true)），换实验室环境、固定种子 1337，从单合子跑真实
+## 物理/分裂/代谢，再程序化绘制真实细胞 + 分裂指示器 + 平移缩放选中回调（见分析文档 §32）。
 ##
-## v0.23.0 起本项目改为真实复刻：用独立 `PreviewWorld` 内核按 Cell Lab 公式跑确定性发育，
-## 每个 state 是一次真实分裂时刻的快照（真实位置/半径/朝向/分化槽/连接 + 分裂指示器），
-## 不再是 dev_program 的静态派生。内核不写 CommandBus/field/hash/存档，主模拟确定性不受影响。
+## v0.25.0 纠正方向：`PreviewWorld` 不再另写一套手拼近似公式，而是实例化隔离的
+## 真实 `OrganismManager` + `EnvironmentManager`（实验室模式、强制 CPU 后端），用编辑器 modes
+## 构造真正的 Genome、register_zygote 后跑真实 advance_physics_tick。每个 state 是从真实
+## CellArray 读出的分裂时刻快照（位置/半径/表型色/模式/连接/共享弦），与培养皿里的实际模拟
+## 同源——效果不再与实际运行大相径庭。隔离实例不写主 CommandBus/field/hash/存档。
 
 const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
@@ -17,7 +19,7 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 
 const STEP_SECONDS: float = 0.75
 const BASE_RADIUS: float = 15.0
-const WORLD_SCALE: float = 1.6       # 预览内核坐标已是 14px=2r 标度，缩小以适配画布
+const WORLD_SCALE: float = 1.6       # 真实细胞半径 7×scale(3.5–14)，缩小以适配画布
 const MAX_SIM_TICKS: int = 4000      # 预跑上限，防止参数异常导致无限模拟
 const MAX_DIVISION_EVENTS: int = 8   # 最多记录 8 次分裂时刻（1→256 细胞）
 
@@ -252,16 +254,18 @@ func _run_simulation(genes: Array[Dictionary], initial_slot: int, max_events: in
 	for _t in range(MAX_SIM_TICKS):
 		_world.step()
 		var splits: Array[Dictionary] = _world.consume_splits()
-		if splits.is_empty():
-			continue
-		for entry in splits:
-			accumulated_splits.append((entry as Dictionary).duplicate(true))
-			divisions += 1
-		var cells: Array[Dictionary] = _world.snapshot_cells()
-		var caption: String = "分裂 %d · %d 细胞 · 阈值 %.2f · 种子1337" % [
-			divisions, cells.size(), float((genes[clampi(initial_slot, 0, genes.size() - 1)] as Dictionary).get("division_mass", 0.05))]
-		_states.append(_make_snapshot(divisions, caption, accumulated_splits.duplicate(true)))
-		if divisions >= max_events:
+		if not splits.is_empty():
+			for entry in splits:
+				accumulated_splits.append((entry as Dictionary).duplicate(true))
+				divisions += 1
+			var cells: Array[Dictionary] = _world.snapshot_cells()
+			var caption: String = "真实模拟 · 分裂 %d · %d 细胞 · 阈值 %.2f · t=%d" % [
+				divisions, cells.size(), float((genes[clampi(initial_slot, 0, genes.size() - 1)] as Dictionary).get("division_mass", 0.05)), int(_world.get_tick())]
+			_states.append(_make_snapshot(divisions, caption, accumulated_splits.duplicate(true)))
+			if divisions >= max_events:
+				break
+		# 真实模拟达到上限即停（对应 Cell Lab 预览的规模/超时保护），不再空转。
+		if bool(_world.is_grown()):
 			break
 	_sync_caption()
 
@@ -518,9 +522,12 @@ func _on_canvas_draw() -> void:
 		var world_radius: float = float(cell.get("radius", 7.0))
 		var radius: float = world_radius * WORLD_SCALE * _zoom * appear
 		var type_id: int = int(cell.get("type", 0))
-		var fill: Color = (VISUALS.call("role_color", type_id) as Color)
+		# 颜色来自真实模拟的逐细胞表型（与实际渲染同源）；缺省回退到类型色。
+		var cell_color: Variant = cell.get("color", null)
+		var base_color: Color = (cell_color as Color) if cell_color is Color else (VISUALS.call("role_color", type_id) as Color)
+		var fill: Color = base_color
 		fill.a = 0.55 * appear
-		var membrane: Color = (VISUALS.call("accent_color", type_id) as Color)
+		var membrane: Color = base_color.lightened(0.22)
 		membrane.a = appear
 		_draw_membrane(cell, pos, radius, world_radius, fill, membrane, appear)
 	# Cell Lab j4.I() 逐方法等价的分裂指示器：子代将出现的位置画圆点。

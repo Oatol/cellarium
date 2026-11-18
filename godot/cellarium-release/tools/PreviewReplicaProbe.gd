@@ -34,6 +34,9 @@ func _initialize() -> void:
 		if t in [24, 49, 99, 119]:
 			counts.append(w.get_cell_count())
 	_check(w.get_cell_count() >= 8, "Cell Lab 倍增 >=8 (got " + str(w.get_cell_count()) + ")")
+	# v0.25.0：内核由真实 OrganismManager 驱动 —— 状态 hash 非零、规模受真实上限保护。
+	_check(int(w.get_real_state_hash()) != 0, "真实模拟内核状态 hash 非零")
+	_check(w.get_cell_count() <= 96, "真实模拟规模受上限保护 (got " + str(w.get_cell_count()) + ")")
 	# 2) 确定性：两次 80 tick 逐位一致
 	var a = _make_world(script, [gene]); var b = _make_world(script, [gene])
 	for t in range(80): a.step(); b.step()
@@ -45,6 +48,15 @@ func _initialize() -> void:
 			if ca[i]["pos"] != cb[i]["pos"] or ca[i]["energy"] != cb[i]["energy"] or ca[i]["radius"] != cb[i]["radius"]:
 				same = false; break
 	_check(same, "固定种子逐位一致 (" + str(ca.size()) + " cells)")
+	_check(int(a.get_real_state_hash()) == int(b.get_real_state_hash()), "真实模拟状态 hash 逐位一致")
+	# v0.25.0：半径来自真实能量低通，表型色来自真实逐细胞数组（不是类型回退）。
+	var has_real_color: bool = not ca.is_empty() and (ca[0].get("color") is Color)
+	_check(has_real_color, "快照含真实逐细胞表型色")
+	var radius_bounded: bool = true
+	for c in ca:
+		var rr: float = float(c.get("radius", -1))
+		if rr < 3.4 or rr > 14.1: radius_bounded = false; break
+	_check(radius_bounded, "真实半径在 7×scale(3.5–14) 区间")
 	# 3) 分裂指示器：半径公式 max(0.006, r_norm*0.27)、质量比 clamp 0.1..0.9
 	var w2 = _make_world(script, [gene])
 	var split_seen: bool = false
@@ -82,11 +94,19 @@ func _initialize() -> void:
 	# 5) v0.24.0：细胞膜弦——分裂时刻应有圆-圆相交弦（世界坐标端点）。
 	var w3 = _make_world(script, [gene])
 	var chord_seen: bool = false
+	var shared_chord_ok: bool = false
 	for t in range(60):
 		w3.step()
-		if not w3.snapshot_chords().is_empty():
-			chord_seen = true; break
+		var chords: Array[Dictionary] = w3.snapshot_chords()
+		if not chords.is_empty():
+			chord_seen = true
+			# 共享弦：同一条弦分发给双方，kind/peer 字段由真实黏附/碰撞关系派生。
+			var first: Dictionary = chords[0]
+			if first.has("a") and first.has("b") and first.has("peer") and first.has("kind"):
+				shared_chord_ok = true
+			break
 	_check(chord_seen, "细胞膜弦在分裂接触时生成")
+	_check(shared_chord_ok, "共享弦含端点/peer/kind（与运行时同源）")
 	# 6) v0.24.0：手动时间轴——滑块/时刻标签存在，默认暂停，拖动跳转生效。
 	var slider = inst.find_child("Slider", true, false)
 	var time_label = inst.find_child("TimeLabel", true, false)

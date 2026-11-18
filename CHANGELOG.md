@@ -4,6 +4,28 @@
 
 ---
 
+## 0.25.0 — 2026-11-19
+
+**类型**：发育预览方向性纠正（直接复用真实模拟，废弃手拼近似内核）
+**触发**：用户指出预览效果「完全与 Cell Lab 不一样、与实际模拟大相径庭」，要求当作独立细胞模拟直接调用已有模拟。
+
+### 源码依据
+
+再核对 Cell Lab 两版反编译源码：官方版 `n.java:37` `new CellWorld(true,environment)`、Macro 版 `J4.java:67` `new SimulationWorld(env,true)`——预览持有的是**同一个真实模拟类的独立实例 + 实验室环境**，用编辑器 Gene 造合子、`setSeed(1337)` 后跑真实 tick，渲染直接调真实世界方法（详见分析文档 §32.8）。v0.23/v0.24 的 `PreviewWorld` 手拼近似公式（280d²dt / sqrt(w/400)*500 / 上限 0.36）在公式与标度上都不同于主模拟，这是效果对不上的根因。
+
+### 实现
+
+- `PreviewWorld.gd` 重写为隔离真实模拟的薄封装：实例化 `OrganismManager` + `EnvironmentManager`（实验室模式：无食物投放、全皿均匀光照、场强制 CPU 后端），用编辑器 modes 构造真正 Genome，`register_zygote` 后直接跑 `advance_physics_tick(1/60)`。快照全部读真实 `CellArray`（位置/半径/表型色/类型/模式/能量/连接/共享弦）。
+- 规模/超时保护对齐 Cell Lab：`MAX_CELLS=96`、`MAX_TICKS=4000`、预览节流 12；`tick_core=null`，不写主 CommandBus/field/hash/存档，隔离状态 hash 可单独验证。
+- 共享弦用与运行时 `CellSceneRenderer._build_shared_chords` 同源的 `circle_chord`/`wall_chord` + peer/kind，预览膜与实际渲染一致。
+- `GenomePreview.gd`：快照颜色改用真实逐细胞表型色（缺省回退类型色），半径口径改为真实的 `7×cell_radius_scale(0.5–2)`；分裂指示器 j4.I()、手动时间轴、膜弦管线、平移缩放选中保持。
+
+### 验证
+
+- 双工程 `SCRIPTS=53 FAILURES=0 ERRORS=0`，预览探针 19 项断言全过；真实模拟实测 1→4→16→56→96，半径随能量低通 7.0→5.6；两次独立运行真实状态 hash 逐位一致（确定性）；主场景 headless boot ok、EXITCODE=0。
+
+---
+
 ## 0.24.0 — 2026-11-19
 
 **类型**：发育预览外观与时间轴完善（细胞膜弦贴合 + 手动时间轴）
