@@ -69,6 +69,8 @@ var _gene_slot_labels: Array[Label] = []
 var _macro_draft: Dictionary = {}
 var _macro_controls: Dictionary = {}
 var _genome_preview: Node = null
+## 改 Macro 字段后延迟重建预览，避免拖动滑块时每个 value_changed 都跑一遍真实模拟。
+var _preview_sync_timer: Timer = null
 ## v0.17.0：模式槽真相源。_macro_draft 只是当前选中模式的可编辑镜像。
 var _modes: Array[Dictionary] = []
 var _selected_mode: int = 0
@@ -188,6 +190,12 @@ func _make_section_title(text_value: String) -> Label:
 func _build_ui() -> void:
 	if _content == null:
 		return
+	_preview_sync_timer = Timer.new()
+	_preview_sync_timer.name = "PreviewSyncTimer"
+	_preview_sync_timer.one_shot = true
+	_preview_sync_timer.wait_time = 0.25
+	_preview_sync_timer.timeout.connect(_sync_preview)
+	add_child(_preview_sync_timer)
 	var title: Label = _make_section_title("细胞编辑 · CELL EDITOR · 参考 Cell Lab / Macro")
 	_content.add_child(title)
 
@@ -479,11 +487,10 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_macro_check("stay_alive", "保持存活", "checkbox_stay_alive → Gene.H"))
 	box.add_child(_make_macro_check("initial", "初始细胞", "radio_initial → Gene.I"))
 
-	box.add_child(_make_section_title("CHILD 1 / 2 · 当前模式的两个子代"))
+	box.add_child(_make_section_title("CHILD 1 / 2 · 子代模式（类型跟随目标模式）"))
 	for child_index in range(1, 3):
-		var key: String = "child%d_type" % child_index
-		box.add_child(_make_macro_type_option(key, "子代 %d 类型" % child_index, "spinner_child%d → 模式内子代类型" % child_index))
-		box.add_child(_make_macro_mode_option("child%d_mode" % child_index, "子代 %d 模式" % child_index, "选择该子代进入哪个模式槽继续分裂/分化"))
+		# Cell Lab Gene 没有独立「子代类型」：f778r/s 指向 Gene 槽，子代类型 = 目标槽的 o0。
+		box.add_child(_make_macro_mode_option("child%d_mode" % child_index, "子代 %d 模式" % child_index, "选择该子代进入哪个模式槽；类型取该模式的「细胞类型」"))
 		box.add_child(_make_macro_check("child%d_glue" % child_index, "子代 %d 保留黏附素" % child_index, "该子代保留/建立黏附连接"))
 		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index, "角度取相反方向（本项目版本化追加）"))
 		box.add_child(_make_macro_slider("child%d_angle" % child_index, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
@@ -788,6 +795,11 @@ func _on_macro_bool_changed(value: bool, key: String) -> void:
 	_macro_draft[key] = value
 	_sync_macro_to_draft()
 	_set_macro_status(key)
+	_queue_preview_sync()
+
+func _queue_preview_sync() -> void:
+	if _preview_sync_timer != null and is_instance_valid(_preview_sync_timer):
+		_preview_sync_timer.start()
 
 ## v0.17.0：把当前模式控件写回模式槽，并同步顶层兼容字段。
 ## bit0 = 黏附素自动连接；bit1 = 基因模式。modes 只在基因模式下参与 hash。
@@ -833,10 +845,17 @@ func _commit_current_mode() -> void:
 	draft.set("max_cells_per_organism", -1 if cell_cap < 2 else cell_cap)
 	var child_types: PackedByteArray = PackedByteArray()
 	var split_angles: PackedByteArray = PackedByteArray()
-	child_types.append(clampi(int(normalized.get("child1_type", 0)), 0, 255))
-	child_types.append(clampi(int(normalized.get("child2_type", 2)), 0, 255))
-	child_types.append(clampi(int(_macro_draft.get("child3", 4)), 0, 255))
-	child_types.append(clampi(int(_macro_draft.get("child4", 10)), 0, 255))
+	# Cell Lab Gene.f778r/s/t/u 是 4 个子代 Gene 槽索引，没有独立子代类型；
+	# 子代类型 = 目标模式自身的 o0/cell_type。旧 child_types 字节数组只作兼容投影。
+	var child_slots: Array[int] = [
+		clampi(int(normalized.get("child1_mode", 0)), 0, maxi(0, _modes.size() - 1)),
+		clampi(int(normalized.get("child2_mode", 0)), 0, maxi(0, _modes.size() - 1)),
+		clampi(int(normalized.get("child3_mode", 0)), 0, maxi(0, _modes.size() - 1)),
+		clampi(int(normalized.get("child4_mode", 0)), 0, maxi(0, _modes.size() - 1)),
+	]
+	for slot in child_slots:
+		var target_mode: Dictionary = GENOME_SCRIPT.call("get_mode", draft, slot)
+		child_types.append(clampi(int(target_mode.get("cell_type", 0)), 0, 255))
 	for child_index in range(1, 5):
 		split_angles.append(clampi(int(round(clampf(float(_macro_draft.get("child%d_angle" % child_index, 0.0)), 0.0, 1.0) * 255.0)), 0, 255))
 	draft.set("child_types", child_types)
@@ -857,6 +876,7 @@ func _on_macro_option_changed(index: int, key: String) -> void:
 	_macro_draft[key] = index
 	_sync_macro_to_draft()
 	_set_macro_status(key)
+	_queue_preview_sync()
 
 func _on_macro_value_changed(value: float, key: String) -> void:
 	if key == "max_connections" or key == "min_connections" or key == "mode_max_divisions" \
@@ -869,6 +889,7 @@ func _on_macro_value_changed(value: float, key: String) -> void:
 		(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 2)))
 	_sync_macro_to_draft()
 	_set_macro_status(key)
+	_queue_preview_sync()
 
 func _set_macro_status(key: String) -> void:
 	if _status_label == null:

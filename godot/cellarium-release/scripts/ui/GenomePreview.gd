@@ -256,9 +256,10 @@ func _seek_to(tick_value: int) -> void:
 	_current_tick = clampi(tick_value, 0, _max_tick)
 	if _world != null:
 		_world.advance_to(_current_tick)
+	# Cell Lab j4.I() 逐当前细胞派生指示点；不再累积历史分裂（否则绿点越堆越多）。
 	var current_splits: Array[Dictionary] = []
 	if _world != null:
-		current_splits = _world.snapshot_accumulated_splits()
+		current_splits = _world.snapshot_split_indicators()
 	_current_state = _make_snapshot(0, "真实模拟 · t=%d" % _current_tick, current_splits)
 	# 让 _cursor 跟随当前 tick 最近的里程碑（只读 API 语义）。
 	_cursor = 0
@@ -453,6 +454,7 @@ func _on_canvas_draw() -> void:
 		_draw_split_indicator(entry as Dictionary)
 
 func _draw_split_indicator(indicator: Dictionary) -> void:
+	# Cell Lab J4.I()：指示的是「当前细胞下一次分裂的子代去向」，不是历史分裂点。
 	var split_center: Vector2 = _to_screen(indicator.get("pos", Vector2.ZERO))
 	var angle: float = float(indicator.get("angle", 0.0))
 	var dir: Vector2 = Vector2(cos(angle), sin(angle))
@@ -465,26 +467,38 @@ func _draw_split_indicator(indicator: Dictionary) -> void:
 	var d1: float = (1.0 - ratio) * f3
 	var d2: float = ratio * f3
 	var dot_radius_px: float = maxf(1.0, f_max * 14.0 * _view_scale * _zoom)
-	var gene_slot: int = int(indicator.get("gene_slot", 0))
-	var gene: Dictionary = _world.get_gene(gene_slot) if _world != null else {}
+	var child1_slot: int = clampi(int(indicator.get("child1_mode", 0)), 0, 7)
+	var child2_slot: int = clampi(int(indicator.get("child2_mode", 1)), 0, 7)
 	var is_zygote: bool = bool(indicator.get("zygote", false))
 	var p_child: Vector2 = split_center + dir * d2 * 14.0 * _view_scale * _zoom
 	var p_mother: Vector2 = split_center - dir * d1 * 14.0 * _view_scale * _zoom
-	var child_color: Color = _gene_color(gene, "child2_mode", 1)
-	var mother_color: Color = _gene_color(gene, "child1_mode", 0)
+	var child_color: Color = _slot_color(child2_slot, 1)
+	var mother_color: Color = _slot_color(child1_slot, 0)
 	_canvas.draw_circle(p_child, dot_radius_px, Color(child_color.r, child_color.g, child_color.b, 0.9))
 	_canvas.draw_circle(p_mother, dot_radius_px, Color(mother_color.r, mother_color.g, mother_color.b, 0.9))
 	if is_zygote:
+		# 合子四条去向：本项目运行时只有两个子代模式，第三/第四槽未来加入时自动生效。
+		var gene: Dictionary = _world.get_gene(clampi(int(indicator.get("gene_slot", 0)), 0, 7)) if _world != null else {}
 		var axis2: float = TAU * clampf(float(gene.get("split_angle2", 0.25)), 0.0, 1.0)
 		var dir2: Vector2 = Vector2(cos(axis2), sin(axis2))
 		var f10: float = 1.5 * f_max
+		var slots: Array[int] = [
+			child1_slot, child2_slot,
+			clampi(int(gene.get("child3_mode", child1_slot)), 0, 7),
+			clampi(int(gene.get("child4_mode", child2_slot)), 0, 7),
+		]
 		for k in range(4):
-			var gm: Dictionary = _world.get_gene(k) if _world != null else {}
-			var gcol: Color = Color(float(gm.get("color_r", 0.36)), float(gm.get("color_g", 0.88)), float(gm.get("color_b", 0.75)))
+			var gcol: Color = _slot_color(slots[k], k % 2)
 			var sign: float = 1.0 if k % 2 == 0 else -1.0
 			var dist: float = (1.0 - ratio) * f10 if k < 2 else ratio * f10
 			var pp: Vector2 = split_center + dir2 * dist * 14.0 * _view_scale * _zoom * sign
 			_canvas.draw_circle(pp, dot_radius_px * 0.8, Color(gcol.r, gcol.g, gcol.b, 0.85))
+
+func _slot_color(slot: int, fallback: int) -> Color:
+	var gene: Dictionary = _world.get_gene(slot) if _world != null else {}
+	if gene.is_empty():
+		return (VISUALS.call("role_color", fallback) as Color)
+	return Color(float(gene.get("color_r", 0.36)), float(gene.get("color_g", 0.88)), float(gene.get("color_b", 0.75)), 1.0)
 
 ## Cell Lab a(FFFF)/d(int) 复刻：物理与渲染共享同一组圆-圆相交弦端点。
 func _draw_membrane(cell: Dictionary, screen_pos: Vector2, radius: float, world_radius: float,
@@ -508,10 +522,3 @@ func _draw_membrane(cell: Dictionary, screen_pos: Vector2, radius: float, world_
 		_canvas.draw_circle(screen_pos, radius, fill)
 		_canvas.draw_arc(screen_pos, radius, 0.0, TAU, 32, membrane, 2.0, true)
 	_canvas.draw_circle(screen_pos, radius * 0.25, Color(0.9, 0.96, 0.92, 0.85))
-
-func _gene_color(gene: Dictionary, mode_key: String, fallback: int) -> Color:
-	var slot: int = clampi(int(gene.get(mode_key, fallback)), 0, 7)
-	var gm: Dictionary = _world.get_gene(slot) if _world != null else {}
-	if gm.is_empty():
-		return (VISUALS.call("role_color", fallback) as Color)
-	return Color(float(gm.get("color_r", 0.36)), float(gm.get("color_g", 0.88)), float(gm.get("color_b", 0.75)))

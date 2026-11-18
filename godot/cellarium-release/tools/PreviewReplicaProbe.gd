@@ -125,9 +125,12 @@ func _initialize() -> void:
 		_check(int(inst.call("get_current_tick")) == max_tick, "拖到末 tick")
 		slider.set_value(float(maxi(1, max_tick / 2)))
 		_check(int(inst.call("get_current_tick")) >= 1, "拖动时间轴更新当前 tick")
-		# 连续时间轴的累计分裂指示器应在发育中期出现（不是空）。
-		var mid_splits: int = int((inst.get("_current_state") as Dictionary).get("splits", []).size()) if inst.get("_current_state") is Dictionary else 0
-		_check(mid_splits >= 1, "连续时间轴累计分裂指示器非空 (got " + str(mid_splits) + ")")
+		# Cell Lab j4.I() 逐当前细胞派生指示点（不是历史累计），数量应等于当前细胞数。
+		var current_state: Dictionary = inst.get("_current_state") as Dictionary
+		var mid_splits: int = int((current_state.get("splits", []) as Array).size()) if current_state != null else 0
+		var mid_cells: int = int((current_state.get("cells", []) as Array).size()) if current_state != null else 0
+		_check(mid_splits >= 1 and mid_splits <= mid_cells, \
+			"当前细胞分裂指示器数量 1..N (got %d/%d)" % [mid_splits, mid_cells])
 	# 7) 坐标居中修复：快照 pos 应以原点为中心（|pos| 远小于皿半径 240）。
 	var w4 = _make_world(script, [gene])
 	for _t in range(60): w4.step()

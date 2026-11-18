@@ -385,6 +385,37 @@ func snapshot_accumulated_splits() -> Array[Dictionary]:
 		result.append((entry as Dictionary).duplicate(true))
 	return result
 
+## Cell Lab Macro j4.I()：逐**当前细胞**派生「下一次分裂会变成什么」的指示点。
+## 源码 J4.java:701-765 遍历 simulationWorld.S5[0..U5]，每个活细胞按当前基因槽画 2 点，
+## 合子（Gene.o0==ZYGOCYTE）画 4 点；不是历史分裂事件的累积标记。
+func snapshot_split_indicators() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var cells: RefCounted = _cells()
+	if cells == null:
+		return result
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var types: PackedByteArray = cells.get("cell_type")
+	for i in _live_indices(cells):
+		var mode_id: int = int(cells.call("get_mode", i))
+		var gene: Dictionary = get_gene(mode_id)
+		if gene.is_empty():
+			continue
+		var angle: float = TAU * clampf(float(gene.get("child2_angle", 0.25)), 0.0, 1.0)
+		if bool(gene.get("child2_mirror", false)):
+			angle = TAU * fposmod(-clampf(float(gene.get("child1_angle", 0.0)), 0.0, 1.0), 1.0)
+		result.append({
+			"pos": _local(Vector2(pos_x[i], pos_y[i])),
+			"angle": angle,
+			"ratio": clampf(float(gene.get("split_ratio", 0.5)), 0.1, 0.9),
+			"radius": _scaled_radius(cells, i),
+			"gene_slot": mode_id,
+			"child1_mode": clampi(int(gene.get("child1_mode", 0)), 0, maxi(0, _genes.size() - 1)),
+			"child2_mode": clampi(int(gene.get("child2_mode", 0)), 0, maxi(0, _genes.size() - 1)),
+			"zygote": i < types.size() and int(types[i]) == 0,
+		})
+	return result
+
 func get_gene(slot: int) -> Dictionary:
 	if slot < 0 or slot >= _genes.size():
 		return {}

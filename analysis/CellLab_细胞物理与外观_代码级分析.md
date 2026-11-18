@@ -1029,3 +1029,19 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 生命周期：预览隔离的 `_mgr` / `_env` 不是场景树节点，`RefCounted` 释放不会自动回收它们；`setup()` 重建前 `free()` 旧实例，`NOTIFICATION_PREDELETE` 内联释放（PREDELETE 期间不能调用脚本方法），消除反复 set_program/拖时间轴时的 ObjectDB 泄漏。
 
 **验证**：双工程 `SCRIPTS=53 FAILURES=0`、`EXITCODE=0`；预览探针 24 项断言全过（`FAILURES=0`）：无三个按钮、`get_max_tick()=74`、tick 0/末/中间跳转、当前 tick 更新、累计分裂指示器 14 个、预览细胞坐标居中；探针退出无 ObjectDB 泄漏警告。
+
+### 32.10 v0.28.0：指示点语义、预览刷新与「类型属于模式」对齐 Cell Lab
+
+**用户截图三问**：① 预览里的绿色小点是什么；② 改了颜色/连接数等设置预览没变化；③ 细胞类型应直接保存在模式中（M2 设为光合后所有 M2 都是光合），不需要单独设置子代的细胞类型。
+
+**Cell Lab 源码证据**：
+- `J4.java:688-765` 的 `I(float[])` 先判 `l0 && S != null && U5 > 0`，随后 `while (i3 < simulationWorld.U5)` 遍历**当前世界中的每一个细胞** `S5[i3]`，按 `cell.e()`（当前有效 Gene）、`cell.f1`（镜像）、`cell.o0/p0`（当前位置）和 `Gene.f770j/f769i` 画 2 个未来子代圆点；`geneE.o0 == C.ZYGOCYTE` 时才用 `f778r/s/t/u` 四个子代 Gene 槽画 4 个。**没有历史分裂事件表，也没有累计指示器**。
+- `Gene.java:99` `public C o0;` 是类型；`Gene.java:110-116` `f778r / s / t / u` 是 4 个子代 Gene 槽索引。Gene 里没有「子代类型」字段；子代类型就是目标 Gene 槽自身的 `o0`。
+- `J4.java:852` 的连续时间轴只决定 tick 数；编辑器改 Gene 后由 `GenomeEditorFragment` 重建预览状态，不是靠离散按钮。
+
+**修正**：
+- `PreviewWorld.snapshot_split_indicators()` 每次从真实 `CellArray` 的当前活细胞派生指示器（位置/当前模式/角度/质量比/半径/子代模式槽/是否合子），`GenomePreview._seek_to()` 改用它；`_draw_split_indicator()` 用指示点自带的 `child1_mode/child2_mode` 取色，不再按历史分裂点或槽号 0..3 取色。历史 `_accum_splits` 只保留给只读里程碑索引，不参与渲染。
+- `DevEditorPanel` 的 Macro 字段回调此前只 `_sync_macro_to_draft()`，从不调用 `_sync_preview()`；新增 `PreviewSyncTimer`（one-shot 0.25s）防抖，字段变化后自动重建预览，避免拖滑块时每次 `value_changed` 都跑一遍真实模拟。
+- 删除 `child1_type` / `child2_type` 控件；`_commit_current_mode()` 写兼容字段 `child_types` 时，改为按 `child1_mode/child2_mode`（及可选的 child3/4 模式槽）到目标模式的 `cell_type` 取值。运行时多模式路径本就由 `_apply_cell_mode()` 从目标模式写 `cell_type`，无需独立子代类型。
+
+**验证**：预览探针新增「当前细胞分裂指示器数量 1..N」断言（实测 8 细胞 = 8 组指示点，不再是历史堆积）；SmokeTest 新增无子代类型控件、无说明面板、存在防抖定时器断言。

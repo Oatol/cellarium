@@ -3258,6 +3258,10 @@ func _check_dev_editor_landing() -> bool:
 	if dev.find_child("InstructionHelp", true, false) != null:
 		push_error("SmokeTest: dev editor instruction help panel must be removed")
 		dev.queue_free(); return false
+	# v0.28.0：Macro 字段改动必须能延迟刷新预览（防抖定时器）。
+	if dev.find_child("PreviewSyncTimer", true, false) == null:
+		push_error("SmokeTest: preview sync debounce timer missing")
+		dev.queue_free(); return false
 	# v0.15.0：默认基因模式，dev_program 为空；DIVIDE/DIFFERENTIATE/LINK UI 全部隐藏。
 	if not (dev.call("_program") as Array).is_empty():
 		push_error("SmokeTest: gene-mode editor must have empty dev_program")
@@ -3275,6 +3279,10 @@ func _check_dev_editor_landing() -> bool:
 	var macro_controls: Dictionary = dev.get("_macro_controls") as Dictionary
 	if macro_draft.size() < 29 or macro_controls.size() < 29:
 		push_error("SmokeTest: Macro draft controls incomplete (%d/%d)" % [macro_draft.size(), macro_controls.size()])
+		dev.queue_free(); return false
+	# v0.28.0：Cell Lab Gene 没有独立子代类型控件，类型由目标模式的 cell_type 决定。
+	if macro_controls.has("child1_type") or macro_controls.has("child2_type"):
+		push_error("SmokeTest: child type selectors must be removed (use target mode type)")
 		dev.queue_free(); return false
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
