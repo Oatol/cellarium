@@ -202,13 +202,17 @@ static func _build_shared_chords(
 	var lists: Dictionary = {}
 	for cell_index in indices:
 		lists[cell_index] = []
+	# v0.19.0：pair key 由字符串改为整数打包（CellArray 全局容量上限 8000）。
+	# 旧写法 "%d:%d" 每条相邻对都分配一个 String 并做字典哈希，是链条增长时的主要视图开销。
 	var seen: Dictionary = {}
 	for cell_index in indices:
 		var neighbors: Array[int] = CELL_PHYSICS.call("query_neighbors_cached", cells, cell_index, buckets)
 		for neighbor in neighbors:
 			if not lists.has(neighbor) or neighbor == cell_index:
 				continue
-			var pair_key: String = "%d:%d" % [mini(cell_index, neighbor), maxi(cell_index, neighbor)]
+			var low: int = mini(cell_index, neighbor)
+			var high: int = maxi(cell_index, neighbor)
+			var pair_key: int = low * 8001 + high
 			if seen.has(pair_key):
 				continue
 			seen[pair_key] = true

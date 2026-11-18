@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 5
+const SCHEMA_VERSION: int = 6
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -24,6 +24,10 @@ const MODE_ARRAY_NAMES: Array[String] = ["cell_mode", "cell_mode_depth"]
 
 ## v0.18.0：schema 1–4 的旧快照没有逐细胞端粒，恢复时按 -1（无限）补齐。
 const TELOMERE_ARRAY_NAMES: Array[String] = ["cell_telomere"]
+
+## v0.19.0：schema 1–5 的旧快照没有半径低通基线/能量因子。
+## 恢复时 baseline = 旧 cell_radius_scale，energy_scale = 1.0，逐位保持旧半径。
+const ENERGY_RADIUS_ARRAY_NAMES: Array[String] = ["cell_radius_baseline", "cell_energy_scale"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -57,6 +61,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in MODE_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 	for array_name in TELOMERE_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in ENERGY_RADIUS_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -193,6 +199,25 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			restored_telomeres.resize(int(cells.get("cell_pos_x").size()))
 			restored_telomeres.fill(-1)
 			cells.set(array_name, restored_telomeres)
+
+	# v0.19.0：旧档把已恢复的有效倍率当作基因基线，能量因子填 1.0，半径逐位不变。
+	var cell_count: int = int(cells.get("cell_pos_x").size())
+	var effective_scales: PackedFloat32Array = cells.get("cell_radius_scale") as PackedFloat32Array
+	var restored_baseline: PackedFloat32Array = PackedFloat32Array()
+	var restored_energy: PackedFloat32Array = PackedFloat32Array()
+	if cell_data.has("cell_radius_baseline"):
+		restored_baseline = _copy_array(cell_data["cell_radius_baseline"])
+	else:
+		restored_baseline = effective_scales.duplicate()
+	if cell_data.has("cell_energy_scale"):
+		restored_energy = _copy_array(cell_data["cell_energy_scale"])
+	else:
+		restored_energy.resize(cell_count)
+		restored_energy.fill(1.0)
+	restored_baseline.resize(cell_count)
+	restored_energy.resize(cell_count)
+	cells.set("cell_radius_baseline", restored_baseline)
+	cells.set("cell_energy_scale", restored_energy)
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary

@@ -16,6 +16,9 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 ## 物理碰撞半径与弹性膜静息半径同源（Cell Lab 的 Cell.d 用法）。
 @export var visual_radius: float = SHAPE.REST_RADIUS
 @export var shape_fps: float = 20.0
+## v0.19.0：膜轮廓解析圆采样点数。默认 64 保持独立实例旧行为；
+## CellBase.tscn 设为 48，链条增长时减少每帧每细胞的弦裁剪与顶点写入成本。
+@export_range(12, 64, 1) var outline_segments: int = 64
 ## 速度拉伸上限，碰撞冲量先限幅再低通，避免夸张椭圆。
 @export_range(0.0, 0.2, 0.01) var max_stretch: float = 0.08
 @export_range(0.05, 1.0, 0.05) var stretch_smoothing: float = 0.18
@@ -125,13 +128,14 @@ func _refresh_shape() -> void:
 	var velocity_limit: float = maxf(1.0, effective_radius * 0.5)
 	var target_stretch: float = clampf(_velocity.length() / velocity_limit, 0.0, 1.0) * max_stretch
 	_stretch += (target_stretch - _stretch) * clampf(stretch_smoothing, 0.05, 1.0)
-	# 统一基底：所有细胞外膜都是同一套 64 点解析圆。
+	var segments: int = clampi(outline_segments, 12, 64)
+	# 统一基底：所有细胞外膜都是同一套解析圆。
 	# 有弦时裁剪，无弦时仅按接触法线浅压平；绝不在呼吸膜与弦膜之间切换点集。
-	var unit: PackedVector2Array = CHORDS.call("unit_circle", 64)
+	var unit: PackedVector2Array = CHORDS.call("unit_circle", segments)
 	if not _chords.is_empty():
 		var unit_chords: Array = CHORDS.call("make_unit_chords", _chords, global_position, 0.0, effective_radius)
 		var prepared: Array = CHORDS.call("prepare_for_render", unit_chords)
-		var chord_outline: PackedVector2Array = CHORDS.call("clip_unit_circle", prepared, 64)
+		var chord_outline: PackedVector2Array = CHORDS.call("clip_unit_circle", prepared, segments)
 		if chord_outline.size() >= 3:
 			unit = chord_outline
 	var world_points: PackedVector2Array = PackedVector2Array()

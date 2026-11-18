@@ -65,5 +65,31 @@ func _initialize() -> void:
 	t1 = Time.get_ticks_usec()
 	print("ViewCost sim tick (1 cell) us=", snappedf(float(t1 - t0) / float(SAMPLE_TICKS), 0.1))
 	print("ViewCost note: view layers are fixed cost, independent of cell count")
+
+	# v0.18.1：量化细胞链长度对模拟 tick 与视图重建的边际成本。
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var renderer: Node = instance.get_node("DishView/CellSceneLayer")
+	var probe_genome: RefCounted = (load("res://scripts/core/data/Genome.gd") as GDScript).new() as RefCounted
+	probe_genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	probe_genome.call("set_development_program", [])
+	var probe_org: int = int(manager.call("register_zygote", 0, 0, -1, probe_genome, Vector2(250, 250), 0.2, 0))
+	var chain: Array[int] = [0]
+	for target: int in [5, 15, 30]:
+		while chain.size() < target:
+			var last: int = chain[chain.size() - 1]
+			var new_index: int = int(cells.call("append_cell", probe_org, Vector2(250.0 + float(chain.size()) * 12.0, 250.0), 0.2, 0))
+			cells.call("link_cells", last, new_index, 14.0)
+			chain.append(new_index)
+		t0 = Time.get_ticks_usec()
+		for i in range(SAMPLE_TICKS):
+			manager.call("advance_physics_tick", 1.0 / 60.0)
+			manager.call("advance_development_tick")
+		var sim_us: float = float(Time.get_ticks_usec() - t0) / float(SAMPLE_TICKS)
+		t0 = Time.get_ticks_usec()
+		for i in range(SAMPLE_TICKS):
+			renderer.call("mark_dirty")
+			renderer.call("_rebuild")
+		var view_us: float = float(Time.get_ticks_usec() - t0) / float(SAMPLE_TICKS)
+		print("ViewCost chain n=%d sim_us=%.1f view_us=%.1f active=%d" % [target, sim_us, view_us, int(renderer.call("get_active_count"))])
 	instance.queue_free()
 	quit(0)

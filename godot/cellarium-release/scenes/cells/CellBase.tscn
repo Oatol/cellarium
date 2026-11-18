@@ -4,6 +4,7 @@
 
 [node name="CellBase" type="Node2D"]
 script = ExtResource("1_view")
+outline_segments = 48
 
 [node name="Body" type="Polygon2D" parent="."]
 color = Color(1, 1, 1, 0.4)

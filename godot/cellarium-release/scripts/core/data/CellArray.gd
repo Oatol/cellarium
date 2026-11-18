@@ -25,6 +25,10 @@ var link_rest_length: PackedFloat32Array = PackedFloat32Array()
 var expression_weights: PackedFloat32Array = PackedFloat32Array()
 var neural_weights: PackedFloat32Array = PackedFloat32Array()
 var behavior_intents: PackedFloat32Array = PackedFloat32Array()
+## v0.19.0：半径-能量低通。baseline 是基因表型倍率，energy_scale 是能量派生倍率；
+## cell_radius_scale 保持为「有效倍率」= baseline × energy_scale，所有既有读取点不变。
+var cell_radius_baseline: PackedFloat32Array = PackedFloat32Array()
+var cell_energy_scale: PackedFloat32Array = PackedFloat32Array()
 ## v0.16.0：逐细胞表型数组。默认 1.0（半径倍率/刚度倍率）与 -1（颜色未覆写），
 ## 保证 flags 清零的旧基因组与旧存档行为逐位不变。
 var cell_radius_scale: PackedFloat32Array = PackedFloat32Array()
@@ -60,6 +64,8 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	for i in range(BEHAVIOR_OUTPUT_COUNT):
 		behavior_intents.append(0.0)
 	cell_radius_scale.append(1.0)
+	cell_radius_baseline.append(1.0)
+	cell_energy_scale.append(1.0)
 	cell_stiffness.append(1.0)
 	cell_color_r.append(-1.0)
 	cell_color_g.append(-1.0)
@@ -97,6 +103,8 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	for trait_index in range(8):
 		expression_weights[child_index * 8 + trait_index] = expression_weights[expression_start + trait_index]
 	cell_radius_scale[child_index] = cell_radius_scale[index]
+	cell_radius_baseline[child_index] = cell_radius_baseline[index]
+	cell_energy_scale[child_index] = cell_energy_scale[index]
 	cell_stiffness[child_index] = cell_stiffness[index]
 	cell_color_r[child_index] = cell_color_r[index]
 	cell_color_g[child_index] = cell_color_g[index]
@@ -112,15 +120,38 @@ func get_position(index: int) -> Vector2:
 	return Vector2(cell_pos_x[index], cell_pos_y[index])
 
 ## v0.16.0：写入逐细胞表型（基因模式由 Genome 派生；旧模式保持默认值）。
+## v0.19.0：写入基因基线，有效倍率 = 基线 × 当前能量因子；旧档能量因子缺省 1.0，逐位等价。
 func set_cell_phenotype(index: int, radius_scale: float, stiffness: float, color: Color) -> bool:
 	if index < 0 or index >= size():
 		return false
-	cell_radius_scale[index] = clampf(radius_scale, 0.5, 2.0)
+	cell_radius_baseline[index] = clampf(radius_scale, 0.5, 2.0)
+	var energy_factor: float = 1.0
+	if index < cell_energy_scale.size():
+		energy_factor = cell_energy_scale[index]
+	cell_radius_scale[index] = clampf(cell_radius_baseline[index] * energy_factor, 0.05, 2.0)
 	cell_stiffness[index] = clampf(stiffness, 0.25, 2.0)
 	cell_color_r[index] = color.r
 	cell_color_g[index] = color.g
 	cell_color_b[index] = color.b
 	return true
+
+## v0.19.0：写入能量派生半径因子（0.5–1.0），同步刷新物理/渲染共用的有效倍率。
+func set_energy_radius_scale(index: int, factor: float) -> bool:
+	if index < 0 or index >= size():
+		return false
+	if index >= cell_energy_scale.size():
+		return false
+	cell_energy_scale[index] = clampf(factor, 0.1, 1.0)
+	var baseline: float = 1.0
+	if index < cell_radius_baseline.size():
+		baseline = cell_radius_baseline[index]
+	cell_radius_scale[index] = clampf(baseline * cell_energy_scale[index], 0.05, 2.0)
+	return true
+
+func get_energy_radius_scale(index: int) -> float:
+	if index < 0 or index >= cell_energy_scale.size():
+		return 1.0
+	return cell_energy_scale[index]
 
 func get_radius_scale(index: int) -> float:
 	if index < 0 or index >= cell_radius_scale.size():

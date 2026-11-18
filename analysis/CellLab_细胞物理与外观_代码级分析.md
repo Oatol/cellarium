@@ -826,3 +826,28 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 
 - SmokeTest 覆盖：个体无限生长超过 8、全局容量拒绝、连接数抑制分裂、有限端粒递减与归零死亡、`-1` 无限端粒、schema v5 新旧回退、编辑器控件写入与 hash 边界。
 - 验证口径：发布工程与 D 盘工程均 `SCRIPTS=51 FAILURES=0 EXITCODE=0`。
+
+---
+
+## 29. v0.19.0：半径-能量低通落地与视图重建热点优化
+
+### 29.1 证据与决策
+
+Cell Lab `CellWorld.f(double)` 已证实（§2）：半径 `d` 不随能量直接跳变，而是对 `d²` 做一阶低通，稳态 `d_target = sqrt(w) / 20`。用户实测本项目「细胞大小不随能量增加、刚分裂子细胞偏小」，与 Cell Lab 机制对照后确认是机制缺失，非贴图或缩放 bug。
+
+15 细胞链卡顿查证：Cell Lab 的 `g()` 空间索引每对只算一次、物理与渲染共享 `A[]` 接触几何，且渲染为原生 OpenGL 顶点缓冲；本项目在 `CellSceneRenderer._build_shared_chords` 用字符串 `"%d:%d"` 做 pair key、每细胞固定 64 点解析圆，GDScript 层逐细胞重建产生超线性开销。程序化探针（`tools/ViewCostProbe.gd`）基线：15 细胞 view 重建 1845 µs/帧、30 细胞 4545 µs/帧。
+
+### 29.2 实现口径
+
+- 半径低通：`CellArray` 新增 `cell_radius_baseline`（基因表型）与 `cell_energy_scale`（能量派生因子）；`cell_radius_scale` 保持为「有效倍率 = baseline × energy_scale」，物理/渲染/分裂间距的所有既有读取点不变。
+- 每 tick 在 metabolism 阶段调用 `_apply_energy_radius_relaxation(dt)`：以该细胞所属模式的 `division_mass` 作参考能量 `E_ref`，`target² = clamp(E / E_ref, min², max²)`，`s² ← s² + (target² − s²)·rate·dt`，`s = sqrt(s²)`。默认 rate=5、min=0.5、max=1.0，对应 Cell Lab 一阶低通与死亡半径比例。
+- 仅 gene_mode 生效；非基因模式与 `energy_radius_growth_enabled=false` 保持 v0.18 固定表型倍率。纯标量、固定细胞索引顺序、不写 RNG；GNP1、tick 顺序、单帧 12 tick 上限不动。
+- schema_version=6 保存两个新数组；旧档缺字段时 baseline=旧 `cell_radius_scale`、energy_scale=1.0，半径逐位不变。数组纳入 `get_state_hash()` 保证回放确定性。
+- 视图热点：`_build_shared_chords` 的 pair key 由字符串改为整数打包 `low*8001+high`；`CellView` 新增 `outline_segments` 导出，默认 64 保持独立实例旧行为，`CellBase.tscn` 设 48 降低实际场景每帧弦裁剪与顶点写入成本。
+
+### 29.3 验证
+
+- SmokeTest 覆盖：初始 baseline×factor、低能量平滑趋向 `sqrt(1/4)=0.5` 且首 tick 不跳变、能量回升可逆、开关关闭冻结因子、schema v6 新旧回退、状态 hash 确定性。
+- 视图优化后探针：15 细胞 1453 µs/帧、30 细胞 3707 µs/帧，较基线下降约 20%；模拟 tick 成本不受影响。
+- 双工程验证：发布工程与 D 盘工程均 `SCRIPTS=51 FAILURES=0 EXITCODE=0`。
+- 证据边界：性能数字来自 headless CPU 回退与同步循环，GPU 实际帧率与 `_process` 逐帧收益需窗口环境复核。

@@ -4,6 +4,26 @@
 
 ---
 
+## 0.19.0 — 2026-11-18
+
+**类型**：玩法机制补齐（半径-能量低通）+ 视图热点优化；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动
+**触发**：用户观察到 15 细胞链明显掉帧而 Cell Lab 不明显，且刚分裂子细胞偏小、不随能量长大。查证 Cell Lab `f(double)` 已证实半径对 `d²` 一阶低通（稳态 `sqrt(w)/20`），确认本项目是机制缺失；性能侧确认视图重建的字符串 pair key 与固定 64 点膜是主要边际开销。
+
+### 实现
+
+- 半径-能量低通：`CellArray` 新增 `cell_radius_baseline`（基因 `cell_size` 表型）与 `cell_energy_scale`（能量因子），`cell_radius_scale` 保持为有效倍率 = 基线 × 因子，物理碰撞/皿壁投影/渲染/分裂间距所有读取点不变。
+- 每 tick 在 metabolism 阶段以该细胞模式 `division_mass` 作参考能量 `E_ref`，对因子做有界一阶低通：`target² = clamp(E/E_ref, 0.5², 1²)`，`s² ← s² + (target² − s²)·rate·dt`（默认 rate=5）。能量越高半径越大并平滑趋近；饥饿收缩；刚分裂的低能量子细胞较小、随摄能长大。仅 gene_mode 生效，非基因模式与 `energy_radius_growth_enabled=false` 保持 v0.18 固定倍率。
+- 视图热点：`CellSceneRenderer._build_shared_chords` 的 pair key 由字符串改为整数打包 `low*8001+high`；`CellView` 新增 `outline_segments` 导出（独立实例默认 64 保持旧行为，`CellBase.tscn` 设 48），降低每帧弦裁剪与顶点写入成本。视图优化不改任何模拟状态或 hash。
+- 存档升 `schema_version=6`：保存两个新数组，旧档按 baseline=旧有效倍率、因子=1.0 回退，半径逐位不变；数组纳入 `get_state_hash()` 保证回放确定性。GNP1、tick 顺序、能量账本与守恒公式未改。
+
+### 验证
+
+- SmokeTest 新增 `OK v0.19.0`（稳态 `sqrt(1/4)=0.5`、首 tick 不跳变、能量回升可逆、开关冻结、schema v6 新旧回退、状态 hash 确定性）。
+- `ViewCostProbe` 链长视图重建：15 细胞 1845→1453 µs/帧，30 细胞 4545→3707 µs/帧（约 -20%）；模拟 tick 成本不变。GPU 实际帧率与 `_process` 逐帧收益需窗口环境复核。
+- 双工程验证：发布工程与 D 盘工程均 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
+
+---
+
 ## 0.18.0 — 2026-11-18
 
 **类型**：玩法机制版本化追加（取消个体 8 细胞硬上限 / 全局容量保护 / 连接数抑制分裂 / 端粒；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）

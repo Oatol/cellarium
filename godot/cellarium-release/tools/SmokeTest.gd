@@ -204,6 +204,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0180_population_limits():
 		failures += 1
+	if not await _check_v0190_energy_radius_relaxation():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -2158,7 +2160,8 @@ func _check_cell_scene_renderer() -> bool:
 		push_error("SmokeTest: procedural cell needs at least 5 organelles")
 		instance.queue_free(); return false
 	var initial_chord_count: int = int(first_view.call("get_chord_count"))
-	var minimum_outline_points: int = 48 if initial_chord_count > 0 else 64
+	var configured_segments: int = clampi(int(first_view.get("outline_segments")), 12, 64)
+	var minimum_outline_points: int = 12 if initial_chord_count > 0 else configured_segments
 	if body.polygon.size() < minimum_outline_points or int(first_view.call("get_outline_point_count")) < minimum_outline_points:
 		push_error("SmokeTest: membrane outline not generated")
 		instance.queue_free(); return false
@@ -2486,7 +2489,8 @@ func _check_shared_chords() -> bool:
 	view_with_chord.set("_chords", [])
 	view_with_chord.call("_refresh_shape")
 	var no_chord_outline: PackedVector2Array = (view_with_chord.get_node_or_null("Outline") as Line2D).points
-	if no_chord_outline.size() < 64:
+	var configured_segments: int = clampi(int(view_with_chord.get("outline_segments")), 12, 64)
+	if no_chord_outline.size() < configured_segments:
 		push_error("SmokeTest: no-chord outline must stay analytic circle, points=%d" % no_chord_outline.size())
 		instance.queue_free(); return false
 	if helper.call("polygon_area", no_chord_outline) <= 1.0:
@@ -3743,8 +3747,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 5:
-		push_error("SmokeTest: save schema must be version 5")
+	if int(snapshot.get("schema_version", -1)) != 6:
+		push_error("SmokeTest: save schema must be version 6")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -3757,7 +3761,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v5)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v6)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3940,8 +3944,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 5 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v5 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != 6 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v6 must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -3954,7 +3958,7 @@ func _check_v0160_runtime_phenotype() -> bool:
 		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v5 fallback")
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v6 fallback")
 	return true
 
 ## v0.17.0：模式列表逐模式编辑、两个子代模式、预览点击跳转，以及 hash 兼容边界。
@@ -4070,7 +4074,7 @@ func _check_v0170_mode_remove() -> bool:
 	print("SmokeTest: OK v0.17.1 mode removal")
 	return true
 
-## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v5 存档往返。
+## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v6 存档往返。
 func _check_v0170_runtime_transfer_and_modes() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -4151,10 +4155,10 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		instance.queue_free(); return false
 
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 5 \
+	if int(snapshot.get("schema_version", -1)) != 6 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
 		or (snapshot.get("genomes", []) as Array).is_empty():
-		push_error("SmokeTest: schema v5 must persist modes and cell_mode")
+		push_error("SmokeTest: schema v6 must persist modes and cell_mode")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.call("set_modes", [])
@@ -4181,7 +4185,7 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		push_error("SmokeTest: legacy snapshot must default cell_mode to 0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v5")
+	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v6")
 	return true
 
 ## v0.18.0：构造「单模式光合带」基因组；cell_cap=-1 表示无限，link_limit=-1 不抑制。
@@ -4229,7 +4233,7 @@ static func _v0180_prepare_manager(instance: Node) -> Dictionary:
 	manager.set("autonomous_division_cooldown", 1)
 	return {"manager": manager, "env": env, "tick": tick_core, "cells": manager.get("cells")}
 
-## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v5 与编辑器同测。
+## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v6 与编辑器同测。
 func _check_v0180_population_limits() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var cell_array_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
@@ -4327,7 +4331,7 @@ func _check_v0180_population_limits() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 
-	# 5) 端粒：每次母子同减，归零死亡；schema v5 保存新字段并兼容旧快照。
+	# 5) 端粒：每次母子同减，归零死亡；schema v6 保存新字段并兼容旧快照。
 	var mortal: RefCounted = _v0180_mode_genome(genome_script, -1, 5, -1, false)
 	instance = scene.instantiate()
 	instance.set("create_demo_organism", false)
@@ -4363,9 +4367,10 @@ func _check_v0180_population_limits() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 5 \
-		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere"):
-		push_error("SmokeTest: schema v5 must persist telomere arrays")
+	if int(snapshot.get("schema_version", -1)) != 6 \
+		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere") \
+		or not (snapshot.get("cells", {}) as Dictionary).has("cell_energy_scale"):
+		push_error("SmokeTest: schema v6 must persist telomere and energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	(legacy.get("cells", {}) as Dictionary).erase("cell_telomere")
@@ -4449,5 +4454,113 @@ func _check_v0180_population_limits() -> bool:
 		push_error("SmokeTest: cell cap must affect gene-mode hash when modes exist")
 		return false
 
-	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v5 / editor")
+	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v6 / editor")
+	return true
+
+## v0.19.0：半径-能量低通。稳态 = sqrt(E / E_ref)，一阶平滑；基线×因子 = 有效倍率；
+## 非基因模式与关闭开关保持固定半径；schema v6 保存新数组且旧档逐位兼容。
+func _check_v0190_energy_radius_relaxation() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var context: Dictionary = _v0180_prepare_manager(instance)
+	var manager: Node = context["manager"]
+	var env: Node = context["env"]
+	var tick_core: Node = context["tick"]
+	var cells: RefCounted = context["cells"]
+	manager.set("autonomous_division_enabled", false)
+
+	# 1) 基因模式、单模式、cell_size=1.5、division_mass=E_ref=0.05。
+	var genome: RefCounted = _v0180_mode_genome(genome_script, 4, -1, -1, false)
+	var modes: Array = genome.get("modes") as Array
+	var tuned: Dictionary = (modes[0] as Dictionary).duplicate()
+	tuned["cell_size"] = 1.5
+	tuned["division_mass"] = 0.05
+	modes[0] = tuned
+	genome.call("set_modes", modes)
+	var org_id: int = int(manager.call("register_zygote", 90, 90, -1, genome, Vector2(250, 250), 0.05, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.19.0 zygote failed")
+		instance.queue_free(); return false
+	var initial_baseline: float = float((cells.get("cell_radius_baseline") as PackedFloat32Array)[0])
+	var initial_energy: float = float(cells.call("get_energy_radius_scale", 0))
+	var initial_effective: float = float(cells.call("get_radius_scale", 0))
+	if absf(initial_baseline - 1.5) > 0.001 or absf(initial_energy - 1.0) > 0.001 or absf(initial_effective - 1.5) > 0.001:
+		push_error("SmokeTest: initial radius must be baseline x energy factor")
+		instance.queue_free(); return false
+
+	# 2) 能量降到 E_ref/4，稳态因子应平滑趋向 0.5；首 tick 不得直接跳到稳态。
+	var energies: PackedFloat32Array = cells.get("cell_energy") as PackedFloat32Array
+	energies[0] = 0.0125
+	cells.set("cell_energy", energies)
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	var after_one: float = float(cells.call("get_energy_radius_scale", 0))
+	if after_one >= 0.98 or after_one <= 0.5:
+		push_error("SmokeTest: energy radius must converge gradually, not jump")
+		instance.queue_free(); return false
+	for _step in range(180):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	var low_factor: float = float(cells.call("get_energy_radius_scale", 0))
+	var low_effective: float = float(cells.call("get_radius_scale", 0))
+	if absf(low_factor - 0.5) > 0.01 or absf(low_effective - 0.75) > 0.01:
+		push_error("SmokeTest: low-energy steady radius must be baseline x sqrt(1/4)")
+		instance.queue_free(); return false
+
+	# 3) 能量回到 E_ref，因子回升到 1.0；饥饿收缩可逆。
+	energies = cells.get("cell_energy") as PackedFloat32Array
+	energies[0] = 0.05
+	cells.set("cell_energy", energies)
+	for _step in range(180):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	if absf(float(cells.call("get_energy_radius_scale", 0)) - 1.0) > 0.01:
+		push_error("SmokeTest: restored energy must regrow radius")
+		instance.queue_free(); return false
+
+	# 4) 关闭开关与 flags 清零：固定半径，不写低通状态。
+	manager.set("energy_radius_growth_enabled", false)
+	energies = cells.get("cell_energy") as PackedFloat32Array
+	energies[0] = 0.0125
+	cells.set("cell_energy", energies)
+	for _step in range(30):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	if absf(float(cells.call("get_energy_radius_scale", 0)) - 1.0) > 0.0001:
+		push_error("SmokeTest: disabled growth must freeze energy factor")
+		instance.queue_free(); return false
+
+	# 5) schema v6 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
+	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
+	var snap_cells: Dictionary = snapshot.get("cells", {}) as Dictionary
+	if int(snapshot.get("schema_version", -1)) != 6 \
+		or not snap_cells.has("cell_radius_baseline") or not snap_cells.has("cell_energy_scale"):
+		push_error("SmokeTest: schema v6 must persist energy-radius arrays")
+		instance.queue_free(); return false
+	var legacy: Dictionary = snapshot.duplicate(true)
+	var legacy_cells: Dictionary = legacy.get("cells", {}) as Dictionary
+	legacy_cells.erase("cell_radius_baseline")
+	legacy_cells.erase("cell_energy_scale")
+	if not bool(save_script.call("restore", legacy, manager, env, tick_core)):
+		push_error("SmokeTest: legacy save restore failed")
+		instance.queue_free(); return false
+	var restored_baseline: float = float((cells.get("cell_radius_baseline") as PackedFloat32Array)[0])
+	var restored_factor: float = float(cells.call("get_energy_radius_scale", 0))
+	if absf(restored_factor - 1.0) > 0.0001 or absf(restored_baseline - 1.5) > 0.01:
+		push_error("SmokeTest: legacy save must map effective scale to baseline with factor 1")
+		instance.queue_free(); return false
+
+	# 6) 哈希确定性：相同快照恢复两次，状态 hash 必须一致。
+	var hash_a: int = int(manager.call("get_state_hash"))
+	if not bool(save_script.call("restore", snapshot, manager, env, tick_core)):
+		push_error("SmokeTest: v0.19.0 save restore failed")
+		instance.queue_free(); return false
+	var hash_b: int = int(manager.call("get_state_hash"))
+	if hash_a != hash_b:
+		push_error("SmokeTest: energy-radius arrays must be in deterministic hash")
+		instance.queue_free(); return false
+
+	instance.queue_free()
+	print("SmokeTest: OK v0.19.0 energy-radius lowpass / schema v6")
 	return true

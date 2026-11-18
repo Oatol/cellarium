@@ -86,6 +86,13 @@ func _ready() -> void:
 @export var autonomous_max_cells_per_organism: int = -1
 ## v0.18.0：全局容量保护；达到后所有新增细胞/分裂路径一律拒绝。
 @export var global_cell_capacity: int = 8000
+## v0.19.0：半径-能量低通。对应 Cell Lab `CellWorld.f(double)`：目标倍率 d_target =
+## sqrt(w / division_mass)，一阶低通（系数 relax_rate·dt）。仅 gene_mode 启用，
+## 非基因模式保持 v0.18 固定表型倍率，逐位不变。所有运算为确定性标量，不写 RNG。
+@export var energy_radius_growth_enabled: bool = true
+@export var energy_radius_relax_rate: float = 5.0
+@export var energy_radius_min_scale: float = 0.5
+@export var energy_radius_max_scale: float = 1.0
 @export var autonomous_division_separation: float = 14.0
 @export var default_transfer_rate: float = 0.0
 @export var facultative_aerobic_efficiency: float = 2.0
@@ -201,6 +208,7 @@ func advance_physics_tick(dt: float) -> void:
 	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt, _energy_flow)
 	_apply_base_metabolism(dt)
 	_apply_environment_metabolism(dt)
+	_apply_energy_radius_relaxation(dt)
 	_apply_autonomous_lifecycle()
 	perf_probe.call("end", "metabolism")
 	perf_probe.call("begin", "predation")
@@ -554,6 +562,45 @@ func _apply_autonomous_lifecycle() -> void:
 			organisms.set("org_state", org_state)
 		cell_counts = organisms.get("cell_count")
 		_autonomous_division_tick[org_id] = _sim_tick
+
+## v0.19.0：半径-能量低通。Cell Lab `f(double)` 对 d² 做低通、稳态 d ∝ sqrt(w)；
+## 本项目以该细胞所属模式的 division_mass 作参考能量 E_ref：
+##   target² = clamp(E / E_ref, min², max²)
+##   s²_next = s² + (target² − s²) · relax_rate · dt
+##   effective_scale = baseline × s
+## 只对 gene_mode 生效；非基因模式保持 v0.18 固定表型。纯标量、固定细胞索引顺序，不写 RNG。
+func _apply_energy_radius_relaxation(dt: float) -> void:
+	if not energy_radius_growth_enabled or dt <= 0.0:
+		return
+	var count: int = int(cells.call("size"))
+	if count <= 0:
+		return
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	var mode_ids: PackedByteArray = cells.get("cell_mode")
+	var step: float = clampf(energy_radius_relax_rate * dt, 0.0, 1.0)
+	var min_power: float = maxf(0.0, energy_radius_min_scale)
+	min_power *= min_power
+	var max_power: float = maxf(min_power, energy_radius_max_scale)
+	max_power *= max_power
+	for cell_index in range(count):
+		if alive[cell_index] == 0:
+			continue
+		if cell_index >= org_ids.size() or not genomes.has(int(org_ids[cell_index])):
+			continue
+		var genome: RefCounted = genomes[int(org_ids[cell_index])] as RefCounted
+		if not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+			continue
+		var reference: float = maxf(0.05, float(genome.get("division_mass")))
+		if bool(GENOME_SCRIPT.call("has_modes", genome)) and cell_index < mode_ids.size():
+			var mode: Dictionary = GENOME_SCRIPT.call("get_mode", genome, int(mode_ids[cell_index]))
+			reference = maxf(0.05, float(mode.get("division_mass", reference)))
+		var current: float = float(cells.call("get_energy_radius_scale", cell_index))
+		var current_power: float = current * current
+		var target_power: float = clampf(maxf(0.0, energies[cell_index]) / reference, min_power, max_power)
+		var next_scale: float = sqrt(maxf(0.0, current_power + (target_power - current_power) * step))
+		cells.call("set_energy_radius_scale", cell_index, next_scale)
 
 func _apply_predation(dt: float) -> void:
 	if dt <= 0.0:
@@ -1334,6 +1381,10 @@ func get_state_hash() -> int:
 		hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
 	for value in cells.get("behavior_intents"):
 		hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
+	# v0.19.0：半径低通的确定性状态（有效半径参与碰撞/分裂间距）。缺省空数组不参与，旧档无影响。
+	for array_name in ["cell_radius_baseline", "cell_energy_scale"]:
+		for value in cells.get(array_name):
+			hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
 	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length"]:
 		for value in cells.get(array_name):
 			var quantized: int = int(round(float(value) * 1000000.0)) if array_name == "link_rest_length" else int(value)
