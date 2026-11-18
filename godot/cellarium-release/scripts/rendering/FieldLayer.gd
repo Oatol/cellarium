@@ -19,8 +19,17 @@ var _field_material: ShaderMaterial = null
 var _field_image: Image = null
 var _field_texture: ImageTexture = null
 var _cached_resolution: int = -1
+## 圆外格 → 最近圆内格的索引映射（只依赖 resolution/center/radius，缓存避免每 tick O(res^4)）。
+var _pad_source: PackedInt32Array = PackedInt32Array()
+var _pad_center: Vector2 = Vector2.ZERO
+var _pad_radius: float = -1.0
+var _ticks_since_refresh: int = 0
 
-const UPSCALE: int = 4
+## v0.14.0 性能：视图层刷新与 tick 解耦。场纹理只在节流窗口或显式 mark_dirty 时重建；
+## 分辨率由 32×4=128 降到 32×2=64，shader 用 filter_linear 做 GPU 双线性，视觉仍平滑。
+const UPSCALE: int = 2
+## 1× 下每 6 tick 刷新（10 Hz）；光场是静态空间快照，肉眼看不出延迟。
+const REFRESH_TICKS: int = 6
 const CHANNEL_COLORS: Array[Color] = [
 	Color(0.36, 0.88, 0.62),  # 0 营养 青绿
 	Color(0.95, 0.55, 0.42),  # 1 温度 暖红
@@ -62,7 +71,8 @@ void fragment() {
 	// 解析圆形抗锯齿遮罩：圆外完全透明，圆边按屏幕像素导数平滑。
 	float inside = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, dist);
 	float value = clamp(texture(field_tex, UV).r, 0.0, 1.0);
-	float field_alpha = smoothstep(0.02, 1.0, value) * max_alpha * inside;
+	// 皿内保留极淡基底：光场弱的一侧也不会出现黑色空环（Cell Lab 的光照是连续覆盖）。
+	float field_alpha = (0.05 + 0.95 * smoothstep(0.0, 0.9, value)) * max_alpha * inside;
 	// 皿壁细环同样在 shader 里生成，避免 draw_arc 的 128 段折线锯齿。
 	float ring = smoothstep(1.0 - aa * 3.0, 1.0 - aa, dist) * (1.0 - smoothstep(1.0, 1.0 + aa * 2.0, dist));
 	float alpha = max(field_alpha, ring * 0.55 * show_ring);
@@ -77,7 +87,11 @@ void fragment() {
 	_field_rect.material = _field_material
 
 func _on_tick_advanced(_tick_index: int) -> void:
-	if _enabled:
+	if not _enabled:
+		return
+	_ticks_since_refresh += 1
+	if _ticks_since_refresh >= REFRESH_TICKS:
+		_ticks_since_refresh = 0
 		_refresh_texture()
 
 func set_enabled(value: bool) -> void:
@@ -125,16 +139,55 @@ func _refresh_texture() -> void:
 	for value in values:
 		if value > max_value:
 			max_value = value
+	# 生成补齐后的场：圆外的格在物理场里为 0，但若直接参与插值会形成黑色空环；
+	# 这里只用于视图，用最近的圆内格值补齐，保证纹理铺满整个圆形皿。
+	var padded: PackedFloat32Array = values.duplicate()
+	if _pad_source.size() != resolution * resolution or center != _pad_center or not is_equal_approx(radius, _pad_radius):
+		_build_pad_source(resolution, center, radius)
+	for index in range(resolution * resolution):
+		var source_index: int = _pad_source[index]
+		if source_index >= 0 and source_index < values.size():
+			padded[index] = values[source_index]
 	for py in range(display_resolution):
 		for px in range(display_resolution):
 			var u: float = (float(px) + 0.5) / float(display_resolution)
 			var v: float = (float(py) + 0.5) / float(display_resolution)
 			var intensity: float = clampf(
-				_sample_grid_masked(values, resolution, center, radius,
+				_sample_grid_masked(padded, resolution, center, radius,
 					u * float(resolution) - 0.5, v * float(resolution) - 0.5) / max_value,
 				0.0, 1.0)
 			_field_image.set_pixel(px, py, Color(intensity, 0.0, 0.0, 1.0))
 	_field_texture.update(_field_image)
+
+## 圆外格映射到最近的圆内格；只在几何参数变化时算一次。
+func _build_pad_source(resolution: int, center: Vector2, radius: float) -> void:
+	_pad_source.resize(resolution * resolution)
+	_pad_center = center
+	_pad_radius = radius
+	for index in range(_pad_source.size()):
+		_pad_source[index] = -1
+	for y in range(resolution):
+		for x in range(resolution):
+			var index: int = y * resolution + x
+			if _grid_center_world(resolution, center, radius, x, y).distance_squared_to(center) <= radius * radius:
+				_pad_source[index] = index
+	for y in range(resolution):
+		for x in range(resolution):
+			var index: int = y * resolution + x
+			if _pad_source[index] >= 0:
+				continue
+			var best_distance: float = INF
+			var best_index: int = -1
+			for sy in range(resolution):
+				for sx in range(resolution):
+					var source_index: int = sy * resolution + sx
+					if _pad_source[source_index] != source_index:
+						continue
+					var distance_squared: float = float((sx - x) * (sx - x) + (sy - y) * (sy - y))
+					if distance_squared < best_distance:
+						best_distance = distance_squared
+						best_index = source_index
+			_pad_source[index] = best_index
 
 func _grid_center_world(resolution: int, center: Vector2, radius: float, x: int, y: int) -> Vector2:
 	var local: Vector2 = Vector2(
@@ -143,7 +196,9 @@ func _grid_center_world(resolution: int, center: Vector2, radius: float, x: int,
 	)
 	return center + local * radius
 
-func _sample_grid_masked(values: PackedFloat32Array, resolution: int, center: Vector2, radius: float, gx: float, gy: float) -> float:
+func _sample_grid_masked(values: PackedFloat32Array, resolution: int, _center: Vector2, _radius: float, gx: float, gy: float) -> float:
+	# values 已经过 _pad_source 补齐（圆外格复制最近圆内格），因此这里只做双线性，
+	# 不再按格心距离剔除；否则外圈格心在圆外时会被全部跳过，形成黑色空隙。
 	var bounded: Vector2 = Vector2(gx, gy).clamp(Vector2.ZERO, Vector2(float(resolution - 1), float(resolution - 1)))
 	var base_x: int = floori(bounded.x)
 	var base_y: int = floori(bounded.y)
@@ -151,18 +206,6 @@ func _sample_grid_masked(values: PackedFloat32Array, resolution: int, center: Ve
 	var next_y: int = mini(base_y + 1, resolution - 1)
 	var fx: float = bounded.x - float(base_x)
 	var fy: float = bounded.y - float(base_y)
-	var total: float = 0.0
-	var weight_total: float = 0.0
-	for sample_y in [base_y, next_y]:
-		for sample_x in [base_x, next_x]:
-			var wx: float = fx if sample_x == next_x else 1.0 - fx
-			var wy: float = fy if sample_y == next_y else 1.0 - fy
-			var weight: float = wx * wy
-			if weight <= 0.0:
-				continue
-			# 圆外格在物理场中恒 0；视图插值不能把它们混进来，否则边缘出现暗锯齿。
-			if _grid_center_world(resolution, center, radius, sample_x, sample_y).distance_squared_to(center) > radius * radius:
-				continue
-			total += values[sample_y * resolution + sample_x] * weight
-			weight_total += weight
-	return total / weight_total if weight_total > 0.0 else 0.0
+	var top: float = lerpf(values[base_y * resolution + base_x], values[base_y * resolution + next_x], fx)
+	var bottom: float = lerpf(values[next_y * resolution + base_x], values[next_y * resolution + next_x], fx)
+	return lerpf(top, bottom, fy)

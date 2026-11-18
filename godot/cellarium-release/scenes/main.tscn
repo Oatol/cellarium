@@ -245,6 +245,17 @@ offset_bottom = 84.0
 grow_horizontal = 2
 text = "就绪 · 选择工具后在皿内点击"
 
+[node name="PerfLabel" type="Label" parent="UI/HUD"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_left = 12.0
+offset_top = 88.0
+offset_right = -388.0
+offset_bottom = 108.0
+grow_horizontal = 2
+text = "FPS -- | TPS --"
+
 [node name="SpeedPanel" type="PanelContainer" parent="UI/HUD"]
 layout_mode = 1
 anchors_preset = 10

@@ -4,6 +4,32 @@
 
 ---
 
+## 0.14.0 — 2026-11-18
+
+**类型**：性能根因修复 + 反馈批次 + 食物实体池（规格已版本化修订；不改 tick 顺序、GNP1、dev_program 语义、五通道 schema 与确定性 hash）
+**触发**：用户反馈「只有几个细胞仍然很卡、Cell Lab 手机都流畅；页面显示 FPS/TPS；指令序列多时 UI 撑爆；生态报告按钮又失效且下方信息不刷新；Cell Lab 没有指令序列这东西、开销大吗；做食物实体用 Cell Lab 方法；光场在皿下方和右方有空隙」。
+
+### 代码证据与测量
+
+- 新增 `tools/ViewCostProbe.gd` 程序化测量（不截图/不动鼠标）：优化前 CPU 后端 `diffuse_tick` = **18,923 µs/tick**，模拟 1 个细胞仅 93 µs；确认卡顿与细胞数无关，真凶是 CPU 场扩散每格新建 `[Vector2i...]` 数组、`_sample_grid` 在零平流下仍做双线性（内部 4 次 `_is_active` + Vector2 分配）。
+- Cell Lab 静态证据（APK 未执行）：启动时一次性 `new Food[G2]` 定长池 + active count，质量线性衰减、池尾交换回收（`analysis` §20.3 证据 ID 见文档）；`GenomePreviewView` 用 `RENDERMODE_WHEN_DIRTY` 按需渲染；`Environment.q` 64×64 双线性 O(1) 采样。Cell Lab **有**基因规则（位掩码条件-动作），但是 O(N) 位运算，开销可忽略；我们 dev_program 每发育个体每 tick 一条指令，同样可忽略——卡顿与指令序列无关。
+
+### 实现
+
+- **性能**：`EnvironmentField._apply_cpu_diffusion()` 重写为逐位等价快速路径（预计算 active mask、展开四邻域保持 LEFT/RIGHT/UP/DOWN 累加顺序、零平流直接取 center）。实测 **18,923 → 1,335 µs/tick（13.7×）**；SmokeTest 新增非零平流旧公式逐位等价回归，保护 CPU/GPU parity。
+- **FPS/TPS**：`main.tscn` 增加 `UI/HUD/PerfLabel`，`GameHUD` 用真实帧计数与 tick 增量按 0.5 s 窗口刷新，显示 FPS / TPS / 倍速 / LOD。
+- **指令序列 UI**：`DevEditorPanel` 的左栏指令列表包进 `InstructionScroll`（可滚动 + 折叠按钮），底部时间轴包进 `TimelineScroll`，指令再多也不会撑爆窗口。
+- **生态报告**：`GameHUD._build_panel_chrome()` 改为 `call_deferred`，根因是 chrome 早于 AnalysisPanel 自己的 `_ready()` 安装，导致内容覆盖标题栏并抢走图钉/关闭按钮事件；`PanelChrome.install()` 幂等。新增 `OrganismManager.get_live_inspection()` 按选中细胞索引逐 tick 派生实时诊断（原来只存点击瞬间快照）；解锁默认自动收起报告页，只有手动按图钉才保持打开。
+- **食物实体池**：按已修订的 v1.0 §2.2 / v2.1 §0.3 / §11 落地 `FoodStore.gd`——定长 128 池、池尾交换回收、质量线性衰减、涂层字段、存档 payload；由营养场确定型投放位置派生，`FoodLayer` 优先画实体颗粒（旧对比度视图作回退）。实体只读派生，不写能量结算、不进 hash、不改 schema。
+- **光场空隙**：`FieldLayer._build_pad_source()` 缓存圆外格→最近圆内格映射，视图插值用补齐场铺满整个圆；shader 保留极淡基底，皿内不再有黑环；UPSCALE 4→2 + 6 tick 节流降固定成本。
+
+### 规格 / 验证
+
+- 修订 `docs/创生模拟器_沙盒版人工生命系统设计文档_v1.1_合并稿.md` §2.2 与 `docs/Godot项目技术设计文档.md` §0.3 / §11，声明食物实体池为只读派生的版本化追加，并列出「变第二套能量真相」的风险与对策。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=51 FAILURES=0 EXITCODE=0`；D 盘同步 14 个脚本 + `main.tscn` 增量新增 PerfLabel（保留 MCP autoload / 脚本 uid / 场景 unique_id）。
+
+---
+
 ## 0.13.1 — 2026-11-17
 
 **类型**：五项反馈修复 + 发育预览（纯视图 / 编辑器 UI，不改 tick、GNP1、dev_program 语义与确定性 hash）

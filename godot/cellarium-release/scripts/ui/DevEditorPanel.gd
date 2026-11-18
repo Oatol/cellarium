@@ -39,6 +39,9 @@ var _type_id: int = 0
 
 var _content: VBoxContainer = null
 var _tree_rows: VBoxContainer = null
+var _tree_scroll: ScrollContainer = null
+var _tree_fold_button: Button = null
+var _tree_folded: bool = false
 var _tree_counter: Label = null
 var _param_opcode: OptionButton = null
 var _param_a: SpinBox = null
@@ -237,8 +240,13 @@ func _build_ui() -> void:
 	timeline_title.add_theme_font_size_override("font_size", 12)
 	_timeline_rows = HBoxContainer.new()
 	_timeline_rows.add_theme_constant_override("separation", 4)
+	var timeline_scroll: ScrollContainer = ScrollContainer.new()
+	timeline_scroll.name = "TimelineScroll"
+	timeline_scroll.custom_minimum_size = Vector2(0, 52)
+	timeline_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	timeline_scroll.add_child(_timeline_rows)
 	timeline_box.add_child(timeline_title)
-	timeline_box.add_child(_timeline_rows)
+	timeline_box.add_child(timeline_scroll)
 	timeline_margin.add_child(timeline_box)
 	timeline_panel.add_child(timeline_margin)
 	_content.add_child(timeline_panel)
@@ -265,10 +273,24 @@ func _build_left_panel() -> Control:
 	box.add_child(_make_section_title("DEV · 分化程序 / 指令序列"))
 	_tree_counter = Label.new()
 	_tree_counter.text = "指令 0 / %d" % MAX_DEV_INSTRUCTIONS
-	box.add_child(_tree_counter)
+	# 标题行：折叠按钮 + 计数，避免指令很多时把面板撑到超出屏幕。
+	var tree_header: HBoxContainer = HBoxContainer.new()
+	_tree_fold_button = _make_button("折叠指令", "折叠/展开指令序列（内容始终保留，只是不占纵向空间）")
+	_tree_fold_button.custom_minimum_size = Vector2(96, 24)
+	_tree_fold_button.pressed.connect(_on_toggle_tree_fold)
+	tree_header.add_child(_tree_fold_button)
+	tree_header.add_child(_tree_counter)
+	box.add_child(tree_header)
+	_tree_scroll = ScrollContainer.new()
+	_tree_scroll.name = "InstructionScroll"
+	_tree_scroll.custom_minimum_size = Vector2(0, 150)
+	_tree_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tree_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_tree_rows = VBoxContainer.new()
-	_tree_rows.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	box.add_child(_tree_rows)
+	_tree_rows.name = "InstructionRows"
+	_tree_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tree_scroll.add_child(_tree_rows)
+	box.add_child(_tree_scroll)
 	var actions: HBoxContainer = HBoxContainer.new()
 	var add_button: Button = _make_button("+ 指令", "追加一条 DIVIDE")
 	add_button.pressed.connect(_on_add_instruction)
@@ -586,8 +608,20 @@ func _write_program(program: Array) -> void:
 	_selected_instruction = clampi(_selected_instruction, 0, maxi(0, program.size() - 1))
 	_refresh_all()
 
+func _on_toggle_tree_fold() -> void:
+	_tree_folded = not _tree_folded
+	if _tree_scroll != null:
+		_tree_scroll.visible = not _tree_folded
+	if _tree_fold_button != null:
+		_tree_fold_button.text = "展开指令" if _tree_folded else "折叠指令"
+
 func _refresh_tree() -> void:
 	if _tree_rows == null:
+		return
+	if _tree_counter != null:
+		_tree_counter.text = "指令 %d / %d" % [_program().size(), MAX_DEV_INSTRUCTIONS]
+	if _tree_folded:
+		# 折叠时不重建行内容：下次展开时 _refresh_tree 会按最新 program 重画。
 		return
 	for child in _tree_rows.get_children():
 		child.queue_free()

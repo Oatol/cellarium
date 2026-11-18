@@ -13,6 +13,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/core/data/CellArray.gd",
 	"res://scripts/core/data/OrganismStore.gd",
 	"res://scripts/core/data/DevelopmentRules.gd",
+	"res://scripts/core/data/FoodStore.gd",
 	"res://scripts/core/command/CommandBus.gd",
 	"res://scripts/core/tick/TickCore.gd",
 	"res://scripts/system/EnvironmentManager.gd",
@@ -50,6 +51,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/ui/SemanticRegistry.gd",
 	"res://scripts/agent/AgentBridge.gd",
 	"res://tools/GpuSamplingTest.gd",
+	"res://tools/ViewCostProbe.gd",
 	"res://scripts/ui/AnalysisPanel.gd",
 	"res://scripts/ui/GenomePreview.gd",
 ]
@@ -924,8 +926,75 @@ func _check_environment_field() -> bool:
 	if masked_state[0][0] != 0.0 or masked_state[0][27] < 0.9:
 		push_error("SmokeTest: circular mask or queued source injection failed")
 		return false
-	print("SmokeTest: OK five-channel CPU field / circular mask / source injection / nutrient accounting")
+
+	# v0.14.0：非零平流必须仍走双线性。取 tick 前状态，用旧公式算一格再与 tick 后对比。
+	var parity_field: RefCounted = script.new() as RefCounted
+	parity_field.call("configure", 8, Vector2.ZERO, 20.0, PackedFloat32Array([1.0, 2.0, 3.0, 4.0, 5.0]), false)
+	parity_field.call("set_advection", Vector2(0.35, -0.2))
+	parity_field.call("add_source", 0, 4, 4, 0.25)
+	var before_channels: Array = (parity_field.get("channels") as Array).duplicate(true)
+	var before_sources: Array = (parity_field.get("_pending_sources") as Array).duplicate(true)
+	parity_field.call("diffuse_tick")
+	var advected_state: Array[PackedFloat32Array] = parity_field.call("get_state_snapshot")
+	var parity_ok: bool = true
+	for channel_index in range(5):
+		var expected: float = _legacy_diffuse_cell(parity_field, channel_index, 4, 4, before_channels, before_sources)
+		if not is_equal_approx(expected, advected_state[channel_index][4 * 8 + 4]):
+			parity_ok = false
+			break
+	if not parity_ok:
+		push_error("SmokeTest: nonzero-advection diffusion must still use bilinear sampling")
+		return false
+	print("SmokeTest: OK five-channel CPU field / circular mask / source injection / nutrient accounting / diffusion parity")
 	return true
+
+## 旧版 _sample_grid + 扩散公式，仅用于 v0.14.0 快速路径等价性回归。
+func _legacy_diffuse_cell(field: RefCounted, channel: int, x: int, y: int, before_channels: Array, before_sources: Array) -> float:
+	var resolution: int = int(field.get("resolution"))
+	var channels_data: Array = before_channels
+	var mask: PackedByteArray = field.get("dish_mask") as PackedByteArray
+	var terrain: PackedByteArray = field.get("terrain_mask") as PackedByteArray
+	var source: PackedFloat32Array = (before_sources as Array)[channel] as PackedFloat32Array
+	var diffusion: Array[float] = [0.08, 0.16, 0.12, 0.0, 0.05]
+	var decay: Array[float] = [0.004, 0.002, 0.003, 0.0, 0.02]
+	var advection_value: Vector2 = field.get("advection") as Vector2
+	var active_count: int = resolution * resolution
+	var active := func(index: int) -> bool:
+		if index < 0 or index >= active_count or mask[index] == 0:
+			return false
+		if terrain.size() == active_count and terrain[index] != 0:
+			return false
+		return true
+	var center_value: float = (channels_data[channel] as PackedFloat32Array)[y * resolution + x]
+	var laplacian: float = 0.0
+	for offset in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var nx: int = x + offset.x
+		var ny: int = y + offset.y
+		if nx < 0 or ny < 0 or nx >= resolution or ny >= resolution:
+			continue
+		var neighbor_index: int = ny * resolution + nx
+		if active.call(neighbor_index):
+			laplacian += (channels_data[channel] as PackedFloat32Array)[neighbor_index] - center_value
+	# 复刻 _sample_grid(channel, Vector2(x,y) - advection)
+	var grid_position: Vector2 = Vector2(x, y) - advection_value
+	var bounded: Vector2 = grid_position.clamp(Vector2.ZERO, Vector2.ONE * float(resolution - 1))
+	var base_x: int = floori(bounded.x)
+	var base_y: int = floori(bounded.y)
+	var fraction: Vector2 = bounded - Vector2(base_x, base_y)
+	var weighted_sum: float = 0.0
+	var weight_total: float = 0.0
+	for offset_y in range(2):
+		for offset_x in range(2):
+			var gx: int = mini(base_x + offset_x, resolution - 1)
+			var gy: int = mini(base_y + offset_y, resolution - 1)
+			var index_value: int = gy * resolution + gx
+			if not active.call(index_value):
+				continue
+			var weight: float = (1.0 - fraction.x if offset_x == 0 else fraction.x) * (1.0 - fraction.y if offset_y == 0 else fraction.y)
+			weighted_sum += (channels_data[channel] as PackedFloat32Array)[index_value] * weight
+			weight_total += weight
+	var advected: float = weighted_sum / weight_total if weight_total > 0.0 else 0.0
+	return maxf(0.0, advected + diffusion[channel] * laplacian - decay[channel] * center_value + source[y * resolution + x])
 
 func _check_environment_settings() -> bool:
 	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
@@ -987,6 +1056,30 @@ func _check_environment_settings() -> bool:
 	food_layer.call("mark_dirty")
 	if int(food_layer.call("get_last_dot_count")) <= 0:
 		push_error("SmokeTest: food sources must produce visible dots")
+		instance.queue_free(); return false
+
+	# v0.14.0：Cell Lab 方法食物实体池——定长、质量衰减、池尾交换、存档 payload。
+	var store: RefCounted = env.call("get_food_store") as RefCounted
+	if store == null or int(store.call("active_count")) <= 0:
+		push_error("SmokeTest: food entity pool empty after deterministic spawn")
+		instance.queue_free(); return false
+	if int(store.call("capacity")) <= 0 or int(store.call("capacity")) == int(store.call("active_count")):
+		push_error("SmokeTest: food pool must be preallocated fixed capacity")
+		instance.queue_free(); return false
+	var entity_mass_before: float = float(store.call("get_mass", 0))
+	env.call("advance_food_entities", 1.0 / 60.0)
+	if float(store.call("get_mass", 0)) >= entity_mass_before:
+		push_error("SmokeTest: food entity mass must decay each tick")
+		instance.queue_free(); return false
+	var payload: Dictionary = store.call("to_payload") as Dictionary
+	if payload.is_empty() or int(payload.get("capacity", -1)) != int(store.call("capacity")):
+		push_error("SmokeTest: food entity payload missing")
+		instance.queue_free(); return false
+	var spawned_mass: float = entity_mass_before
+	for decay_index in range(64):
+		env.call("advance_food_entities", 1.0 / 60.0)
+	if int(store.call("active_count")) < 1:
+		push_error("SmokeTest: food pool should still hold entities after 64 ticks")
 		instance.queue_free(); return false
 
 	# 环境设置页：分组标题与滚动容器存在；光场层用 shader texture 平滑绘制。
@@ -3181,6 +3274,23 @@ func _check_dev_editor_landing() -> bool:
 			if int(instruction.get("opcode", -1)) != 0 or int(instruction.get("a", -1)) != 0:
 				push_error("SmokeTest: division template must divide the zygote (cell 0)")
 				dev.queue_free(); return false
+	# v0.14.0：指令序列可折叠 + 滚动，避免指令多了把 UI 撑爆。
+	var instruction_scroll: Node = dev.find_child("InstructionScroll", true, false)
+	if instruction_scroll == null or not (instruction_scroll is ScrollContainer):
+		push_error("SmokeTest: instruction scroll container missing")
+		dev.queue_free(); return false
+	var timeline_scroll: Node = dev.find_child("TimelineScroll", true, false)
+	if timeline_scroll == null or not (timeline_scroll is ScrollContainer):
+		push_error("SmokeTest: timeline scroll container missing")
+		dev.queue_free(); return false
+	dev.call("_on_toggle_tree_fold")
+	if bool(instruction_scroll.visible):
+		push_error("SmokeTest: instruction fold did not hide list")
+		dev.queue_free(); return false
+	dev.call("_on_toggle_tree_fold")
+	if not bool(instruction_scroll.visible):
+		push_error("SmokeTest: instruction unfold did not restore list")
+		dev.queue_free(); return false
 	# v0.13.1：发育预览只读重建 dev_program 状态，且可逐步查看；不得污染 GNP1 hash。
 	var preview_node: Node = dev.find_child("GenomePreview", true, false)
 	if preview_node == null or preview_node.find_child("Canvas", true, false) == null:
@@ -3342,6 +3452,38 @@ func _check_ui_chrome_and_filters() -> bool:
 		push_error("SmokeTest: report live stats did not refresh within 6 ticks: " + live_text)
 		instance.queue_free(); return false
 
+	# (4e) v0.14.0：FPS/TPS 仪表真实存在且按 tick 推进更新。
+	var perf_label: Node = hud.get_node_or_null("PerfLabel")
+	if perf_label == null or not str(perf_label.get("text")).contains("FPS"):
+		push_error("SmokeTest: perf FPS/TPS label missing")
+		instance.queue_free(); return false
+	for frame_index in range(35):
+		await process_frame
+	if not str(perf_label.get("text")).contains("TPS"):
+		push_error("SmokeTest: perf label did not update")
+		instance.queue_free(); return false
+
+	# (4f) v0.14.0：关闭按钮点击链始终生效；「取消诊断锁定」默认自动收起、图钉固定后保持。
+	var report_chrome_now: RefCounted = chrome_map.get("../AnalysisPanel", null) as RefCounted
+	report_panel.call("set_visible_state", true)
+	report_panel.set_meta("chrome_pinned", false)
+	report_chrome_now.call("_on_close_pressed")
+	if bool(report_panel.visible):
+		push_error("SmokeTest: report close button click chain failed")
+		instance.queue_free(); return false
+	report_panel.call("set_visible_state", true)
+	report_panel.call("on_selection_cleared")
+	if bool(report_panel.visible):
+		push_error("SmokeTest: unlock must auto-close unpinned report")
+		instance.queue_free(); return false
+	report_panel.call("set_visible_state", true)
+	report_panel.set_meta("chrome_pinned", true)
+	report_panel.call("on_selection_cleared")
+	if not bool(report_panel.visible):
+		push_error("SmokeTest: pinned report must stay open on unlock")
+		instance.queue_free(); return false
+	report_panel.set_meta("chrome_pinned", false)
+
 	# (5) 诊断选中：INSPECT 写 selection，SelectionLayer 存在。
 	var selection_layer: Node = instance.get_node_or_null("DishView/SelectionLayer")
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
@@ -3358,6 +3500,18 @@ func _check_ui_chrome_and_filters() -> bool:
 	var selection: Array = manager.get("selection") as Array
 	if selection.size() != 1 or int(selection[0]) != spawned:
 		push_error("SmokeTest: INSPECT did not select cell")
+		instance.queue_free(); return false
+	# v0.14.0：诊断快照必须跟随 tick 实时派生，不再停在点击瞬间。
+	var live_info_t0: Dictionary = manager.call("get_live_inspection") as Dictionary
+	var inspect_label: Label = report_panel.find_child("InspectText", true, false) as Label
+	if inspect_label == null:
+		push_error("SmokeTest: inspect text label missing")
+		instance.queue_free(); return false
+	report_panel.call("refresh_now")
+	manager.set("_sim_tick", int(live_info_t0.get("tick", 0)) + 42)
+	var live_info_t1: Dictionary = manager.call("get_live_inspection") as Dictionary
+	if int(live_info_t1.get("tick", -1)) <= int(live_info_t0.get("tick", -1)):
+		push_error("SmokeTest: live inspection snapshot did not follow sim tick")
 		instance.queue_free(); return false
 	# 解锁三种入口：面板按钮（经 CommandBus）、Esc 命令、诊断点空白。
 	bus.call("enqueue", {"type": "CLEAR_SELECTION"})

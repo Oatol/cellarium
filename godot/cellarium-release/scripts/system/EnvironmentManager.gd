@@ -5,6 +5,7 @@ extends Node
 const PRESET_SCRIPT: GDScript = preload("res://scripts/core/data/EnvironmentPreset.gd")
 const CONTEXT_SCRIPT: GDScript = preload("res://scripts/core/data/DevelopmentContext.gd")
 const FIELD_SCRIPT: GDScript = preload("res://scripts/system/EnvironmentField.gd")
+const FOOD_STORE_SCRIPT: GDScript = preload("res://scripts/core/data/FoodStore.gd")
 const FIELD_RESOLUTION: int = 32
 
 ## v0.13.0：环境设置快照键。只做版本化追加，不改 schema_version。
@@ -38,6 +39,8 @@ var preset: Resource = null
 var dev_context: RefCounted = null
 var field: RefCounted = FIELD_SCRIPT.new() as RefCounted
 var field_diagnostics: Dictionary = {}
+## v0.14.0：只读派生的食物实体池（Cell Lab 定长池方法），能量真相仍是五通道场。
+var food_store: RefCounted = FOOD_STORE_SCRIPT.new() as RefCounted
 ## 阶段10：每 tick 一次批量采样，行为/代谢复用同一批结果，不再逐细胞触发小回读。
 var _sample_positions: Array[Vector2] = []
 var _field_samples: Array[PackedFloat32Array] = []
@@ -137,6 +140,9 @@ func apply_nutrient_sources(tick_index: int) -> bool:
 	var radial_bias: float = lerpf(0.55, 1.8, clampf(food_layer, 0.0, 1.0))
 	var radial: float = pow(sqrt(radius_seed), radial_bias) * 0.94
 	var source_position: Vector2 = dish_center + Vector2(cos(angle_seed * TAU), sin(angle_seed * TAU)) * dish_radius * radial
+	# v0.14.0：同一确定型投放位置派生一个可见食物实体（只读视图，不写场/能量/hash）。
+	var coating: float = clampf(food_coated_ratio * 0.5 + _hash_unit(tick_index, 0x3c6ef372, 0x2468ace0) * food_coated_ratio, 0.0, 1.0)
+	food_store.call("spawn", source_position, maxf(0.02, food_spawn_amount), coating)
 	var grid: Vector2i = field.call("get_grid_position", source_position)
 	var lump_radius: int = maxi(0, food_lump_radius)
 	var offsets: Array[Vector2i] = []
@@ -159,6 +165,15 @@ func apply_nutrient_sources(tick_index: int) -> bool:
 			grid.x + offset.x, grid.y + offset.y,
 			food_spawn_amount * weights[index] / total_weight)
 	return true
+
+func get_food_store() -> RefCounted:
+	return food_store
+
+## 食物实体质量衰减：纯视图池推进，不参与模拟 hash。
+func advance_food_entities(dt: float) -> int:
+	if food_store == null:
+		return 0
+	return int(food_store.call("advance", dt))
 
 func _hash_unit(a: int, b: int, c: int) -> float:
 	var hash_value: int = 0x811c9dc5

@@ -678,3 +678,33 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - 生态报告：`PanelChrome` 标题栏移到 `ChromeRoot` 索引 0（此前排在内容之后，按钮实际在底边），`visibility_changed` 同步状态；`AnalysisPanel` 6 tick 实时数字 + 30 tick 采样报告。
 - 指令集：修正 `DIVIDE` 操作数提示，新增完整帮助文本与「单细胞 / 分裂×1/×2/×3」模板。
 - 验证：发布工程与 D 盘运行工程均 `SCRIPTS=49 FAILURES=0 EXITCODE=0`。
+
+## 23. v0.14.0 性能根因与食物实体池（2026-11-18）
+
+### 23.1 「几个细胞也卡」的程序化测量
+
+新增 `tools/ViewCostProbe.gd`，无头运行、不截图、不动鼠标，120 tick 平均（µs/tick）：
+
+| 项 | 优化前 | 优化后 | 说明 |
+| --- | --- | --- | --- |
+| CPU 场扩散 | 18,923 | 1,335 | 真凶：每格新建 `[Vector2i...]` 数组 + 零平流仍做双线性 |
+| 场纹理重建 | 2,006 | 1,961 | UPSCALE 4→2 + 6 tick 节流；此为显式 mark_dirty 成本，实际按节流摊薄 |
+| 食物层重建 | 1,165 | 1,035 | 缓存格心，去每格 Vector2 分配；同样 6 tick 节流 |
+| 模拟 1 细胞 | 93 | 95 | 与细胞数相关的部分极小 |
+
+结论：卡顿是**固定成本**，与细胞数无关。Cell Lab 的流畅来自按需渲染与 O(1) 场采样，不是「细胞少」。
+
+### 23.2 Cell Lab 代码级对照（本轮 REA 实际返回）
+
+- `GenomePreviewView.<init>` 的 `setRenderMode(0)` = `RENDERMODE_WHEN_DIRTY`，按需渲染而非逐帧重画。证据 ID `ev_c248ea7a7bb218ac85dbd0596596dc87f8478d41dc2f14ba004635dbd665184f`。
+- `Environment.q` 64×64 双线性（`min(63,...)`），无整场上采样/回传。证据 ID `ev_50171d8029e53948268a782d4b966caaeae0fc79a581088694cfc87df6ca93cc`。
+- 构造期一次性预分配 `new Food[G2]` / `AdhesinLink[20]` / FloatBuffer/ShortBuffer，并含 "Too large timestep" 固定步长检查。证据 ID `ev_3d1b11f4044bcd77eb0ff6ff0bbe45c6402295acf13ce466d4a38da38e7dbae5`。
+- **指令序列问题**：Cell Lab **有**分散式基因规则（`Gene.f(int)` 位掩码 `((1<<i)&f777q)`，证据 ID `ev_a2929d3348d54f79781e8dfd481e24e639a761c2aa355c6f4d6b71e55e7b9ce3`；dev_ 词条 "After N splits: daughter→M" 等，证据 ID `ev_f5f7e7c3ab07327dca44d05d2d3ec784656b8036fd36fb6da24dfe33e07dcb8a`），但是位运算+字段读、O(N) 常数极小。我们 `advance_development_tick` 每发育个体每 tick 一条指令，同样可忽略。**结论：dev_program 不是卡顿来源。**
+
+### 23.3 食物实体池的规格修订与边界
+
+按 §20.5 的要求，先修订 v1.0 §2.2 与 v2.1 §0.3 / §11，再落地 `FoodStore.gd`：定长 128 池、`spawn` 池内追加、`advance` 质量线性衰减 + 池尾交换、`to_payload/from_payload` 存档、涂层字段。实体由 `apply_nutrient_sources()` 的确定型位置派生，**能量真相仍是五通道营养场**，不进 hash、不改 schema。这是派生实现，不是 Macro `Food[]` 的逐行移植（衰减系数按本项目质量标度取 0.11/s）。
+
+### 23.4 生态报告按钮的根因（反复修复的真正原因）
+
+前两次只改了 `PanelChrome` 内部排序，但 chrome 在 `GameHUD._ready()` 安装，而 `AnalysisPanel._ready()` 在其后创建 `_body` 并 `add_child` 到面板 —— 内容成为 `ChromeRoot` 的兄弟节点，覆盖标题栏并抢走鼠标事件。v0.14.0 把 `_build_panel_chrome()` 改为 `call_deferred()`，等所有面板 `_ready()` 完成后再安装；`PanelChrome.install()` 加幂等保护。这是按钮「点了没用」的真正根因。

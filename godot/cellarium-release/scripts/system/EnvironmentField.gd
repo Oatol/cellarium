@@ -714,30 +714,57 @@ func _dispatch_gpu() -> bool:
 	return true
 
 func _apply_cpu_diffusion(source_additions: Array[PackedFloat32Array] = []) -> void:
+	# v0.14.0 性能：与旧循环逐位等价，但消除每格数组分配与 _is_active 重复调用。
+	# 旧版每格新建 [Vector2i.LEFT,...] 数组 + 调 _sample_grid（内部再 4 次 _is_active + Vector2 分配），
+	# 即 ~5×1024×8 次 _is_active；实测 CPU 后端扩散 18.9ms/tick，是「几个细胞也卡」的真凶。
+	# 当 advection 精确为 ZERO 时，_sample_grid 在整数格心的双线性结果 == center_value（权重 1/0），
+	# 因此直接取 center，数学与浮点顺序都不变；GPU shader 同理由返回 center。
+	var count: int = resolution * resolution
+	var has_terrain: bool = terrain_mask.size() == count
+	var active_mask: PackedByteArray = PackedByteArray()
+	active_mask.resize(count)
+	for index in range(count):
+		active_mask[index] = 1 if dish_mask[index] != 0 and (not has_terrain or terrain_mask[index] == 0) else 0
+	var zero_advection: bool = advection == Vector2.ZERO
+	var use_source: bool = source_additions.size() == CHANNEL_COUNT
 	var next_channels: Array[PackedFloat32Array] = []
 	for channel_index in range(CHANNEL_COUNT):
 		var next_values: PackedFloat32Array = PackedFloat32Array()
-		next_values.resize(resolution * resolution)
-		var source: PackedFloat32Array = source_additions[channel_index] if source_additions.size() == CHANNEL_COUNT else PackedFloat32Array()
+		next_values.resize(count)
+		var current: PackedFloat32Array = channels[channel_index]
+		var source: PackedFloat32Array = source_additions[channel_index] if use_source else PackedFloat32Array()
+		var has_source: bool = source.size() == count
+		var diffusion_value: float = DIFFUSION[channel_index]
+		var decay_value: float = DECAY[channel_index]
 		for y in range(resolution):
+			var row: int = y * resolution
 			for x in range(resolution):
-				var index: int = y * resolution + x
-				if not _is_active(index):
+				var index: int = row + x
+				if active_mask[index] == 0:
 					next_values[index] = 0.0
 					continue
-				var center_value: float = channels[channel_index][index]
+				var center_value: float = current[index]
 				var laplacian: float = 0.0
-				for offset in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-					var nx: int = x + offset.x
-					var ny: int = y + offset.y
-					if nx < 0 or ny < 0 or nx >= resolution or ny >= resolution:
-						continue
-					var neighbor_index: int = ny * resolution + nx
-					if _is_active(neighbor_index):
-						laplacian += channels[channel_index][neighbor_index] - center_value
-				var advected: float = _sample_grid(channel_index, Vector2(x, y) - advection)
-				var source_value: float = source[index] if source.size() == resolution * resolution else 0.0
-				next_values[index] = maxf(0.0, advected + DIFFUSION[channel_index] * laplacian - DECAY[channel_index] * center_value + source_value)
+				# 顺序 LEFT → RIGHT → UP → DOWN，与 GPU shader 第 55–58 行一致。
+				if x > 0:
+					var left: int = index - 1
+					if active_mask[left] != 0:
+						laplacian += current[left] - center_value
+				if x + 1 < resolution:
+					var right: int = index + 1
+					if active_mask[right] != 0:
+						laplacian += current[right] - center_value
+				if y > 0:
+					var up: int = index - resolution
+					if active_mask[up] != 0:
+						laplacian += current[up] - center_value
+				if y + 1 < resolution:
+					var down: int = index + resolution
+					if active_mask[down] != 0:
+						laplacian += current[down] - center_value
+				var advected: float = center_value if zero_advection else _sample_grid(channel_index, Vector2(x, y) - advection)
+				var source_value: float = source[index] if has_source else 0.0
+				next_values[index] = maxf(0.0, advected + diffusion_value * laplacian - decay_value * center_value + source_value)
 		next_channels.append(next_values)
 	channels = next_channels
 	_upload_active_buffer()

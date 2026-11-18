@@ -27,6 +27,7 @@ const ENVIRONMENT_FIELD_KEYS: Array[String] = [
 @export var lens_row_path: NodePath = ^"MicroscopePanel/Panel/Content/LensRow"
 @export var view_row_path: NodePath = ^"MicroscopePanel/Panel/Content/ViewRow"
 @export var feedback_path: NodePath = ^"FeedbackLabel"
+@export var perf_label_path: NodePath = ^"PerfLabel"
 @export var speed_slider_path: NodePath = ^"SpeedPanel/Panel/SpeedRow/SpeedSlider"
 @export var speed_spin_path: NodePath = ^"SpeedPanel/Panel/SpeedRow/SpeedSpin"
 @export var speed_lod_path: NodePath = ^"SpeedPanel/Panel/SpeedRow/LodLabel"
@@ -67,10 +68,18 @@ var _speed_capped: bool = false
 var _panel_chromes: Dictionary = {}
 var _panel_toggles: Dictionary = {}
 var _panel_default_visible: Dictionary = {}
+## 对账缓存：避免 _process 每帧 get_node_or_null 做字符串路径查找。
+var _reconcile_targets: Array = []
 ## 光场可视化层（阶段 UI 调整）。
 var _field_layer: Node = null
 var _food_layer: Node = null
 var _selection_layer: Node = null
+## FPS/TPS 仪表：真实帧/ tick 计数，1 秒窗口；不在模拟状态内，不进 hash。
+var _perf_label: Label = null
+var _fps_frames: int = 0
+var _tps_ticks: int = 0
+var _perf_elapsed: float = 0.0
+var _last_tick_index: int = 0
 
 func _ready() -> void:
 	command_bus = get_node_or_null(command_bus_path)
@@ -79,6 +88,7 @@ func _ready() -> void:
 	organism_manager = get_node_or_null(organism_manager_path)
 	camera = get_node_or_null(camera_path) as Camera2D
 	_feedback_label = get_node_or_null(feedback_path) as Label
+	_perf_label = get_node_or_null(perf_label_path) as Label
 	_tools = CATALOG.call("tools")
 	_modes = CATALOG.call("modes")
 	_substrate = CATALOG.call("substrate")
@@ -93,21 +103,47 @@ func _ready() -> void:
 	_register_speed_controls()
 	_register_cell_editor()
 	_register_view_layers()
-	_build_panel_chrome()
+	# chrome 必须在所有面板自己的 _ready() 之后安装：AnalysisPanel / DevEditorPanel
+	# 在 _ready 里 add_child 内容，若 chrome 先装进空面板，内容会成为 ChromeRoot 的兄弟节点，
+	# 既覆盖标题栏（看起来像没移到顶部），又抢走图钉/关闭按钮的鼠标事件。
+	call_deferred("_build_panel_chrome")
 	_build_panel_toggles()
 	_register_semantic_ids()
 	_apply_mode(_selected_mode)
 	print("[GameHUD] ready tools=", _tools.size(), " modes=", _modes.size(), " substrate=", _substrate.size(), " semantic=", SEMANTIC.call("count"))
 
-func _process(_delta: float) -> void:
-	## 顶栏开关与各面板内部关闭按钮（编辑器 Apply/关闭）状态对账，避免失配。
-	for target_path in _panel_toggles:
-		if target_path == "@field" or target_path == "@food":
-			continue
-		var button: Button = _panel_toggles[target_path] as Button
-		var node: Node = get_node_or_null(target_path)
+func _process(delta: float) -> void:
+	_update_perf_readout(delta)
+	## 顶栏开关与各面板内部关闭按钮状态对账；节点引用在构建开关时缓存，避免每帧路径查找。
+	for entry in _reconcile_targets:
+		var button: Button = entry[0] as Button
+		var node: Node = entry[1] as Node
 		if button != null and node != null and button.is_pressed() != node.visible:
 			button.set_pressed_no_signal(node.visible)
+
+## FPS = 实际渲染帧数/秒；TPS = TickCore 实际推进 tick 数/秒（非 speed_scale × 60）。
+func _update_perf_readout(delta: float) -> void:
+	if _perf_label == null:
+		return
+	_fps_frames += 1
+	var current_tick: int = int(tick_core.get("tick_index")) if tick_core != null else 0
+	if current_tick > _last_tick_index:
+		_tps_ticks += current_tick - _last_tick_index
+	_last_tick_index = current_tick
+	_perf_elapsed += delta
+	if _perf_elapsed < 0.5:
+		return
+	var window: float = _perf_elapsed
+	_perf_elapsed = 0.0
+	var fps: int = int(round(float(_fps_frames) / window))
+	var tps: int = int(round(float(_tps_ticks) / window))
+	_fps_frames = 0
+	_tps_ticks = 0
+	var speed_text: String = str(float(tick_core.get("speed_scale"))) if tick_core != null else "?"
+	_perf_label.text = "FPS %d | TPS %d | 倍速 %s× | LOD %d" % [
+		fps, tps, speed_text,
+		int(tick_core.call("get_lod_level")) if tick_core != null and tick_core.has_method("get_lod_level") else 0,
+	]
 
 ## 光场/选区可视化层引用；光场默认可见，可在顶栏关闭。
 func _register_view_layers() -> void:
@@ -180,6 +216,8 @@ func _build_panel_toggles() -> void:
 			initial_pressed = bool(_food_layer.call("is_enabled"))
 		button.set_pressed_no_signal(initial_pressed)
 		_panel_toggles[target_path] = button
+		if target_path != "@field" and target_path != "@food" and target != null:
+			_reconcile_targets.append([button, target])
 		row.add_child(button)
 
 func _on_panel_toggle(pressed: bool, button: Button) -> void:

@@ -94,6 +94,33 @@ func _ready() -> void:
 func get_last_inspection() -> Dictionary:
 	return (last_inspection as Dictionary).duplicate(true)
 
+## 诊断锁定时按当前模拟状态派生实时快照（只读）：last_inspection 只记录点击瞬间的细胞索引，
+## 面板刷新时按该索引重采样，避免「实时 tick 会动但下面信息不刷新」。不写模拟状态、不进 hash。
+func get_live_inspection() -> Dictionary:
+	var base: Dictionary = (last_inspection as Dictionary).duplicate(true)
+	if base.is_empty() or selection.is_empty():
+		return base
+	var index: int = int(base.get("cell_index", -1))
+	if index < 0 or index >= int(cells.call("size")):
+		return base
+	if int(cells.get("cell_alive")[index]) == 0:
+		return base
+	var org_id: int = int(cells.get("cell_org_id")[index])
+	var sampled: PackedFloat32Array = PackedFloat32Array()
+	if environment_manager != null:
+		sampled = environment_manager.call("sample_fields", cells.call("get_position", index))
+	base["tick"] = _sim_tick
+	base["energy"] = float(cells.get("cell_energy")[index])
+	base["cell_type"] = int(cells.get("cell_type")[index])
+	base["position"] = cells.call("get_position", index)
+	base["radius"] = cell_radius
+	base["links"] = int(cells.get("cell_link_count")[index])
+	base["species_id"] = int(organisms.get("org_species_id")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_species_id").size()) else -1
+	base["age"] = int(organisms.get("org_age")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_age").size()) else -1
+	base["health"] = float(organisms.get("org_health")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_health").size()) else 0.0
+	base["field"] = sampled.duplicate()
+	return base
+
 func get_last_tool_message() -> String:
 	return last_tool_message
 

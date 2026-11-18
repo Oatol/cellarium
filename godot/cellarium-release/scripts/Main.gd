@@ -117,6 +117,7 @@ func _on_tick_advanced(tick_index: int) -> void:
 	if environment_manager != null:
 		# v0.13.0：Macro 式营养源按 tick 确定型投放，再进入场扩散。
 		environment_manager.call("apply_nutrient_sources", tick_index)
+		environment_manager.call("advance_food_entities", 1.0 / 60.0)
 		environment_manager.call("advance_field_tick")
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
@@ -144,8 +145,12 @@ func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 		if not tool_message.is_empty():
 			game_hud.call("show_tool_message", tool_message)
 	# 细胞诊断命中后自动弹出分析面板，展示逐项状态（参考 Cell Lab 诊断工具）。
-	if command.get("type", "") == "INSPECT" and result >= 0 and analysis_panel != null and analysis_panel.has_method("show_inspection"):
-		analysis_panel.call("show_inspection")
+	if command.get("type", "") == "INSPECT" and analysis_panel != null and analysis_panel.has_method("show_inspection"):
+		# 落空（点空白处）在 OrganismManager 里已解除锁定：此时按解锁流程收起面板。
+		if result >= 0:
+			analysis_panel.call("show_inspection")
+		elif analysis_panel.has_method("on_selection_cleared"):
+			analysis_panel.call("on_selection_cleared")
 	if command.get("type", "") == "CLEAR_SELECTION" and analysis_panel != null and analysis_panel.has_method("refresh_inspection"):
 		analysis_panel.call("refresh_inspection")
 	print("[cellarium] cmd ", command.get("type", "?"), " result=", result, " @tick ", tick_index)

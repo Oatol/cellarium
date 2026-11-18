@@ -65,6 +65,10 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 
 	if env_manager != null:
 		snapshot["environment_settings"] = (env_manager.call("get_environment_settings") as Dictionary).duplicate(true)
+		if env_manager.has_method("get_food_store"):
+			var food_store: RefCounted = env_manager.call("get_food_store") as RefCounted
+			if food_store != null and food_store.has_method("to_payload"):
+				snapshot["food_entities"] = food_store.call("to_payload")
 		var field: RefCounted = env_manager.get("field") as RefCounted
 		if field != null:
 			snapshot["field"] = {
@@ -160,6 +164,13 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 	var environment_settings: Dictionary = snapshot.get("environment_settings", {}) as Dictionary
 	if env_manager != null and not environment_settings.is_empty():
 		env_manager.call("apply_environment_settings", environment_settings)
+
+	var food_data: Dictionary = snapshot.get("food_entities", {}) as Dictionary
+	if env_manager != null and not food_data.is_empty() and env_manager.has_method("get_food_store"):
+		var food_store: RefCounted = env_manager.call("get_food_store") as RefCounted
+		if food_store != null and food_store.has_method("from_payload"):
+			if not bool(food_store.call("from_payload", food_data)):
+				push_warning("SaveManager: food entity payload rejected, keeping empty pool")
 
 	var field_data: Dictionary = snapshot.get("field", {}) as Dictionary
 	if env_manager != null and not field_data.is_empty():

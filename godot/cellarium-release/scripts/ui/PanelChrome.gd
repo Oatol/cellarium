@@ -32,6 +32,16 @@ func _init(target: PanelContainer, label: String, pin: bool = false) -> void:
 func install() -> bool:
 	if panel == null:
 		return false
+	# 幂等：面板可能被重复 install（热重载/测试反复实例化场景）。已有 ChromeRoot 时只更新文案。
+	var existing_root: Node = panel.get_node_or_null("ChromeRoot")
+	if existing_root != null:
+		for child in existing_root.get_children():
+			if child is Label and child.name == "ChromeTitle":
+				(child as Label).text = title_text
+		panel.set_meta("chrome_pinned", pinned)
+		if not panel.is_connected("visibility_changed", Callable(self, "_on_panel_visibility_changed")):
+			panel.visibility_changed.connect(_on_panel_visibility_changed)
+		return true
 	# 把现有子节点（通常是唯一 MarginContainer）收拢进 VBoxContainer。
 	var existing: Array[Node] = panel.get_children()
 	var vbox: VBoxContainer = VBoxContainer.new()
@@ -49,6 +59,7 @@ func install() -> bool:
 	_handle.gui_input.connect(_on_handle_gui_input)
 
 	var title_label: Label = Label.new()
+	title_label.name = "ChromeTitle"
 	title_label.text = title_text
 	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_label.add_theme_font_size_override("font_size", 12)

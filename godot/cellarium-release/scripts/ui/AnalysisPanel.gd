@@ -30,13 +30,12 @@ func _on_tick_for_refresh(tick_index: int) -> void:
 	_tick_since_refresh += 1
 	if not visible:
 		return
-	# 统计采样每 30 tick 更新一次；tick / 活体数等实时数字每 6 tick 更新，避免看起来「不刷新」。
+	# 统计采样每 30 tick 更新一次；tick/活体数/诊断快照每 6 tick 更新，避免看起来「不刷新」。
 	if _tick_since_refresh >= REPORT_REFRESH_TICKS:
 		_tick_since_refresh = 0
 		_refresh()
 	elif _tick_since_refresh % LIVE_REFRESH_TICKS == 0:
 		_refresh_live()
-	elif organism_manager != null and organism_manager.has_method("get_last_inspection"):
 		_refresh_inspection()
 
 ## 供外部（含无头验收）强制刷新完整报告。
@@ -105,6 +104,7 @@ func _ready() -> void:
 	unlock_button.custom_minimum_size = Vector2(84, 24)
 	unlock_button.pressed.connect(_on_unlock_pressed)
 	_inspect_text = Label.new()
+	_inspect_text.name = "InspectText"
 	_inspect_text.text = "（用「细胞诊断」工具点击皿内细胞）"
 	_inspect_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_body.add_child(_inspect_title)
@@ -159,7 +159,11 @@ func _refresh_inspection() -> void:
 		return
 	if not organism_manager.has_method("get_last_inspection"):
 		return
-	var info: Dictionary = organism_manager.call("get_last_inspection") as Dictionary
+	var info: Dictionary = {}
+	if organism_manager.has_method("get_live_inspection"):
+		info = organism_manager.call("get_live_inspection") as Dictionary
+	else:
+		info = organism_manager.call("get_last_inspection") as Dictionary
 	if info.is_empty():
 		_inspect_text.text = "（用「细胞诊断」工具点击皿内细胞）"
 		return
@@ -194,7 +198,16 @@ func _on_unlock_pressed() -> void:
 	var tick_index: int = int(tick_core.get("tick_index")) if tick_core != null else 0
 	command_bus.call("execute_tick_commands", tick_index)
 	_refresh_inspection()
+	on_selection_cleared()
 
-## Main 在 CLEAR_SELECTION 执行后调用，清掉面板里的旧诊断文本。
+## 解锁/诊断落空后：默认自动收起报告页；只有手动按过图钉固定才保持打开。
+func on_selection_cleared() -> void:
+	if bool(get_meta("chrome_pinned", false)):
+		return
+	if _visible_state:
+		_set_visible(false)
+
+## Main 在 CLEAR_SELECTION / INSPECT 落空执行后调用，清掉旧诊断文本并按图钉状态决定是否收起。
 func refresh_inspection() -> void:
 	_refresh_inspection()
+	on_selection_cleared()
