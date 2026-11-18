@@ -1,11 +1,12 @@
 extends Control
 ## 统一「细胞编辑」面板：参考 Cell Lab / Macro 的编辑器布局（基因槽 + 分化程序 +
 ## 指令参数 + 规格参考 + 发育时间轴），吸收原「发育编辑」页的全部功能。
-## 唯一发育真相源是 draft Genome 的 dev_program（DIVIDE/DIFFERENTIATE/LINK）。
-## Cell Lab 专有的 40 Gene 槽 / Child1-4 / 信号 lane / 95 算子只作只读证据展示；GNP1 已冻结，
+## 唯一发育真相源：默认 FLAG_GENE_MODE 基因组（分裂质量 / 分裂即分化 / 黏附素连接），
+## 对应 Cell Lab Gene.b/c/i/j + 黏附素。dev_program 仅保留给 v0.14.x 及更早存档读取。
+## Cell Lab 专有的 40 Gene 槽 / 信号 lane / 95 算子只作只读证据展示；GNP1 已冻结，
 ## 不写入编码、不臆造字段。编辑只改 draft；Apply 经 signal → GameHUD → CommandBus 进入模拟。
-## 本面板不碰模拟状态、不改 dt；v0.14.1 起「生成黏附素」唯一例外，会写入 draft.flags bit0
-## （GNP1 已编码字段的版本化语义追加），因此会改变该基因组的 hash；其余 Macro 字段仍只展示。
+## 本面板不碰模拟状态、不改 dt；v0.14.1 起「生成黏附素」写入 draft.flags bit0，
+## v0.15.0 起基因模式写入 bit1，两者都会改变该基因组的 hash；其余 Macro 字段仍只展示。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
@@ -14,7 +15,7 @@ const VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.g
 const GENOME_PREVIEW_SCENE: PackedScene = preload("res://scenes/ui/GenomePreview.tscn")
 
 const TRAITS: Array[String] = ["速度", "感知", "外壳", "攻击", "繁殖", "代谢", "神经", "耐温"]
-const OPCODE_NAMES: Array[String] = ["DIVIDE 分裂", "DIFFERENTIATE 分化", "LINK 连接"]
+const OPCODE_NAMES: Array[String] = ["（旧存档）DIVIDE", "（旧存档）DIFFERENTIATE", "（旧存档）LINK · 已移除"]
 const OPCODE_SHORT: Array[String] = ["DIVIDE", "DIFF", "LINK"]
 const MAX_DEV_INSTRUCTIONS: int = 64
 const CHANNEL_NAMES: Array[String] = ["营养0", "温度1", "氧气2", "光照3", "信号4"]
@@ -68,26 +69,51 @@ func _ready() -> void:
 	draft = (GENOME_SCRIPT as Script).new() as RefCounted
 	_reset_draft()
 	_build_ui()
+	_hide_legacy_instruction_ui()
 	_refresh_all()
+
+## v0.15.0：新基因组一律基因模式，指令序列 UI 全部隐藏；
+## 节点保留以便读取 v0.14.x 存档，但用户不再看到 DIVIDE/DIFFERENTIATE/LINK。
+func _hide_legacy_instruction_ui() -> void:
+	for node_name in ["TemplateRow", "InstructionHeader", "InstructionScroll", "InstructionActions",
+			"DevTimelinePanel"]:
+		var node: Node = find_child(node_name, true, false)
+		if node != null and node is CanvasItem:
+			(node as CanvasItem).visible = false
+	var legacy_note: Node = find_child("DevLegacyNote", true, false)
+	if legacy_note != null and legacy_note is CanvasItem:
+		(legacy_note as CanvasItem).visible = false
+	var params: Node = find_child("LegacyInstructionParams", true, false)
+	if params != null and params is CanvasItem:
+		(params as CanvasItem).visible = false
 
 func _reset_draft() -> void:
 	if draft == null:
 		return
 	draft.set("version", 1)
-	draft.set("flags", 0)
+	var genome_script: Script = GENOME_SCRIPT as Script
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	draft.set("flags", gene_flag)
 	draft.set("respiration", 1)
 	draft.set("mutation_rate_exp", 0)
 	draft.set("loci", PackedByteArray())
 	draft.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
 	draft.call("set_development_program", default_dev_program())
+	draft.set("division_mass", 1.0)
+	draft.set("split_ratio", 0.5)
+	draft.set("max_divisions", 3)
+	draft.set("child_types", PackedByteArray([0, 2, 4, 10]))
+	draft.set("split_angles", PackedByteArray([0, 64, 128, 192]))
 	_macro_draft = default_macro_draft()
+	_sync_macro_to_draft()
 	_selected_instruction = 0
 
 static func default_macro_draft() -> Dictionary:
 	return {
-		"cell_type": 0, "make_glue": false,
-		"child1": 0, "child2": 0, "child3": 0, "child4": 0,
+		"cell_type": 0, "make_glue": true,
+		"child1": 0, "child2": 2, "child3": 4, "child4": 10,
 		"child1_angle": 0.0, "child2_angle": 0.25, "child3_angle": 0.5, "child4_angle": 0.75,
+		"division_mass": 1.0, "split_ratio": 0.5, "max_divisions": 3,
 		"split_mass": 0.5, "invert_split_mass": false, "nutrition_priority": 0.5,
 		"split_angle": 0.0, "split_angle2": 0.25, "ratio": 0.5, "ratio2": 0.5,
 		"stiffness": 0.5, "cell_size": 1.0, "max_connections": 4, "min_connections": 0,
@@ -96,19 +122,18 @@ static func default_macro_draft() -> Dictionary:
 	}
 
 static func default_dev_program() -> Array[Dictionary]:
-	# 4 细胞协作模板：结构核 + 运动/能量/信息三类分化，三条 LINK 连成一体。
-	# DIVIDE.c = 分裂间距；LINK.c = 静息长度。与原细胞编辑页完全一致的确定性模板。
-	return [
-		{"opcode": 0, "a": 0, "b": 0,   "c": 14},
-		{"opcode": 0, "a": 0, "b": 85,  "c": 14},
-		{"opcode": 0, "a": 1, "b": 170, "c": 14},
-		{"opcode": 1, "a": 1, "b": 2,   "c": 0},
-		{"opcode": 1, "a": 2, "b": 4,   "c": 0},
-		{"opcode": 1, "a": 3, "b": 5,   "c": 0},
-		{"opcode": 2, "a": 0, "b": 1,   "c": 14},
-		{"opcode": 2, "a": 0, "b": 2,   "c": 14},
-		{"opcode": 2, "a": 0, "b": 3,   "c": 14},
-	]
+	# v0.15.0 默认基因模式：不写指令。连接由黏附素决定，分化由 child_types 决定。
+	# 返回空数组；dev_program 仅用于读取 v0.14.x 及更早存档。
+	return []
+
+static func gene_help_text() -> String:
+	return (
+		"基因驱动发育（模仿 Cell Lab，无指令序列）\n"
+		+ "① 分裂质量 = 细胞能量达到该值时分裂（Cell Lab Gene.b）。截图里能量 87 不分裂，是因为旧模式被 dev_program 发育状态门控；本模式直接按阈值分裂。\n"
+		+ "② 分裂即分化：子代 1–4 类型对应 Cell Lab Gene.i/j 子槽，按分裂次数依次分配，无需 DIFFERENTIATE 指令。\n"
+		+ "③ 连接由「生成黏附素」决定（flags bit0）；勾选后亲子自动建立弹性连接，无需 LINK 指令（已移除）。\n"
+		+ "④ 分裂质量比 / 子代角度 / 最大分裂次数控制每次分裂的能量分配、方向与总次数。"
+	)
 
 ## 分裂模板：每条 DIVIDE 增加 1 个细胞；a=被分裂的母细胞索引，b=角度(0..255→0..360°)，
 ## c=亲子间距（世界单位，至少 2×静息半径，默认静态模板用 14）。
@@ -214,7 +239,7 @@ func _build_ui() -> void:
 	help_label.name = "InstructionHelpLabel"
 	help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help_label.add_theme_font_size_override("font_size", 11)
-	help_label.text = instruction_help_text()
+	help_label.text = gene_help_text()
 	help_margin.add_child(help_label)
 	help_panel.add_child(help_margin)
 	_content.add_child(help_panel)
@@ -230,6 +255,7 @@ func _build_ui() -> void:
 
 	# 底部时间轴。
 	var timeline_panel: PanelContainer = PanelContainer.new()
+	timeline_panel.name = "DevTimelinePanel"
 	timeline_panel.custom_minimum_size = Vector2(0, 96)
 	var timeline_margin: MarginContainer = MarginContainer.new()
 	timeline_margin.add_theme_constant_override("margin_left", 8)
@@ -277,6 +303,7 @@ func _build_left_panel() -> Control:
 	_tree_counter.text = "指令 0 / %d" % MAX_DEV_INSTRUCTIONS
 	# 标题行：折叠按钮 + 计数，避免指令很多时把面板撑到超出屏幕。
 	var tree_header: HBoxContainer = HBoxContainer.new()
+	tree_header.name = "InstructionHeader"
 	_tree_fold_button = _make_button("折叠指令", "折叠/展开指令序列（内容始终保留，只是不占纵向空间）")
 	_tree_fold_button.custom_minimum_size = Vector2(96, 24)
 	_tree_fold_button.pressed.connect(_on_toggle_tree_fold)
@@ -294,7 +321,8 @@ func _build_left_panel() -> Control:
 	_tree_scroll.add_child(_tree_rows)
 	box.add_child(_tree_scroll)
 	var actions: HBoxContainer = HBoxContainer.new()
-	var add_button: Button = _make_button("+ 指令", "追加一条 DIVIDE")
+	actions.name = "InstructionActions"
+	var add_button: Button = _make_button("+ 指令", "追加一条 DIVIDE（旧存档模式）")
 	add_button.pressed.connect(_on_add_instruction)
 	var up_button: Button = _make_button("↑", "上移选中指令")
 	up_button.pressed.connect(_on_move_up)
@@ -306,7 +334,8 @@ func _build_left_panel() -> Control:
 		actions.add_child(button)
 	box.add_child(actions)
 	var note: Label = Label.new()
-	note.text = "Cell Lab：Cell.I[40] 运行时 40 槽；本项目 GNP1 冻结，以 dev_program 为真相源。"
+	note.name = "DevLegacyNote"
+	note.text = "Cell Lab：Cell.I[40] 运行时 40 槽；本项目 GNP1 冻结，以基因模式为真相源。"
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	note.add_theme_font_size_override("font_size", 10)
 	box.add_child(note)
@@ -354,23 +383,25 @@ func _build_center_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("PARAM · 指令参数 / GNP1 八性状"))
+	box.add_child(_make_section_title("PARAM · GNP1 八性状"))
 
+	var legacy_params: VBoxContainer = VBoxContainer.new()
+	legacy_params.name = "LegacyInstructionParams"
 	_param_opcode = OptionButton.new()
 	for name_value in OPCODE_NAMES:
 		_param_opcode.add_item(name_value)
 	_param_opcode.item_selected.connect(_on_opcode_changed)
-	box.add_child(_param_opcode)
+	legacy_params.add_child(_param_opcode)
 	_param_hint = Label.new()
 	_param_hint.add_theme_font_size_override("font_size", 10)
-	box.add_child(_param_hint)
-
+	legacy_params.add_child(_param_hint)
 	_param_a = _make_operand_spin("a", 255)
 	_param_b = _make_operand_spin("b", 255)
 	_param_c = _make_operand_spin("c", 1023)
-	box.add_child(_labeled_spin("a", _param_a))
-	box.add_child(_labeled_spin("b", _param_b))
-	box.add_child(_labeled_spin("c", _param_c))
+	legacy_params.add_child(_labeled_spin("a", _param_a))
+	legacy_params.add_child(_labeled_spin("b", _param_b))
+	legacy_params.add_child(_labeled_spin("c", _param_c))
+	box.add_child(legacy_params)
 
 	box.add_child(_make_section_title("GNP1 八性状（染色体组型）"))
 	for i in range(TRAITS.size()):
@@ -449,8 +480,16 @@ func _build_right_panel() -> Control:
 		box.add_child(_make_macro_slider(angle_key, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
 			"seek_child%d_angle → Gene.f771k/f772l/z/A ÷ TAU" % child_index, 2))
 
-	box.add_child(_make_section_title("SPLIT · 分裂质量 / 角度 / 优先级"))
-	box.add_child(_make_macro_slider("split_mass", "分裂质量", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)", 2))
+	box.add_child(_make_section_title("GENE · 分裂规则（无指令序列）"))
+	box.add_child(_make_macro_slider("division_mass", "分裂质量（能量阈值）", 0.05, 100.0, 0.05,
+		"Gene.b：细胞能量达到该值即分裂；截图能量 87 不分裂正是旧模式缺此设置。", 2))
+	box.add_child(_make_macro_slider("split_ratio", "分裂质量比（母细胞保留）", 0.05, 0.95, 0.01,
+		"Gene.c：亲子能量按此比例分配，子代获得 1-ratio。", 2))
+	box.add_child(_make_macro_slider("max_divisions", "最大分裂次数", 0.0, 8.0, 1.0,
+		"最多分裂几次；最终细胞数 = 1 + 此值。", 0))
+
+	box.add_child(_make_section_title("SPLIT · Macro 参考字段（只读草案）"))
+	box.add_child(_make_macro_slider("split_mass", "分裂质量（Macro 比例）", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)", 2))
 	box.add_child(_make_macro_check("invert_split_mass", "反转分裂质量", "check_invert_split_mass → Gene.f768h"))
 	box.add_child(_make_macro_slider("nutrition_priority", "营养优先级", 0.0, 1.0, 0.01, "seek_prio → Gene.f773m", 2))
 	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU", 2))
@@ -564,25 +603,38 @@ func _format_macro_value(_key: String, value: float, digits: int) -> String:
 
 func _on_macro_bool_changed(value: bool, key: String) -> void:
 	_macro_draft[key] = value
-	if key == "make_glue":
-		_sync_glue_flag()
+	_sync_macro_to_draft()
 	_set_macro_status(key)
 
-## v0.14.1：黏附素勾选写入 Genome.flags bit0（已编码字段，不新增 schema）。
-## DIVIDE 执行时读该位自动 link 亲子，用户无需再写 LINK 指令。
-func _sync_glue_flag() -> void:
+## v0.14.1/v0.15.0：把 Macro 草案中真正落地的字段写入 Genome。
+## bit0 = 黏附素自动连接；bit1 = 基因模式（无指令序列）。
+## 分裂质量 / 质量比 / 最大分裂次数 / 子代类型 / 分裂角度对应 Cell Lab Gene.b/c/i/j。
+func _sync_macro_to_draft() -> void:
 	if draft == null:
 		return
-	var flag: int = int((GENOME_SCRIPT as Script).get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
-	var value: int = int(draft.get("flags"))
+	var constants: Dictionary = (GENOME_SCRIPT as Script).get_script_constant_map()
+	var glue_flag: int = int(constants.get("FLAG_GLUE_LINKS", 1))
+	var gene_flag: int = int(constants.get("FLAG_GENE_MODE", 2))
+	var flags_value: int = gene_flag
 	if bool(_macro_draft.get("make_glue", false)):
-		value |= flag
-	else:
-		value &= ~flag
-	draft.set("flags", value)
+		flags_value |= glue_flag
+	draft.set("flags", flags_value)
+	draft.set("division_mass", clampf(float(_macro_draft.get("division_mass", 1.0)), 0.05, 100.0))
+	draft.set("split_ratio", clampf(float(_macro_draft.get("split_ratio", 0.5)), 0.05, 0.95))
+	draft.set("max_divisions", clampi(int(round(float(_macro_draft.get("max_divisions", 3)))), 0, int(constants.get("MAX_GENE_DIVISIONS", 8))))
+	var child_types: PackedByteArray = PackedByteArray()
+	var split_angles: PackedByteArray = PackedByteArray()
+	for child_index in range(1, 5):
+		child_types.append(clampi(int(_macro_draft.get("child%d" % child_index, 0)), 0, 255))
+		split_angles.append(clampi(int(round(clampf(float(_macro_draft.get("child%d_angle" % child_index, 0.0)), 0.0, 1.0) * 255.0)), 0, 255))
+	draft.set("child_types", child_types)
+	draft.set("split_angles", split_angles)
+	# 基因模式下 dev_program 恒为空，指令仅存在于旧存档。
+	draft.call("set_development_program", [])
 
 func _on_macro_option_changed(index: int, key: String) -> void:
 	_macro_draft[key] = index
+	_sync_macro_to_draft()
 	_set_macro_status(key)
 
 func _on_macro_value_changed(value: float, key: String) -> void:
@@ -593,6 +645,7 @@ func _on_macro_value_changed(value: float, key: String) -> void:
 	var control: Dictionary = _macro_controls.get(key, {})
 	if control.has("value_label"):
 		(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 2)))
+	_sync_macro_to_draft()
 	_set_macro_status(key)
 
 func _set_macro_status(key: String) -> void:
@@ -600,9 +653,12 @@ func _set_macro_status(key: String) -> void:
 		return
 	if key == "make_glue":
 		var on: bool = bool(_macro_draft.get("make_glue", false))
-		_status_label.text = "生成黏附素%s：子代自动连接（写入 flags bit0，影响该基因组 hash）；其余 Macro 字段仅展示。" % ("已开启" if on else "已关闭")
+		_status_label.text = "生成黏附素%s：子代自动连接（写入 flags bit0，影响该基因组 hash）。" % ("已开启" if on else "已关闭")
 		return
-	_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / dev_program / 确定性 hash。" % key
+	if key == "division_mass" or key == "split_ratio" or key == "max_divisions" or key.begins_with("child"):
+		_status_label.text = "基因模式参数已改：%s · 写入 Genome（Cell Lab Gene.b/c/i/j），影响 hash。" % key
+		return
+	_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / 确定性 hash。" % key
 
 func get_macro_draft() -> Dictionary:
 	return (_macro_draft as Dictionary).duplicate(true)
@@ -619,7 +675,8 @@ func _refresh_all() -> void:
 func _sync_preview() -> void:
 	if _genome_preview == null or not _genome_preview.has_method("set_program"):
 		return
-	_genome_preview.call("set_program", _program(), _macro_draft)
+	var gene_mode: bool = draft != null and bool((GENOME_SCRIPT as Script).call("is_gene_mode", draft))
+	_genome_preview.call("set_program", _program(), _macro_draft, gene_mode)
 
 func _program() -> Array:
 	return [] if draft == null else draft.get("dev_program")
@@ -852,7 +909,7 @@ func _on_default() -> void:
 	_refresh_all()
 
 func _on_apply() -> void:
-	_sync_glue_flag()
+	_sync_macro_to_draft()
 	if draft == null or not bool(draft.call("is_valid")):
 		if _status_label != null:
 			_status_label.text = "草案无效：指令数超过 %d 或操作数越界" % MAX_DEV_INSTRUCTIONS
@@ -877,6 +934,7 @@ func get_type_id() -> int:
 
 ## 供 GameHUD 读取当前草案摘要（反馈用）。
 func draft_summary() -> String:
-	var program: Array = _program()
-	var glue_text: String = " · 黏附素自动连接" if bool(_macro_draft.get("make_glue", false)) else ""
-	return "细胞编辑草案：%d 指令 · 类型 %d · Macro 草案 %d 项%s" % [program.size(), _type_id, _macro_draft.size(), glue_text]
+	var mass_text: String = str(_macro_draft.get("division_mass", 1.0))
+	var divisions: int = int(round(float(_macro_draft.get("max_divisions", 3))))
+	var glue_text: String = " · 黏附连接" if bool(_macro_draft.get("make_glue", false)) else ""
+	return "基因模式：分裂质量 %s · 最多 %d 次分裂%s" % [mass_text, divisions, glue_text]

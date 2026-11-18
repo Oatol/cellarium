@@ -3,6 +3,7 @@ extends RefCounted
 ## 字节序列化由 GenomeCodec 负责；dev_program 是唯一发育结构真相源。
 
 const MAX_DEV_INSTRUCTIONS: int = 64
+const MAX_GENE_DIVISIONS: int = 8
 const MAX_OPCODE: int = 63
 const MAX_OPERAND_8: int = 255
 const MAX_OPERAND_10: int = 1023
@@ -16,8 +17,17 @@ const OP_LINK: int = 2
 ## 因此用户无需再单独写 LINK 指令。0 = 旧行为（需显式 LINK）。
 const FLAG_GLUE_LINKS: int = 1 << 0
 
+## v0.15.0 版本化追加：flags 位 1 表示「基因驱动发育」（模仿 Cell Lab，不用 dev_program 指令序列）。
+## 置位后：个体不经历指令发育期；分裂由 division_mass 能量阈值触发，子代类型按 child_types
+## 逐次 assigned（分裂即分化，对应 Cell Lab Gene.i/j），亲子连接由 FLAG_GLUE_LINKS 决定。
+## 该模式下 dev_program 为空；清零则保持 v0.14.x 的指令模式（旧存档完全兼容）。
+const FLAG_GENE_MODE: int = 1 << 1
+
 static func has_glue_links(genome: RefCounted) -> bool:
 	return genome != null and (int(genome.get("flags")) & FLAG_GLUE_LINKS) != 0
+
+static func is_gene_mode(genome: RefCounted) -> bool:
+	return genome != null and (int(genome.get("flags")) & FLAG_GENE_MODE) != 0
 
 var version: int = 1
 var flags: int = 0
@@ -26,6 +36,13 @@ var mutation_rate_exp: int = 0
 var loci: PackedByteArray = PackedByteArray()
 var traits: PackedByteArray = PackedByteArray()
 var dev_program: Array[Dictionary] = []
+## v0.15.0 基因驱动发育参数（Cell Lab Gene.b/c/i/j 语义）。不进 GNP1 冻结二进制，
+## 随存档 schema 版本化保存；仅 FLAG_GENE_MODE 置位时参与运行时与 hash。
+var division_mass: float = 1.0
+var split_ratio: float = 0.5
+var max_divisions: int = 3
+var child_types: PackedByteArray = PackedByteArray()
+var split_angles: PackedByteArray = PackedByteArray()
 ## 运行时谱系元数据（阶段 4）：不进 GNP1 二进制编解码（格式已冻结）。
 var species_id: int = 0
 var lineage_id: int = -1
@@ -57,6 +74,19 @@ static func distance(a: RefCounted, b: RefCounted) -> float:
 		for key in ["opcode", "a", "b", "c"]:
 			if int(ia.get(key, -1)) != int(ib.get(key, -1)):
 				program_distance += 1
+	# v0.15.0：基因模式参数参与物种距离，避免不同分裂阈值/子代类型被当成同种。
+	if is_gene_mode(a) or is_gene_mode(b):
+		var mass_a: float = float(a.get("division_mass")) if is_gene_mode(a) else 0.0
+		var mass_b: float = float(b.get("division_mass")) if is_gene_mode(b) else 0.0
+		var div_a: int = int(a.get("max_divisions")) if is_gene_mode(a) else 0
+		var div_b: int = int(b.get("max_divisions")) if is_gene_mode(b) else 0
+		program_distance += absi(int(round(mass_a * 10.0)) - int(round(mass_b * 10.0)))
+		program_distance += absi(div_a - div_b)
+		var types_a: PackedByteArray = a.get("child_types")
+		var types_b: PackedByteArray = b.get("child_types")
+		for i in range(mini(types_a.size(), types_b.size())):
+			if types_a[i] != types_b[i]:
+				program_distance += 1
 	return float(locus_distance) * 1.0 + float(trait_distance) * 0.05 + float(program_distance) * 0.5
 
 func is_valid() -> bool:
@@ -75,6 +105,14 @@ func is_valid() -> bool:
 			return false
 		if b < 0 or b > MAX_OPERAND_8 or c < 0 or c > MAX_OPERAND_10:
 			return false
+	if division_mass < 0.05 or division_mass > 100.0:
+		return false
+	if split_ratio < 0.05 or split_ratio > 0.95:
+		return false
+	if max_divisions < 0 or max_divisions > MAX_GENE_DIVISIONS:
+		return false
+	if child_types.size() > MAX_GENE_DIVISIONS or split_angles.size() > MAX_GENE_DIVISIONS:
+		return false
 	return true
 
 func set_development_program(instructions: Array) -> bool:
@@ -106,6 +144,16 @@ func hash() -> int:
 	var value: int = 2166136261
 	for byte_value in encoded:
 		value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
+	# v0.15.0：基因模式字段不在 GNP1 冻结二进制里，显式混入 hash；
+	# 旧模式（FLAG_GENE_MODE 清零）hash 与 v0.14.x 逐位一致。
+	if is_gene_mode(self):
+		for quantized in [int(round(division_mass * 1000000.0)), int(round(split_ratio * 1000000.0)), max_divisions]:
+			for shift in [0, 8, 16, 24]:
+				value = int((value ^ ((quantized >> shift) & 255)) * 16777619) & 0x7fffffff
+		for byte_value in child_types:
+			value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
+		for byte_value in split_angles:
+			value = int((value ^ int(byte_value)) * 16777619) & 0x7fffffff
 	return value
 
 func duplicate_genome() -> RefCounted:
@@ -118,6 +166,11 @@ func duplicate_genome() -> RefCounted:
 	copy.set("loci", loci.duplicate())
 	copy.set("traits", traits.duplicate())
 	copy.call("set_development_program", dev_program)
+	copy.set("division_mass", division_mass)
+	copy.set("split_ratio", split_ratio)
+	copy.set("max_divisions", max_divisions)
+	copy.set("child_types", child_types.duplicate())
+	copy.set("split_angles", split_angles.duplicate())
 	copy.set("species_id", species_id)
 	copy.set("lineage_id", lineage_id)
 	return copy

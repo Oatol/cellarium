@@ -190,6 +190,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0141_glue_link():
 		failures += 1
+	if not await _check_v0150_gene_save_roundtrip():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -2901,57 +2903,66 @@ func _check_multicell_editor() -> bool:
 		push_error("SmokeTest: multicell editor nodes missing")
 		instance.queue_free(); return false
 	tick_core.set("running", false)
-	if (editor.call("get_dev_program") as Array).size() != 9:
-		push_error("SmokeTest: editor default must be 4-cell cooperation template")
+	# v0.15.0：默认基因模式，无指令序列；分裂质量 / 分裂即分化 / 黏附素连接。
+	if not (editor.call("get_dev_program") as Array).is_empty():
+		push_error("SmokeTest: gene-mode editor default must have empty dev_program")
 		instance.queue_free(); return false
-	editor.call("set_dev_program", [])
-	if (editor.call("get_dev_program") as Array).size() != 0:
-		push_error("SmokeTest: single-cell clear failed")
+	var draft_ref: RefCounted = editor.call("get_draft") as RefCounted
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	if (int(draft_ref.get("flags")) & gene_flag) == 0 or (int(draft_ref.get("flags")) & glue_flag) == 0:
+		push_error("SmokeTest: default draft must be gene mode with adhesin")
 		instance.queue_free(); return false
-	editor.call("_on_load_template")
-	if (editor.call("get_dev_program") as Array).size() != 9:
-		push_error("SmokeTest: 4-cell template did not restore")
+	if absf(float(draft_ref.get("division_mass")) - 1.0) > 0.001 or int(draft_ref.get("max_divisions")) != 3:
+		push_error("SmokeTest: default division mass / max divisions wrong")
 		instance.queue_free(); return false
-	editor.call("_on_add_instruction")
-	if (editor.call("get_dev_program") as Array).size() != 10:
-		push_error("SmokeTest: add development instruction failed")
-		instance.queue_free(); return false
-	editor.call("_on_remove_instruction", 9)
-	if (editor.call("get_dev_program") as Array).size() != 9:
-		push_error("SmokeTest: remove development instruction failed")
-		instance.queue_free(); return false
-	editor.call("_on_operand_changed", 16.0, 0, "c")
-	var program: Array = editor.call("get_dev_program")
-	if int(program[0].get("c", 0)) != 16:
-		push_error("SmokeTest: development operand edit failed")
+	editor.call("_on_macro_value_changed", 2.5, "division_mass")
+	if absf(float(draft_ref.get("division_mass")) - 2.5) > 0.001:
+		push_error("SmokeTest: division mass slider did not write draft")
 		instance.queue_free(); return false
 	editor.call("_on_apply")
 	if not bool(hud.call("has_draft")):
-		push_error("SmokeTest: multicell editor did not load draft into synthesizer")
+		push_error("SmokeTest: gene-mode editor did not load draft into synthesizer")
 		instance.queue_free(); return false
 	if not bool(hud.call("world_action", Vector2(250, 250), Vector2.ZERO)):
-		push_error("SmokeTest: synthesizer rejected multicell draft")
+		push_error("SmokeTest: synthesizer rejected gene-mode draft")
 		instance.queue_free(); return false
 	instance.call("_flush_commands_if_paused")
 	var cells: RefCounted = manager.get("cells") as RefCounted
 	var last_index: int = int(cells.call("size")) - 1
 	var org_id: int = int(cells.get("cell_org_id")[last_index])
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
-	if stored == null or (stored.get("dev_program") as Array) != program:
-		push_error("SmokeTest: edited development program did not survive CommandBus/GNP1")
+	if stored == null or not bool(genome_script.call("is_gene_mode", stored)) or absf(float(stored.get("division_mass")) - 2.5) > 0.001:
+		push_error("SmokeTest: gene parameters did not survive CommandBus/GNP1 (stored=%s mode=%s mass=%s)" % [
+			str(stored != null), str(stored != null and bool(genome_script.call("is_gene_mode", stored))),
+			str(float(stored.get("division_mass"))) if stored != null else "?"])
 		instance.queue_free(); return false
-	for _tick in range(12):
-		manager.call("advance_development_tick")
+	# 能量超过分裂质量时必须真分裂；黏附素让亲子自动连成 4 细胞 / 3 连接。
+	manager.set("autonomous_division_cooldown", 1)
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	energies[last_index] = 20.0
+	cells.set("cell_energy", energies)
+	for _tick in range(24):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
 	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var organisms_snapshot: RefCounted = manager.get("organisms") as RefCounted
+	var org_states: PackedByteArray = organisms_snapshot.get("org_state")
 	if int(cells.call("size")) != 4 or link_a.size() != 3:
-		push_error("SmokeTest: synthesizer-loaded program did not develop 4 cells / 3 links")
+		push_error("SmokeTest: division mass did not produce 4 cells / 3 adhesin links (cells=%d links=%d org_state=%d energy=%s enabled=%s cooldown=%d)" % [
+			int(cells.call("size")), link_a.size(), int(org_states[org_id]) if org_id < org_states.size() else -1,
+			str(cells.get("cell_energy")), str(manager.get("autonomous_division_enabled")), int(manager.get("autonomous_division_cooldown"))])
+		instance.queue_free(); return false
+	var child_type_values: PackedByteArray = cells.get("cell_type")
+	if int(child_type_values[last_index + 2]) != 2:
+		push_error("SmokeTest: division must differentiate child to child2 type (got %d)" % int(child_type_values[last_index + 2]))
 		instance.queue_free(); return false
 	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
 	if _min_alive_distance(cells) < float(shape.call("min_center_distance")) - 0.5:
-		push_error("SmokeTest: synthesizer-loaded organism cells overlap")
+		push_error("SmokeTest: gene-mode organism cells overlap")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK multicell editor / dev instructions / synthesizer GNP1 round-trip / no overlap")
+	print("SmokeTest: OK gene-mode editor / division mass / differentiation / adhesin / synthesizer round-trip")
 	return true
 
 func _check_shape_radius_and_motion() -> bool:
@@ -3204,124 +3215,64 @@ func _check_dev_editor_landing() -> bool:
 	if dev.get_node_or_null("Panel/Content") == null:
 		push_error("SmokeTest: dev editor content skeleton missing")
 		dev.queue_free(); return false
-	# 默认模板 = 9 指令（4 细胞 + 3 连接），同时反映到左栏树与底部时间轴。
-	var program: Array = dev.call("_program") as Array
-	if program.size() != 9:
-		push_error("SmokeTest: dev editor default program size != 9")
+	# v0.15.0：默认基因模式，dev_program 为空；DIVIDE/DIFFERENTIATE/LINK UI 全部隐藏。
+	if not (dev.call("_program") as Array).is_empty():
+		push_error("SmokeTest: gene-mode editor must have empty dev_program")
 		dev.queue_free(); return false
-	var tree_rows: VBoxContainer = dev.get("_tree_rows") as VBoxContainer
-	var timeline: HBoxContainer = dev.get("_timeline_rows") as HBoxContainer
-	if tree_rows == null or tree_rows.get_child_count() < 9:
-		push_error("SmokeTest: dev editor tree rows not built")
-		dev.queue_free(); return false
-	if timeline == null or timeline.get_child_count() != 9:
-		push_error("SmokeTest: dev editor timeline not built")
-		dev.queue_free(); return false
+	for legacy_name in ["TemplateRow", "InstructionScroll", "DevTimelinePanel", "LegacyInstructionParams"]:
+		var legacy_node: Node = dev.find_child(legacy_name, true, false)
+		if legacy_node == null or (legacy_node is CanvasItem and bool((legacy_node as CanvasItem).visible)):
+			push_error("SmokeTest: legacy instruction UI must be hidden (" + legacy_name + ")")
+			dev.queue_free(); return false
 	var gene_labels: Array = dev.get("_gene_slot_labels") as Array
 	if gene_labels == null or gene_labels.size() != 40 or not str((gene_labels[0] as Label).text).contains("速度"):
 		push_error("SmokeTest: Cell Lab 40 gene slots not built")
 		dev.queue_free(); return false
-	# v0.13.0：Macro 发育字段以可编辑草案展示，但不进入 GNP1 hash / dev_program。
 	var macro_draft: Dictionary = dev.call("get_macro_draft") as Dictionary
 	var macro_controls: Dictionary = dev.get("_macro_controls") as Dictionary
-	if macro_draft.size() != 26 or macro_controls.size() != 26:
-		push_error("SmokeTest: Macro draft controls incomplete")
+	if macro_draft.size() != 29 or macro_controls.size() != 29:
+		push_error("SmokeTest: Macro draft controls incomplete (%d/%d)" % [macro_draft.size(), macro_controls.size()])
 		dev.queue_free(); return false
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
 	var draft_ref: RefCounted = dev.get("draft") as RefCounted
 	var draft_hash_before: int = int(draft_ref.call("hash"))
 	dev.call("_on_macro_value_changed", 0.8, "split_mass")
 	if int(draft_ref.call("hash")) != draft_hash_before:
-		push_error("SmokeTest: non-glue Macro field must not change GNP1 hash")
+		push_error("SmokeTest: non-gene Macro field must not change GNP1 hash")
 		dev.queue_free(); return false
-	dev.call("_on_macro_bool_changed", true, "make_glue")
-	if not bool((dev.call("get_macro_draft") as Dictionary).get("make_glue", false)) or absf(float((dev.call("get_macro_draft") as Dictionary).get("split_mass", 0.0)) - 0.8) > 0.001:
-		push_error("SmokeTest: Macro draft edits did not persist")
+	# 分裂质量属于真正落地的 Cell Lab Gene.b 参数，必须写入 Genome 并改变 hash。
+	dev.call("_on_macro_value_changed", 2.0, "division_mass")
+	if absf(float(draft_ref.get("division_mass")) - 2.0) > 0.001 or int(draft_ref.call("hash")) == draft_hash_before:
+		push_error("SmokeTest: division mass must write Genome and change hash")
 		dev.queue_free(); return false
-	# v0.14.1：make_glue 是版本化语义追加，写入已编码 flags 位并改变 hash；其他 Macro 字段不改变。
-	if (int(draft_ref.get("flags")) & glue_flag) == 0 or int(draft_ref.call("hash")) == draft_hash_before:
-		push_error("SmokeTest: make_glue must map to Genome.flags bit0 and change hash")
+	if (int(draft_ref.get("flags")) & gene_flag) == 0:
+		push_error("SmokeTest: draft must be gene mode")
 		dev.queue_free(); return false
+	var gene_hash_before: int = int(draft_ref.call("hash"))
 	dev.call("_on_macro_bool_changed", false, "make_glue")
-	if (int(draft_ref.get("flags")) & glue_flag) != 0 or int(draft_ref.call("hash")) != draft_hash_before:
-		push_error("SmokeTest: make_glue off must clear flags bit0 and restore hash")
+	if (int(draft_ref.get("flags")) & glue_flag) != 0 or int(draft_ref.call("hash")) == gene_hash_before:
+		push_error("SmokeTest: make_glue off must clear flags bit0 and change hash")
 		dev.queue_free(); return false
 	dev.call("_on_macro_bool_changed", true, "make_glue")
-	# 编辑 a/b/c → 写回 draft.dev_program（真实双向，非静态展示）。
-	dev.call("_on_tree_selected", 0)
-	dev.get("_param_a").set_value(9.0)
-	if int((dev.call("_program") as Array)[0].get("a", -1)) != 9:
-		push_error("SmokeTest: dev editor operand edit not written back")
+	if (int(draft_ref.get("flags")) & glue_flag) == 0:
+		push_error("SmokeTest: make_glue on must set flags bit0")
 		dev.queue_free(); return false
-	# 追加 / 上移 / 删除 指令。
-	var before_add: int = (dev.call("_program") as Array).size()
-	dev.call("_on_add_instruction")
-	if (dev.call("_program") as Array).size() != before_add + 1:
-		push_error("SmokeTest: dev editor add instruction failed")
-		dev.queue_free(); return false
-	dev.call("_on_remove_instruction")
-	if (dev.call("_program") as Array).size() != before_add:
-		push_error("SmokeTest: dev editor remove instruction failed")
-		dev.queue_free(); return false
-	# 清空 → 单细胞；再恢复模板。
-	dev.call("_on_clear_program")
-	if not (dev.call("_program") as Array).is_empty():
-		push_error("SmokeTest: dev editor clear program failed")
-		dev.queue_free(); return false
-	dev.call("_on_load_template")
-	if (dev.call("_program") as Array).size() != 9:
-		push_error("SmokeTest: dev editor load template failed")
-		dev.queue_free(); return false
-	# v0.13.1：指令集说明 + 分裂快捷模板，必须能一键得到可分裂的 dev_program。
-	var help_node: Node = dev.find_child("InstructionHelpLabel", true, false)
-	if help_node == null or not str(help_node.get("text")).contains("DIVIDE") or not str(help_node.get("text")).contains("装载合成器"):
-		push_error("SmokeTest: instruction help text missing or incomplete")
-		dev.queue_free(); return false
-	if not str(dev.call("_operand_hint", 0)).contains("母细胞索引"):
-		push_error("SmokeTest: DIVIDE operand hint still inaccurate")
-		dev.queue_free(); return false
-	var template_row: Node = dev.find_child("TemplateRow", true, false)
-	if template_row == null or template_row.get_child_count() < 5:
-		push_error("SmokeTest: division template row missing")
-		dev.queue_free(); return false
-	for divide_count in [1, 2, 3]:
-		dev.call("_on_load_division_template", divide_count)
-		var template_program: Array = dev.call("_program") as Array
-		if template_program.size() != divide_count:
-			push_error("SmokeTest: division template %d has wrong instruction count" % divide_count)
-			dev.queue_free(); return false
-		for instruction in template_program:
-			if int(instruction.get("opcode", -1)) != 0 or int(instruction.get("a", -1)) != 0:
-				push_error("SmokeTest: division template must divide the zygote (cell 0)")
-				dev.queue_free(); return false
-	# v0.14.0：指令序列可折叠 + 滚动，避免指令多了把 UI 撑爆。
-	var instruction_scroll: Node = dev.find_child("InstructionScroll", true, false)
-	if instruction_scroll == null or not (instruction_scroll is ScrollContainer):
-		push_error("SmokeTest: instruction scroll container missing")
-		dev.queue_free(); return false
-	var timeline_scroll: Node = dev.find_child("TimelineScroll", true, false)
-	if timeline_scroll == null or not (timeline_scroll is ScrollContainer):
-		push_error("SmokeTest: timeline scroll container missing")
-		dev.queue_free(); return false
-	dev.call("_on_toggle_tree_fold")
-	if bool(instruction_scroll.visible):
-		push_error("SmokeTest: instruction fold did not hide list")
-		dev.queue_free(); return false
-	dev.call("_on_toggle_tree_fold")
-	if not bool(instruction_scroll.visible):
-		push_error("SmokeTest: instruction unfold did not restore list")
-		dev.queue_free(); return false
-	# v0.13.1：发育预览只读重建 dev_program 状态，且可逐步查看；不得污染 GNP1 hash。
+	# 基因模式发育预览：分裂次数 → 状态数，黏附素 → 亲子连接，child 类型 → 分裂即分化。
 	var preview_node: Node = dev.find_child("GenomePreview", true, false)
 	if preview_node == null or preview_node.find_child("Canvas", true, false) == null:
 		push_error("SmokeTest: genome preview scene missing from editor")
 		dev.queue_free(); return false
-	dev.call("_on_load_division_template", 2)
-	# 预览交互本身不得改 GNP1 hash（模板装载本来就会改 dev_program，所以基线在装载后取）。
-	var preview_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
-	if int(preview_node.call("get_state_count")) != 3 or int(preview_node.call("get_cell_count_at", 2)) != 3:
-		push_error("SmokeTest: genome preview did not derive 3 cells from 2 DIVIDEs")
+	var expected_states: int = int(macro_draft.get("max_divisions", 3)) + 1
+	if int(preview_node.call("get_state_count")) != expected_states or int(preview_node.call("get_cell_count_at", expected_states - 1)) != expected_states:
+		push_error("SmokeTest: gene preview did not derive division sequence")
+		dev.queue_free(); return false
+	if int(preview_node.call("get_link_count_at", expected_states - 1)) != int(macro_draft.get("max_divisions", 3)):
+		push_error("SmokeTest: gene preview must show adhesin parent-child links")
+		dev.queue_free(); return false
+	if int(preview_node.call("get_cell_type_at", 1, 1)) != int(macro_draft.get("child1", 0)):
+		push_error("SmokeTest: gene preview must show differentiated child type")
 		dev.queue_free(); return false
 	preview_node.call("set_playing", false)
 	preview_node.call("step_forward")
@@ -3332,10 +3283,12 @@ func _check_dev_editor_landing() -> bool:
 	if int(preview_node.call("get_cursor")) != 0:
 		push_error("SmokeTest: genome preview step back failed")
 		dev.queue_free(); return false
+	var preview_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
+	preview_node.call("set_program", [], {"cell_type": 0, "division_mass": 2.0, "max_divisions": 3, "make_glue": true, "child1": 0, "child2": 2, "child3": 4, "child4": 10, "child1_angle": 0.0, "child2_angle": 0.25, "child3_angle": 0.5, "child4_angle": 0.75}, true)
 	if int((dev.get("draft") as RefCounted).call("hash")) != preview_hash_before:
 		push_error("SmokeTest: genome preview must not change GNP1 hash")
 		dev.queue_free(); return false
-	dev.call("_on_load_template")
+	# Apply → draft_applied 信号携带合法 genome 草案（不直接写模拟）。
 	# Apply → draft_applied 信号携带合法 genome 草案（不直接写模拟）。
 	# lambda 按值捕获，用一个 RefCounted 包装器承接回调结果。
 	var applied: RefCounted = _make_signal_capture()
@@ -3732,6 +3685,50 @@ func _check_v0141_energy_flow_diagnostics() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK v0.14.1 energy flow diagnostics")
+	return true
+
+## v0.15.0：schema_version 2 版本化追加的基因参数必须随存档往返，不改 GNP1 二进制。
+func _check_v0150_gene_save_roundtrip() -> bool:
+	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	var genome: RefCounted = genome_script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.set("flags", gene_flag)
+	genome.set("division_mass", 3.5)
+	genome.set("split_ratio", 0.35)
+	genome.set("max_divisions", 5)
+	genome.set("child_types", PackedByteArray([0, 2, 4, 10]))
+	genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+	var org_id: int = int(manager.call("register_zygote", 0, 0, -1, genome, Vector2.ZERO, 0.8, 0))
+	if org_id < 0:
+		push_error("SmokeTest: gene save roundtrip registration failed")
+		instance.queue_free(); return false
+	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
+	if int(snapshot.get("schema_version", -1)) != 2:
+		push_error("SmokeTest: save schema must be version 2")
+		instance.queue_free(); return false
+	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	stored.set("division_mass", 99.0)
+	stored.set("max_divisions", 1)
+	if not bool(save_script.call("restore", snapshot, manager, env, tick_core)):
+		push_error("SmokeTest: gene-mode save restore failed")
+		instance.queue_free(); return false
+	stored = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	if stored == null or absf(float(stored.get("division_mass")) - 3.5) > 0.001 or int(stored.get("max_divisions")) != 5:
+		push_error("SmokeTest: gene fields lost during save roundtrip")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v2)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。

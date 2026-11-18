@@ -6,7 +6,11 @@ const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const CELL_SHAPE_SCRIPT: Script = preload("res://scripts/core/data/CellShape.gd")
 
 static func division_count(genome: RefCounted) -> int:
-	if genome == null or not genome.has_method("division_count"):
+	if genome == null:
+		return 0
+	if bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+		return clampi(int(genome.get("max_divisions")), 0, int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENE_DIVISIONS", 8)))
+	if not genome.has_method("division_count"):
 		return 0
 	return int(genome.call("division_count"))
 
@@ -15,6 +19,9 @@ static func expected_cell_count(genome: RefCounted) -> int:
 
 static func initial_lifecycle_state(genome: RefCounted, current_cell_count: int) -> int:
 	var states: Dictionary = ORGANISM_STORE_SCRIPT.get_script_constant_map()
+	# v0.15.0 基因模式：发育不靠指令，成熟由分裂质量阈值触发，出生即 MATURE。
+	if bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+		return int(states.get("STATE_MATURE", 2))
 	if current_cell_count == 1 and division_count(genome) == 0:
 		return int(states.get("STATE_MATURE", 2))
 	return int(states.get("STATE_DEVELOPING", 1))
@@ -61,6 +68,8 @@ static func execute_instruction(genome: RefCounted, cells: RefCounted, organisms
 			return -1
 		cells.get("cell_type")[a] = b
 	elif opcode == 2:
+		# v0.15.0：LINK 已从编辑器/新基因组中移除；此分支仅为兼容 v0.14.x 及更早存档而保留。
+		# 新基因组连接一律由 Genome.flags bit0 的黏附素语义在 DIVIDE 时自动建立。
 		if a < 0 or b < 0 or a >= cells.call("size") or b >= cells.call("size") or c <= 0:
 			return -1
 		if cells.get("cell_alive")[a] == 0 or cells.get("cell_alive")[b] == 0:

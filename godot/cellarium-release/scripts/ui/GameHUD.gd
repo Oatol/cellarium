@@ -791,6 +791,14 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 			return false
 		command["genome_bytes"] = CODEC.call("encode", _draft_genome)
 		command["type_id"] = _draft_type_id
+		# v0.15.0：GNP1 二进制冻结，基因模式参数走版本化命令 payload（也走 CommandBus）。
+		command["genome_gene"] = {
+			"division_mass": float(_draft_genome.get("division_mass")),
+			"split_ratio": float(_draft_genome.get("split_ratio")),
+			"max_divisions": int(_draft_genome.get("max_divisions")),
+			"child_types": (_draft_genome.get("child_types") as PackedByteArray).duplicate(),
+			"split_angles": (_draft_genome.get("split_angles") as PackedByteArray).duplicate(),
+		}
 	if tool_id == "INJECT_COLOR":
 		command["color_type"] = _inject_color_type
 	if tool_id == "INJECT_SIGNAL":

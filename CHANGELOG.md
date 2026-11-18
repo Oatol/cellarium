@@ -4,6 +4,30 @@
 
 ---
 
+## 0.15.0 — 2026-11-18
+
+**类型**：玩法机制版本化追加（基因驱动发育 / 移除指令序列；GNP1 二进制与单帧 12 tick 上限不动）
+**触发**：用户反馈「细胞能量 87 为什么不分裂、在细胞编辑加分裂质量设置到什么质量分裂；LINK 指令直接删除；模仿 Cell Lab 应该没有指令集（分裂即分化，连接由黏附素决定）；发育预览也要显示子代黏附连接」。
+
+### 根因
+
+- 程序化定位：`register_zygote()` 调用 `OrganismStore.add_developed_cell()` 时，后者无条件把 `org_state` 写回 `STATE_DEVELOPING`，覆盖初始 MATURE；而自主生命周期只处理 MATURE 个体。旧模式必须靠 `dev_program` 执行完才成熟，用户没写够指令就永久卡住，能量 87 也不分裂。阈值 `autonomous_division_energy=0.16` 还写死在管理器，编辑器无法设置。
+
+### 实现
+
+- **基因模式**：`Genome.flags` 位 1 置位进入，字节编码不变、清零完全兼容 v0.14.x。新增 `division_mass`（分裂能量阈值，Cell Lab `Gene.b`）、`split_ratio`（`Gene.c`）、`max_divisions`、`child_types`（`Gene.i/j` 分裂即分化）、`split_angles`。这些字段不进 GNP1 冻结二进制，走存档 `schema_version=2` 与 `CommandBus` 的 `genome_gene` payload，并显式混入 hash。
+- **分裂质量**：细胞编辑新增「分裂质量（能量阈值）」滑块（0.05–100）、分裂质量比、最大分裂次数；达到阈值即分裂，不再受 `dev_program` 发育期门控。`register_zygote()` 在 `add_developed_cell()` 后恢复初始状态，修复能量高却不分裂。
+- **移除指令集**：新基因组 `dev_program` 恒为空；编辑器隐藏指令树/时间轴/模板/opcode 参数（节点保留供旧存档读取）；`LINK` 与 `DIFFERENTIATE` 不再生成，`DevelopmentRules` 的 opcode 2 仅保留旧存档兼容。
+- **发育预览**：按分裂次数派生状态，子代类型取 `child1–4`，黏附素显示亲子连接，显示质量阈值；无 LINK 阶段。
+- **诊断**：`AnalysisPanel` 继续显示产能/耗能明细（v0.14.1），生态报告不受影响。
+
+### 验证 / 同步
+
+- 新增 SmokeTest：分裂质量写入与 hash 变化、旧 Macro 字段不写 GNP1、指令 UI 隐藏、能量达标 → 4 细胞 / 3 黏附连接、子代类型分化、预览连接数/类型、schema v2 存档往返。`SCRIPTS=51 FAILURES=0 EXITCODE=0`。
+- 已同步 D 盘运行工程并双工程验证；v1.1 §5.3、v2.1 §0.3/§11、分析文档 §25 同步。
+
+---
+
 ## 0.14.1 — 2026-11-18
 
 **类型**：反馈批次（参数校准 + 只读诊断 + GNP1 已有 flags 位的版本化语义追加；不改 tick 顺序、单帧 12 tick 上限、GNP1 布局、五通道 schema）

@@ -42,13 +42,25 @@ func _ready() -> void:
 		following.pressed.connect(_step_forward)
 	_rebuild_states()
 
-## 只读取 dev_program 与 Macro 草案；相同程序重复调用不会重置播放进度。
-func set_program(program: Array, macro_draft: Dictionary = {}) -> void:
-	var signature: String = str(program) + "|" + str(macro_draft.get("cell_type", 0))
+## 只读取 dev_program / 基因模式参数 / Macro 草案；相同参数重复调用不会重置播放进度。
+## v0.15.0：基因模式按分裂质量阈值推导分裂序列，子代类型来自 child1–4（分裂即分化），
+## 亲子连接来自黏附素 flag；不再有 LINK 指令阶段。
+func set_program(program: Array, macro_draft: Dictionary = {}, gene_mode: bool = false) -> void:
+	var signature: String = str(program) + "|" + str(gene_mode)
+	if gene_mode:
+		signature += "|" + str(macro_draft.get("cell_type", 0)) + "|" + str(macro_draft.get("division_mass", 1.0))
+		signature += "|" + str(macro_draft.get("max_divisions", 3)) + "|" + str(macro_draft.get("make_glue", false))
+		for child_index in range(1, 5):
+			signature += "|" + str(macro_draft.get("child%d" % child_index, 0)) + ":" + str(macro_draft.get("child%d_angle" % child_index, 0.0))
+	else:
+		signature += "|" + str(macro_draft.get("cell_type", 0))
 	if signature == _program_signature and not _states.is_empty():
 		return
 	_program_signature = signature
-	_rebuild_states_from(program, int(macro_draft.get("cell_type", 0)))
+	if gene_mode:
+		_rebuild_gene_states(macro_draft)
+	else:
+		_rebuild_states_from(program, int(macro_draft.get("cell_type", 0)))
 
 func get_state_count() -> int:
 	return _states.size()
@@ -60,6 +72,20 @@ func get_cell_count_at(state_index: int) -> int:
 	if state_index < 0 or state_index >= _states.size():
 		return 0
 	return int(_states[state_index].get("cells", []).size())
+
+## v0.15.0：供 SmokeTest / 外部只读检查预览里的黏附连接数量。
+func get_link_count_at(state_index: int) -> int:
+	if state_index < 0 or state_index >= _states.size():
+		return 0
+	return int((_states[state_index].get("links", []) as Array).size())
+
+func get_cell_type_at(state_index: int, cell_index: int) -> int:
+	if state_index < 0 or state_index >= _states.size():
+		return -1
+	var cells: Array = _states[state_index].get("cells", []) as Array
+	if cell_index < 0 or cell_index >= cells.size():
+		return -1
+	return int((cells[cell_index] as Dictionary).get("type", -1))
 
 func is_playing() -> bool:
 	return _playing
@@ -87,6 +113,48 @@ func _process(delta: float) -> void:
 
 func _rebuild_states() -> void:
 	_rebuild_states_from([], 0)
+
+## v0.15.0 基因模式：按分裂阈值/次数派生状态，子代类型即分化，黏附素即连接。
+func _rebuild_gene_states(draft: Dictionary) -> void:
+	_states.clear()
+	_cursor = 0
+	_elapsed = 0.0
+	var cell_type: int = clampi(int(draft.get("cell_type", 0)), 0, 255)
+	var mass: float = float(draft.get("division_mass", 1.0))
+	var divisions: int = clampi(int(round(float(draft.get("max_divisions", 3)))), 0, 8)
+	var glue: bool = bool(draft.get("make_glue", false))
+	var initial_cells: Array[Dictionary] = [{
+		"index": 0, "pos": Vector2.ZERO, "type": cell_type, "parent": -1, "born": true,
+	}]
+	_append_state(initial_cells, [], "合子 · 达到能量 %.2f 分裂" % mass, 0)
+	var links: Array = []
+	for division_index in range(divisions):
+		var cells: Array[Dictionary] = []
+		for source in _states[_states.size() - 1].get("cells", []):
+			cells.append((source as Dictionary).duplicate(true))
+		var parent_index: int = 0
+		var parent: Dictionary = cells[parent_index]
+		var child_type: int = clampi(int(draft.get("child%d" % (division_index + 1), 0)), 0, 255)
+		var angle: float = TAU * clampf(float(draft.get("child%d_angle" % (division_index + 1), 0.0)), 0.0, 1.0)
+		var separation: float = 14.0
+		var direction: Vector2 = Vector2(cos(angle), sin(angle))
+		var child_pos: Vector2 = (parent.get("pos", Vector2.ZERO) as Vector2) + direction * separation * 0.5
+		parent["pos"] = (parent.get("pos", Vector2.ZERO) as Vector2) - direction * separation * 0.5
+		for cell in cells:
+			cell["born"] = false
+		var child_index: int = cells.size()
+		cells.append({
+			"index": child_index, "pos": child_pos, "type": child_type,
+			"parent": parent_index, "born": true,
+		})
+		if glue:
+			links.append({"a": parent_index, "b": child_index, "rest": separation})
+		var caption: String = "分裂 %d · 质量 %.2f · 子代类型 %d%s" % [
+			division_index + 1, mass, child_type, " · 黏附连接" if glue else " · 无连接"]
+		_append_state(cells, links.duplicate(true), caption, 0)
+	_sync_caption()
+	if _canvas != null:
+		_canvas.queue_redraw()
 
 func _rebuild_states_from(program: Array, cell_type: int) -> void:
 	_states.clear()
@@ -131,11 +199,10 @@ func _rebuild_states_from(program: Array, cell_type: int) -> void:
 				cell["born"] = false
 			caption = "DIFFERENTIATE %d · 细胞 %d → 类型 %d" % [i, a, b]
 		elif opcode == 2:
-			if a >= 0 and b >= 0 and a < cells.size() and b < cells.size():
-				links.append({"a": a, "b": b, "rest": c})
+			# v0.15.0：LINK 已从新基因组移除；旧存档链接由黏附素语义派生，这里只保留状态不计连接。
 			for cell in cells:
 				cell["born"] = false
-			caption = "LINK %d · %d ↔ %d" % [i, a, b]
+			caption = "旧存档 LINK %d（已由黏附素决定连接）" % i
 		else:
 			caption = "未知指令 %d（忽略）" % i
 		_append_state(cells, links, caption, opcode)

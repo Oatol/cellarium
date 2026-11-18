@@ -731,3 +731,25 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 - `OrganismManager` 新增 `_energy_flow` 五组 PackedFloat64Array：`production`（环境摄入 + 捕食获得）、`self_cost`（基础代谢 + 运动）、`link_out`（传输给其他细胞）、`link_in`（连接转入）、`predation_drain`（被捕食抽走）。每 tick 覆盖、分裂/死亡后索引仍稳定（`remove_cell` 只置 alive=0、不压缩数组）。
 - `get_live_inspection()` 把这些字段与 `energy_flow_tick` 附加到只读诊断快照；`AnalysisPanel` 显示「产能 / 自身耗能 / 传输给其他细胞 / 连接转入」四项，捕食流失非零时追加一行。全部为派生读数，不写模拟状态、不进 hash、不进存档。
 - 验证：SmokeTest 构造同一 org 的两细胞 + 非零 transfer rate，断言诊断缓冲与面板文本都出现转账数值。
+
+## 25. v0.15.0 基因驱动发育与「能量高却不分裂」根因（2026-11-18）
+
+### 25.1 现象与根因
+
+用户截图：细胞能量 87.1230、光照 2.0，但不分裂；生态报告显示 `年龄 0 tick`、`个体 #0`、`活体个体 3`。
+
+程序化定位（不是猜）：`register_zygote()` 先用 `initial_lifecycle_state()` 决定初始状态，随后调用 `OrganismStore.add_developed_cell()`，后者**无条件**把 `org_state` 写回 `STATE_DEVELOPING`。因此任何个体出生后都停在发育期，而 `_apply_autonomous_lifecycle()` 只处理 `STATE_MATURE` 个体——能量再高也不会分裂。旧模式靠 `advance_development_tick()` 逐条执行 `dev_program` 后才成熟，用户没写够指令就永久卡住；且分裂阈值 `autonomous_division_energy=0.16` 写死在管理器里，编辑器无从设置。
+
+### 25.2 Cell Lab 代码证据（沿用已核对的静态分析）
+
+- `Gene.b` = 分裂阈值，`Gene.c` = 分裂质量比，`Gene.d/e/f` = 分裂角，`Gene.i/j` = 母/子切换的分化树子槽；`e(double)` 触发条件含「能量超过 `Gene.b`、年龄 `o > 0.5`、连接数 ≤ `Gene.u[9]`、池有空位」，执行时复制母细胞、按 `Gene.c` 分配能量、母/子分别切到 `Gene.i/j`（见 APK 解析报告 §11.4 与分析文档 §23.2）。
+- 黏附素由 `Gene.l` 等布尔开关在分裂时建连；Macro `AdhesinLink` 只确认结构，具体字段语义仍属未逐方法验证的边界。
+- 结论：Cell Lab **没有逐 tick 指令序列**，分裂/分化/连接都由基因参数驱动。本项目据此做版本化追加，不复制 Gene 表或物理实现。
+
+### 25.3 落地边界
+
+- `Genome.flags` 位 1 = 基因模式；位 0 = 黏附素（v0.14.1）。清零时旧 `dev_program` 行为与 hash 逐位不变。
+- 新字段 `division_mass` / `split_ratio` / `max_divisions` / `child_types` / `split_angles` 不进 GNP1 冻结二进制；走存档 `schema_version=2` 与 `CommandBus` 命令的 `genome_gene` payload，并显式混入 hash（仅基因模式）。
+- `LINK` / `DIFFERENTIATE` 从编辑器与新基因组移除；`DevelopmentRules` 的 opcode 2 分支仅保留给 v0.14.x 及更早存档解码，旧存档里的 LINK 仍可执行，避免破坏回放。
+- 发育预览改为按分裂次数派生状态：合子 → 逐次分裂（子代类型取 `child1–4`）→ 黏附素开启时显示亲子连接；不再有 LINK 阶段。
+- 验证：SmokeTest 覆盖分裂质量滑块写 Genome、CommandBus/GNP1 往返、能量达标后 4 细胞 / 3 黏附连接、子代类型分化、预览连接数、schema v2 存档往返；`SCRIPTS=51 FAILURES=0`。

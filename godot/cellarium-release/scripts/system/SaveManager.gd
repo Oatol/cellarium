@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 1
+const SCHEMA_VERSION: int = 2
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -59,6 +59,11 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 			"loci": _copy_array(genome.get("loci")),
 			"traits": _copy_array(genome.get("traits")),
 			"dev_program": _copy_program(genome.get("dev_program")),
+			"division_mass": float(genome.get("division_mass")),
+			"split_ratio": float(genome.get("split_ratio")),
+			"max_divisions": int(genome.get("max_divisions")),
+			"child_types": _copy_array(genome.get("child_types")),
+			"split_angles": _copy_array(genome.get("split_angles")),
 			"species_id": int(genome.get("species_id")),
 			"lineage_id": int(genome.get("lineage_id")),
 		})
@@ -118,7 +123,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 
 ## 从快照恢复全部状态。返回恢复是否成功。配置类字段（@export / 模块 configure 参数）不改。
 static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, tick_core: Node) -> bool:
-	if int(snapshot.get("schema_version", -1)) != SCHEMA_VERSION:
+	var snapshot_version: int = int(snapshot.get("schema_version", -1))
+	if snapshot_version < 1 or snapshot_version > SCHEMA_VERSION:
 		push_error("SaveManager: unsupported schema_version %s" % str(snapshot.get("schema_version", "?")))
 		return false
 	if str(snapshot.get("format", "")) != SAVE_FORMAT:
@@ -151,6 +157,11 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		genome.set("mutation_rate_exp", int(record.get("mutation_rate_exp", 0)))
 		genome.set("loci", _copy_array(record.get("loci")))
 		genome.set("traits", _copy_array(record.get("traits")))
+		genome.set("division_mass", float(record.get("division_mass", 1.0)))
+		genome.set("split_ratio", float(record.get("split_ratio", 0.5)))
+		genome.set("max_divisions", int(record.get("max_divisions", 3)))
+		genome.set("child_types", _copy_array(record.get("child_types", [])))
+		genome.set("split_angles", _copy_array(record.get("split_angles", [])))
 		genome.set("species_id", int(record.get("species_id", 0)))
 		genome.set("lineage_id", int(record.get("lineage_id", -1)))
 		if not bool(genome.call("set_development_program", record.get("dev_program", []))):

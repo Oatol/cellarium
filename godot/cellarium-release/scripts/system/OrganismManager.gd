@@ -369,6 +369,8 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 			_remove_organism_cells(org_id, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_TOXICITY"]))
 
 ## 发育程序完成后，能量充足的成熟个体按确定性的 tick/index 角度自主分裂。
+## v0.15.0 基因模式：不读 dev_program，改用基因组的 division_mass / split_ratio / child_types /
+## split_angles / max_divisions，对应 Cell Lab Gene.b/c/i/j；连接仍由黏附素 flag 决定。
 ## 不调用全局 RNG，不写除 CommandBus 外的命令通道；死亡仍由能量<=0 触发。
 func _apply_autonomous_lifecycle() -> void:
 	if not autonomous_division_enabled or autonomous_division_cooldown <= 0:
@@ -381,39 +383,66 @@ func _apply_autonomous_lifecycle() -> void:
 	var org_alive: PackedByteArray = organisms.get("org_alive")
 	var org_state: PackedByteArray = organisms.get("org_state")
 	var cell_counts: PackedInt32Array = organisms.get("cell_count")
-	var candidates: Array[int] = []
+	var candidates: Array[Dictionary] = []
 	for cell_index in range(energies.size()):
-		if alive[cell_index] == 0 or energies[cell_index] < autonomous_division_energy:
+		if alive[cell_index] == 0:
 			continue
 		var org_id: int = org_ids[cell_index]
 		if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or org_state[org_id] != mature_state:
 			continue
-		if int(cell_counts[org_id]) >= autonomous_max_cells_per_organism:
+		if not genomes.has(org_id):
+			continue
+		var genome: RefCounted = genomes[org_id] as RefCounted
+		var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
+		var threshold: float = maxf(0.05, float(genome.get("division_mass"))) if gene_mode else autonomous_division_energy
+		var max_cells: int = clampi(int(genome.get("max_divisions")) + 1, 2, autonomous_max_cells_per_organism) if gene_mode else autonomous_max_cells_per_organism
+		if energies[cell_index] < threshold or int(cell_counts[org_id]) >= max_cells:
 			continue
 		# 首次具备分裂资格时记录起点并跳过本 tick：给发育完成一个 cooldown 宽限期，
 		# 否则成熟当 tick 就分裂，会打破"发育程序 9 指令 → 4 细胞 3 连接"的确定性快照。
 		if not _autonomous_division_tick.has(org_id):
 			_autonomous_division_tick[org_id] = _sim_tick
 			continue
-		var last_tick: int = int(_autonomous_division_tick[org_id])
-		if _sim_tick - last_tick < autonomous_division_cooldown:
+		if _sim_tick - int(_autonomous_division_tick[org_id]) < autonomous_division_cooldown:
 			continue
-		candidates.append(cell_index)
-	for cell_index in candidates:
-		if alive[cell_index] == 0 or energies[cell_index] < autonomous_division_energy:
+		candidates.append({"cell": cell_index, "org": org_id, "genome": genome, "gene": gene_mode})
+	for candidate in candidates:
+		var cell_index: int = int(candidate["cell"])
+		var org_id: int = int(candidate["org"])
+		var genome: RefCounted = candidate["genome"] as RefCounted
+		var gene_mode: bool = bool(candidate["gene"])
+		if alive[cell_index] == 0:
 			continue
-		var org_id: int = org_ids[cell_index]
-		if int(cell_counts[org_id]) >= autonomous_max_cells_per_organism:
+		var max_cells: int = clampi(int(genome.get("max_divisions")) + 1, 2, autonomous_max_cells_per_organism) if gene_mode else autonomous_max_cells_per_organism
+		if int(cell_counts[org_id]) >= max_cells:
 			continue
+		var division_index: int = maxi(0, int(cell_counts[org_id]) - 1)
 		var angle: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
+		if gene_mode:
+			var angles: PackedByteArray = genome.get("split_angles")
+			if division_index < angles.size():
+				angle = TAU * float(angles[division_index]) / 256.0
 		var child_index: int = int(cells.call("divide_cell", cell_index, angle, autonomous_division_separation))
 		if child_index < 0:
 			continue
-		if not bool(organisms.call("add_developed_cell", org_id, child_index, autonomous_max_cells_per_organism)):
+		if not bool(organisms.call("add_developed_cell", org_id, child_index, max_cells)):
 			cells.call("remove_cell", child_index)
 			continue
+		if gene_mode:
+			# Gene.c 质量比：divide_cell 已对半分，这里只按基因组比例重新分配，能量守恒。
+			var ratio: float = clampf(float(genome.get("split_ratio")), 0.05, 0.95)
+			var total: float = float(energies[cell_index]) + float(energies[child_index])
+			energies[cell_index] = total * ratio
+			energies[child_index] = total * (1.0 - ratio)
+			cells.set("cell_energy", energies)
+			# Gene.i/j 分裂即分化：子代类型由分化树第 division_index 个槽指定。
+			var child_types: PackedByteArray = genome.get("child_types")
+			if division_index < child_types.size():
+				var types_array: PackedByteArray = cells.get("cell_type")
+				types_array[child_index] = clampi(int(child_types[division_index]), 0, 255)
+				cells.set("cell_type", types_array)
 		# v0.14.1：成熟后的自主分裂同样遵守黏附素语义，亲子自动建连。
-		if genomes.has(org_id) and bool(GENOME_SCRIPT.call("has_glue_links", genomes[org_id])):
+		if bool(GENOME_SCRIPT.call("has_glue_links", genome)):
 			cells.call("link_cells", cell_index, child_index, maxf(autonomous_division_separation, 14.0))
 		org_state[org_id] = mature_state
 		organisms.set("org_state", org_state)
@@ -486,7 +515,8 @@ func _count_alive_organisms_of_species(species_id: int) -> int:
 func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: RefCounted, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if genome == null or not bool(genome.call("is_valid")) or genome_id < 0:
 		return -1
-	var org_id: int = int(organisms.call("create_organism", genome_id, species_id, parent_id, DEVELOPMENT_RULES_SCRIPT.call("initial_lifecycle_state", genome, 1)))
+	var initial_state: int = int(DEVELOPMENT_RULES_SCRIPT.call("initial_lifecycle_state", genome, 1))
+	var org_id: int = int(organisms.call("create_organism", genome_id, species_id, parent_id, initial_state))
 	if org_id < 0:
 		return -1
 	var cell_index: int = int(cells.call("append_cell", org_id, position, energy, type_id))
@@ -498,6 +528,11 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	genomes[org_id] = stored_genome
 	CELL_BEHAVIOR_SCRIPT.call("initialize_weights", cells, cell_index, int(genome.call("hash")))
 	organisms.call("add_developed_cell", org_id, cell_index, int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome)))
+	# add_developed_cell 会把状态改回 DEVELOPING；基因模式出生即成熟，必须恢复初值。
+	# 这正是「能量很高却不分裂」的根因：个体永远卡在发育期，自主生命周期不会触发。
+	var org_states: PackedByteArray = organisms.get("org_state")
+	org_states[org_id] = initial_state
+	organisms.set("org_state", org_states)
 	if int(species_system.call("species_count")) == 0:
 		species_system.call("register_founder", genome, _sim_tick)
 	species_system.call("record_birth", species_id, _sim_tick)
@@ -531,6 +566,7 @@ func _default_genome() -> RefCounted:
 	return genome
 
 ## 细胞编辑草案通过 CommandBus 传入二进制 GNP1；解码失败则回退默认基因组。
+## v0.15.0：GNP1 冻结，基因模式参数走命令里的 genome_gene payload，解码后覆盖运行时字段。
 func _genome_from_command(command: Dictionary) -> RefCounted:
 	if not command.has("genome_bytes"):
 		return _default_genome()
@@ -538,7 +574,24 @@ func _genome_from_command(command: Dictionary) -> RefCounted:
 	var decoded: RefCounted = GENOME_CODEC_SCRIPT.call("decode", bytes) as RefCounted
 	if decoded == null:
 		return _default_genome()
+	_apply_gene_payload(decoded, command.get("genome_gene", {}))
 	return decoded
+
+func _apply_gene_payload(genome: RefCounted, payload: Variant) -> void:
+	if genome == null or not (payload is Dictionary):
+		return
+	var gene: Dictionary = payload as Dictionary
+	if gene.is_empty():
+		return
+	genome.set("division_mass", clampf(float(gene.get("division_mass", 1.0)), 0.05, 100.0))
+	genome.set("split_ratio", clampf(float(gene.get("split_ratio", 0.5)), 0.05, 0.95))
+	genome.set("max_divisions", clampi(int(gene.get("max_divisions", 3)), 0, 8))
+	var child_types: PackedByteArray = gene.get("child_types", PackedByteArray())
+	var split_angles: PackedByteArray = gene.get("split_angles", PackedByteArray())
+	if child_types is PackedByteArray:
+		genome.set("child_types", (child_types as PackedByteArray).duplicate())
+	if split_angles is PackedByteArray:
+		genome.set("split_angles", (split_angles as PackedByteArray).duplicate())
 
 func _command_type_id(command: Dictionary) -> int:
 	return clampi(int(command.get("type_id", 0)), 0, 17)
@@ -665,7 +718,10 @@ func _apply_tool_command(command: Dictionary) -> int:
 			if not command.has("genome_bytes"):
 				return -1
 			var injected: RefCounted = GENOME_CODEC_SCRIPT.call("decode", command.get("genome_bytes")) as RefCounted
-			if injected == null or not bool(injected.call("is_valid")):
+			if injected == null:
+				return -1
+			_apply_gene_payload(injected, command.get("genome_gene", {}))
+			if not bool(injected.call("is_valid")):
 				return -1
 			var cell_index: int = _nearest_alive_cell(position, 24.0)
 			if cell_index < 0:
