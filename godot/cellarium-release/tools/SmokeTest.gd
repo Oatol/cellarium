@@ -3332,14 +3332,24 @@ func _check_dev_editor_landing() -> bool:
 	if first_angle < 0.0 or first_angle > TAU:
 		push_error("SmokeTest: split indicator angle out of range")
 		dev.queue_free(); return false
-	preview_node.call("set_playing", false)
-	preview_node.call("step_forward")
-	if int(preview_node.call("get_cursor")) != 1:
-		push_error("SmokeTest: genome preview step forward failed")
+	# v0.26.0：Cell Lab 同款连续时间轴（无上一步/播放/下一步按钮），拖到不同 tick 重跑真实模拟。
+	var max_tick: int = int(preview_node.call("get_max_tick"))
+	if max_tick < 1:
+		push_error("SmokeTest: genome preview continuous timeline must have tick range")
 		dev.queue_free(); return false
-	preview_node.call("step_back")
-	if int(preview_node.call("get_cursor")) != 0:
-		push_error("SmokeTest: genome preview step back failed")
+	var tl_slider = preview_node.find_child("Slider", true, false)
+	if tl_slider == null or preview_node.find_child("PrevButton", true, false) != null \
+		or preview_node.find_child("PlayButton", true, false) != null \
+		or preview_node.find_child("NextButton", true, false) != null:
+		push_error("SmokeTest: preview must use single continuous slider without step buttons")
+		dev.queue_free(); return false
+	tl_slider.set_value(0.0)
+	if int(preview_node.call("get_current_tick")) != 0:
+		push_error("SmokeTest: preview timeline seek to zygote failed")
+		dev.queue_free(); return false
+	tl_slider.set_value(float(max_tick))
+	if int(preview_node.call("get_current_tick")) != max_tick:
+		push_error("SmokeTest: preview timeline seek to end failed")
 		dev.queue_free(); return false
 	var preview_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
 	preview_node.call("set_program", [], {"cell_type": 0, "division_mass": 2.0, "max_divisions": 3, "make_glue": true, "child1": 0, "child2": 2, "child3": 4, "child4": 10, "child1_angle": 0.0, "child2_angle": 0.25, "child3_angle": 0.5, "child4_angle": 0.75}, true)

@@ -4,6 +4,30 @@
 
 ---
 
+## 0.26.0 — 2026-11-19
+
+**类型**：发育预览对齐 Cell Lab Macro 交互（连续时间轴）与坐标错位修复
+**触发**：用户截图反馈「预览错位了，而且我想要的是 cell lab 的同款效果，不是像幻灯片一样一个阶段一个阶段的播放，上一步、播放、下一步的按钮都应该删掉，严格参考 cell lab marco」。
+
+### 源码依据
+
+再核对 Macro 版反编译源码：`GenomeEditorFragment.java:134` 的 `previewTimeHours` 是连续时间量，`GenomeEditorFragment.java:5717` 把滑块值直接写 `j4Var.U`，`J4.java:852` 按 `U / 0.02` 计算目标 tick，`J4.java:930-944` 跑真实 tick 并用 `Z/T/V/W` 缓存状态做断点续算；源码里没有「上一步 / 播放 / 下一步」离散阶段按钮。v0.24 的离散状态幻灯片播放与按钮不符合 Cell Lab 交互。
+
+### 实现
+
+- `GenomePreview.tscn` 删除 `Controls` 及 `PrevButton`/`PlayButton`/`NextButton`，只保留连续 tick 滑块 + 时刻标签；标题改为「GENOME PREVIEW · 连续时间轴」。
+- `GenomePreview.gd` 重写为单一连续时间轴：拖动滑块即 `_seek_to(tick)` → `PreviewWorld.advance_to(tick)`，渲染那一刻的真实快照；保留膜弦、分裂指示器、平移/缩放/点击跳模式；旧 step/cursor API 仅为外部兼容保留。
+- `PreviewWorld.gd` 新增 `advance_to(target_tick)`：目标 tick 大于当前则从当前状态续跑，小于当前则重置世界从合子重跑（对应 J4 断点缓存）；新增 `_accum_splits` + `snapshot_accumulated_splits()`，保证任意 tick 都能显示从合子到该时刻的真实分裂指示器。
+- 坐标错位修复：真实模拟坐标以 `DISH_CENTER=(250,250)` 为中心，快照 pos / 分裂点 / 弦端点统一 `_local()` 平移到预览原点；`GenomePreview._refresh_view_transform()` 按当前细胞包围盒自适应居中缩放。
+- 显式回收隔离 `_mgr` / `_env` 节点（`setup()` 重建前释放 + `NOTIFICATION_PREDELETE` 内联释放），消除预览反复重建时的 ObjectDB 泄漏；headless 退出不再有 leaked instances 警告。
+
+### 验证
+
+- 双工程 `SCRIPTS=53 FAILURES=0`、`EXITCODE=0`；预览探针 24 项断言全过（`FAILURES=0`），含无按钮、max_tick=74、tick 0/末/中间跳转、累计分裂指示器 14 个、坐标居中。
+- 探针退出无 ObjectDB 泄漏警告；主场景与 SmokeTest 的既有 `resources still in use at exit` 仍为无害 shutdown 提示。
+
+---
+
 ## 0.25.0 — 2026-11-19
 
 **类型**：发育预览方向性纠正（直接复用真实模拟，废弃手拼近似内核）

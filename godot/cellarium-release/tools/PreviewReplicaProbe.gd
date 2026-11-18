@@ -107,13 +107,33 @@ func _initialize() -> void:
 			break
 	_check(chord_seen, "细胞膜弦在分裂接触时生成")
 	_check(shared_chord_ok, "共享弦含端点/peer/kind（与运行时同源）")
-	# 6) v0.24.0：手动时间轴——滑块/时刻标签存在，默认暂停，拖动跳转生效。
+	# 6) v0.26.0：Cell Lab 同款连续时间轴——只有滑块（无上一步/播放/下一步按钮），
+	#    拖动到不同 tick 从真实模拟续跑/重置，细胞数随 tick 单调递增。
 	var slider = inst.find_child("Slider", true, false)
 	var time_label = inst.find_child("TimeLabel", true, false)
 	_check(slider != null and time_label != null, "时间轴滑块与时刻标签存在")
-	_check(not bool(inst.call("is_playing")), "默认暂停（手动时间轴）")
-	if slider != null and nstate >= 2:
-		slider.set_value(float(nstate - 1))
-		_check(int(inst.call("get_cursor")) == nstate - 1, "拖动时间轴跳转到末态")
+	_check(inst.find_child("PrevButton", true, false) == null \
+		and inst.find_child("PlayButton", true, false) == null \
+		and inst.find_child("NextButton", true, false) == null, "无上一步/播放/下一步按钮（Cell Lab 同款）")
+	var max_tick: int = int(inst.call("get_max_tick"))
+	_check(max_tick >= 1, "连续时间轴 tick 上限 >=1 (got " + str(max_tick) + ")")
+	if slider != null and max_tick >= 2:
+		slider.set_value(0.0)
+		_check(int(inst.call("get_current_tick")) == 0, "拖到 tick 0 回到合子")
+		slider.set_value(float(max_tick))
+		_check(int(inst.call("get_current_tick")) == max_tick, "拖到末 tick")
+		slider.set_value(float(maxi(1, max_tick / 2)))
+		_check(int(inst.call("get_current_tick")) >= 1, "拖动时间轴更新当前 tick")
+		# 连续时间轴的累计分裂指示器应在发育中期出现（不是空）。
+		var mid_splits: int = int((inst.get("_current_state") as Dictionary).get("splits", []).size()) if inst.get("_current_state") is Dictionary else 0
+		_check(mid_splits >= 1, "连续时间轴累计分裂指示器非空 (got " + str(mid_splits) + ")")
+	# 7) 坐标居中修复：快照 pos 应以原点为中心（|pos| 远小于皿半径 240）。
+	var w4 = _make_world(script, [gene])
+	for _t in range(60): w4.step()
+	var centered: bool = true
+	for c in w4.snapshot_cells():
+		if (c as Dictionary).get("pos", Vector2.ZERO).length() > 80.0:
+			centered = false; break
+	_check(centered, "预览细胞坐标已居中（不在画布外）")
 	print("PreviewReplica: FAILURES=", _failures)
 	quit()

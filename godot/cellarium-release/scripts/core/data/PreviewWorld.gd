@@ -39,13 +39,35 @@ var _initial_slot: int = 0
 var _tick: int = 0
 var _last_division_ticks: Dictionary = {}   # cell_index -> division_tick（用于派生分裂事件）
 var _pending_splits: Array[Dictionary] = []
+var _accum_splits: Array[Dictionary] = []   # 从合子到当前 tick 的全部分裂（供连续时间轴指示器）
 
 func _init() -> void:
 	pass
 
+## 隔离实例不是场景树节点，RefCounted 释放不会自动 free 它们；显式回收避免编辑器
+## 反复 set_program / 拖动时间轴时累积 ObjectDB 泄漏。
+func _notification(what: int) -> void:
+	# PREDELETE 期间脚本方法已不可调用，直接内联回收（不要调用 _release_world）。
+	if what == NOTIFICATION_PREDELETE:
+		if _mgr != null and is_instance_valid(_mgr):
+			_mgr.free()
+		if _env != null and is_instance_valid(_env):
+			_env.free()
+		_mgr = null
+		_env = null
+
+func _release_world() -> void:
+	if _mgr != null and is_instance_valid(_mgr):
+		_mgr.free()
+	if _env != null and is_instance_valid(_env):
+		_env.free()
+	_mgr = null
+	_env = null
+
 ## 确定性 RNG：真实模拟的神经权重初始化读 genome.hash()，不依赖全局随机；
 ## 这里只保证同一 genes 构造出的 Genome 逐字段一致。
 func setup(genes: Array, initial_mode: int = 0) -> void:
+	_release_world()
 	_genes = []
 	for raw in genes:
 		_genes.append((raw as Dictionary).duplicate(true))
@@ -96,6 +118,7 @@ func setup(genes: Array, initial_mode: int = 0) -> void:
 	_tick = 0
 	_last_division_ticks = {}
 	_pending_splits.clear()
+	_accum_splits.clear()
 	_sync_division_ticks()
 
 func _build_genome() -> RefCounted:
@@ -141,6 +164,23 @@ func get_tick() -> int:
 func is_grown() -> bool:
 	return get_cell_count() >= MAX_CELLS or _tick >= MAX_TICKS
 
+## 预览坐标：真实细胞坐标以 DISH_CENTER 为中心；预览画布以原点为中心，输出统一平移。
+func _local(p: Vector2) -> Vector2:
+	return p - DISH_CENTER
+
+## 连续时间定位（Cell Lab J4 的 Z/T 断点缓存机制）：
+## 目标 tick 大于当前 → 从当前状态续跑增量；小于当前 → 重置世界从合子重跑。
+## 供 GenomePreview 的连续时间滑块拖动调用，渲染的是该 tick 的真实模拟状态。
+func advance_to(target_tick: int) -> void:
+	if _mgr == null:
+		return
+	target_tick = clampi(target_tick, 0, MAX_TICKS)
+	if target_tick < _tick:
+		setup(_genes, _initial_slot)
+	while _tick < target_tick and not is_grown():
+		step()
+		consume_splits()   # 把本 tick 的分裂并入累计表，供连续时间轴指示器渲染
+
 ## 跑一个真实主 tick。分裂事件从 cell_division_tick 变化派生（只读）。
 func step() -> void:
 	_pending_splits.clear()
@@ -182,7 +222,7 @@ func _collect_splits() -> void:
 			if bool(gene.get("child2_mirror", false)):
 				angle = TAU * fposmod(-clampf(float(gene.get("child1_angle", 0.0)), 0.0, 1.0), 1.0)
 			_pending_splits.append({
-				"pos": Vector2(pos_x[i], pos_y[i]),
+				"pos": _local(Vector2(pos_x[i], pos_y[i])),
 				"angle": angle,
 				"parent": i,
 				"child": i,
@@ -248,13 +288,15 @@ func _build_shared_chords(cells: RefCounted, indices: Array[int]) -> Dictionary:
 			var adhesion: bool = index < org_ids.size() and neighbor < org_ids.size() \
 				and org_ids[index] == org_ids[neighbor] and _has_link(link_a, link_b, index, neighbor)
 			var kind: int = 1 if adhesion else 0
-			(lists[index] as Array).append({"a": chord["a"], "b": chord["b"], "kind": kind, "peer": neighbor})
-			(lists[neighbor] as Array).append({"a": chord["a"], "b": chord["b"], "kind": kind, "peer": index})
+			var la: Vector2 = _local(chord["a"])
+			var lb: Vector2 = _local(chord["b"])
+			(lists[index] as Array).append({"a": la, "b": lb, "kind": kind, "peer": neighbor})
+			(lists[neighbor] as Array).append({"a": la, "b": lb, "kind": kind, "peer": index})
 	for index in indices:
 		var position: Vector2 = Vector2(pos_x[index], pos_y[index])
 		var chord: Dictionary = CHORDS.call("wall_chord", position, _scaled_radius(cells, index), DISH_CENTER, DISH_RADIUS)
 		if bool(chord.get("valid", false)):
-			(lists[index] as Array).append({"a": chord["a"], "b": chord["b"], "kind": 2, "peer": -1})
+			(lists[index] as Array).append({"a": _local(chord["a"]), "b": _local(chord["b"]), "kind": 2, "peer": -1})
 	return lists
 
 func _has_link(link_a: PackedInt32Array, link_b: PackedInt32Array, a: int, b: int) -> bool:
@@ -274,7 +316,7 @@ func snapshot_cells() -> Array[Dictionary]:
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	for i in indices:
-		var pos: Vector2 = Vector2(pos_x[i], pos_y[i])
+		var pos: Vector2 = _local(Vector2(pos_x[i], pos_y[i]))
 		var radius: float = _scaled_radius(cells, i)
 		var type_id: int = int(cells.get("cell_type")[i])
 		var mode_id: int = int(cells.call("get_mode", i))
@@ -330,8 +372,17 @@ func snapshot_links() -> Array[Dictionary]:
 func consume_splits() -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	for entry in _pending_splits:
-		result.append((entry as Dictionary).duplicate(true))
+		var duplicate: Dictionary = (entry as Dictionary).duplicate(true)
+		result.append(duplicate)
+		_accum_splits.append(duplicate)
 	_pending_splits.clear()
+	return result
+
+## 从合子到当前 tick 的累计分裂事件（连续时间轴指示器用；只读）。
+func snapshot_accumulated_splits() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	for entry in _accum_splits:
+		result.append((entry as Dictionary).duplicate(true))
 	return result
 
 func get_gene(slot: int) -> Dictionary:

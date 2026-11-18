@@ -1009,3 +1009,23 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 共享弦：快照用与运行时 `CellSceneRenderer._build_shared_chords` 同源的几何（`circle_chord`/`wall_chord` + peer/kind），每对相邻细胞只算一次弦、端点分发双方——预览膜与培养皿渲染切平方式一致。
 - 渲染：`GenomePreview` 用快照里的真实逐细胞表型色（缺省回退类型色）；分裂指示器仍按 §32.2 的 `j4.I()` 公式叠加；手动时间轴与膜弦管线保持不变。
 - 验证：双工程 `SCRIPTS=53 FAILURES=0 ERRORS=0`，预览探针 19 项断言全过（倍增、状态 hash 非零且逐位一致、真实表型色、半径在 7×scale 区间、共享弦端点/peer/kind、时间轴）；主场景 boot ok、EXITCODE=0。
+
+### 32.9 v0.26.0：对齐 Cell Lab Macro 连续时间轴 + 坐标错位修复
+
+**用户诉求（截图反馈）**：预览错位；要 Cell Lab 同款效果，不要「像幻灯片一样一个阶段一个阶段播放」；删除「上一步 / 播放 / 下一步」按钮；严格参考 Cell Lab Macro。
+
+**Cell Lab Macro 源码再核对**：
+- `GenomeEditorFragment.java:134` 的 `previewTimeHours` 是连续 `double`，`GenomeEditorFragment.java:7464` 把它 clamp 到 0–90 小时；`GenomeEditorFragment.java:5717` 把滑块值直接写 `j4Var.U`。
+- `J4.java:852`：`iMax = max(0, floor(U / 0.02 + 1E-9))`——连续小时值线性映射到真实模拟 tick；`J4.java:856` 固定 `setSeed(1337L)`；`J4.java:930-944` 跑真实 `z2(true,1.0)` + `A2(1.0)` tick，并以 `Z/T/V/W` 缓存状态支持断点续算；`J4.java` 中没有离散阶段按钮状态机。
+- 结论：预览时间是**连续量 → tick 数**，拖动即重定位真实模拟；「阶段」只是事后观察，不是交互单元。
+
+**此前实现的偏差**：v0.24 的 `_states` 数组按分裂事件切片，UI 用 Prev/Play/Next 按钮逐条播放，本质是幻灯片；同时 v0.25 切到真实内核后，快照坐标仍是皿坐标 `(250,250)` 附近，而 `_to_screen()` 假设以原点为中心，导致细胞被画到画布外。
+
+**v0.26.0 落地**：
+- `GenomePreview.tscn`：删除 `Margin/VBox/Controls` 及 `PrevButton`/`PlayButton`/`NextButton`，只留 `Timeline/Slider` + `TimeLabel` + `Canvas` + `Caption`。
+- `GenomePreview.gd`：改为单一连续 tick 轴。拖动调用 `_seek_to(tick)` → `PreviewWorld.advance_to(tick)`；渲染 `_current_state` 而非逐 `_states` 播放。`_states` 仅保留为 SmokeTest/外部检查的里程碑只读索引，`step_forward()`/`step_back()` 仅为兼容 API，UI 不再暴露。
+- `PreviewWorld.gd`：`advance_to(target_tick)` 在目标大于当前时从当前状态续跑、小于当前时 `setup()` 重置从合子重跑，对应 J4 的 `Z/T/V/W` 断点缓存思路；新增 `_accum_splits` + `snapshot_accumulated_splits()`，使任意 tick 都能拿到从合子到该时刻的全部真实分裂指示器（Cell Lab `j4.I()` 公式不变）。
+- 坐标修复：快照 cells pos、split pos、chord endpoint 全部经 `_local(p)=p-DISH_CENTER` 平移；`GenomePreview._refresh_view_transform()` 按当前细胞包围盒计算 `_view_center` / `_view_scale`，`_to_screen()` 用该变换，细胞始终居中在画布内。
+- 生命周期：预览隔离的 `_mgr` / `_env` 不是场景树节点，`RefCounted` 释放不会自动回收它们；`setup()` 重建前 `free()` 旧实例，`NOTIFICATION_PREDELETE` 内联释放（PREDELETE 期间不能调用脚本方法），消除反复 set_program/拖时间轴时的 ObjectDB 泄漏。
+
+**验证**：双工程 `SCRIPTS=53 FAILURES=0`、`EXITCODE=0`；预览探针 24 项断言全过（`FAILURES=0`）：无三个按钮、`get_max_tick()=74`、tick 0/末/中间跳转、当前 tick 更新、累计分裂指示器 14 个、预览细胞坐标居中；探针退出无 ObjectDB 泄漏警告。

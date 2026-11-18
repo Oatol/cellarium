@@ -47,20 +47,5 @@ value = 0.0
 
 [node name="Caption" type="Label" parent="Margin/VBox"]
 layout_mode = 2
-text = "GENOME PREVIEW · 只读"
+text = "GENOME PREVIEW · 连续时间轴"
 autowrap_mode = 3
-
-[node name="Controls" type="HBoxContainer" parent="Margin/VBox"]
-layout_mode = 2
-
-[node name="PrevButton" type="Button" parent="Margin/VBox/Controls"]
-layout_mode = 2
-text = "上一步"
-
-[node name="PlayButton" type="Button" parent="Margin/VBox/Controls"]
-layout_mode = 2
-text = "暂停"
-
-[node name="NextButton" type="Button" parent="Margin/VBox/Controls"]
-layout_mode = 2
-text = "下一步"
