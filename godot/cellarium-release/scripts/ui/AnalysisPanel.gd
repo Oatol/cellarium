@@ -182,6 +182,13 @@ func _refresh_inspection() -> void:
 		"物种 #%d · 位置 (%.2f, %.2f)" % [int(info.get("species_id", -1)), position.x, position.y],
 		"场采样："
 	]
+	lines.insert(3, "能量流(tick %d)：产能 +%.6f · 自身耗能 -%.6f" % [
+		int(info.get("energy_flow_tick", -1)), float(info.get("production", 0.0)), float(info.get("self_cost", 0.0))])
+	lines.insert(4, "  传输给其他细胞 -%.6f · 连接转入 +%.6f" % [
+		float(info.get("link_out", 0.0)), float(info.get("link_in", 0.0))])
+	var predation_drain: float = float(info.get("predation_drain", 0.0))
+	if predation_drain > 0.0:
+		lines.insert(5, "  被捕食抽走 -%.6f" % predation_drain)
 	lines.append_array(field_lines)
 	_inspect_text.text = "\n".join(lines)
 

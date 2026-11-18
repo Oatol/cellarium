@@ -34,6 +34,17 @@ var tick_core: Node = null
 ## 工具命令诊断计数：仅统计外部干预注入，不进入确定性 hash（干预本身是外部输入）。
 var tool_diagnostics: Dictionary = {"SPAWN": 0, "REMOVE": 0, "DRAG": 0, "BOOST": 0, "INSPECT": 0, "ADHERE": 0, "INJECT_GENOME": 0, "INJECT_SIGNAL": 0, "INJECT_SUBSTANCE": 0, "INJECT_COLOR": 0, "SELECT": 0, "CLEAR_SELECTION": 0, "ROTATE_SELECTION": 0, "TERRAIN_PAINT": 0, "TERRAIN_ERASE": 0, "STUB": 0}
 var last_inspection: Dictionary = {}
+## v0.14.1 只读能量流诊断：每个 tick 覆盖写，只供生态报告展示；不写模拟真相源、不进 hash / 存档。
+## production = 环境摄入 + 捕食获得；self_cost = 基础代谢 + 运动；
+## link_out / link_in = 连接转账；predation_drain = 被捕食抽走的能量。
+var _energy_flow: Dictionary = {
+	"tick": -1,
+	"production": PackedFloat64Array(),
+	"self_cost": PackedFloat64Array(),
+	"link_out": PackedFloat64Array(),
+	"link_in": PackedFloat64Array(),
+	"predation_drain": PackedFloat64Array(),
+}
 var _next_genome_id: int = 1
 var energy_ledger: RefCounted = ENERGY_LEDGER_SCRIPT.new() as RefCounted
 var predation_diagnostics: Dictionary = {"events": 0, "energy_transferred": 0.0, "energy_to_detritus": 0.0, "deaths": 0}
@@ -76,7 +87,9 @@ func _ready() -> void:
 @export var facultative_aerobic_efficiency: float = 2.0
 @export var anaerobic_toxicity_damage_per_second: float = 0.1
 @export var heterotrophic_intake_rate: float = 0.05
-@export var photosynthetic_intake_rate: float = 0.02
+## v0.14.1：原 0.02 产能偏低，光合细胞在默认光强下净收益接近 0；调到 0.08，
+## 使充分光照时接近异养效率，但逐 tick 仍受光场与 DECAY[3]=0 约束，不改能量守恒。
+@export var photosynthetic_intake_rate: float = 0.08
 @export var chemotrophic_intake_rate: float = 0.02
 @export var predation_transfer_efficiency: float = 0.8
 @export var movement_energy_cost: float = 0.001
@@ -119,13 +132,40 @@ func get_live_inspection() -> Dictionary:
 	base["age"] = int(organisms.get("org_age")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_age").size()) else -1
 	base["health"] = float(organisms.get("org_health")[org_id]) if org_id >= 0 and org_id < int(organisms.get("org_health").size()) else 0.0
 	base["field"] = sampled.duplicate()
+	# v0.14.1：只读能量流明细，随 tick 更新；不重算模拟。
+	for key in ["production", "self_cost", "link_out", "link_in", "predation_drain"]:
+		base[key] = _energy_flow_value(key, index)
+	base["energy_flow_tick"] = int(_energy_flow.get("tick", -1))
 	return base
 
 func get_last_tool_message() -> String:
 	return last_tool_message
 
+## 每 tick 覆盖一次诊断缓冲。长度变化（分裂/回收）时重建，避免越界写入。
+func _reset_energy_flow(count: int) -> void:
+	for key in ["production", "self_cost", "link_out", "link_in", "predation_drain"]:
+		var values: PackedFloat64Array = PackedFloat64Array()
+		values.resize(count)
+		_energy_flow[key] = values
+	_energy_flow["tick"] = _sim_tick
+
+func _energy_flow_add(key: String, cell_index: int, amount: float) -> void:
+	if cell_index < 0 or amount == 0.0 or not _energy_flow.has(key):
+		return
+	var values: PackedFloat64Array = _energy_flow[key]
+	if cell_index >= values.size():
+		return
+	values[cell_index] += amount
+
+func _energy_flow_value(key: String, cell_index: int) -> float:
+	if cell_index < 0 or not _energy_flow.has(key):
+		return 0.0
+	var values: PackedFloat64Array = _energy_flow[key]
+	return float(values[cell_index]) if cell_index < values.size() else 0.0
+
 func advance_physics_tick(dt: float) -> void:
 	_sim_tick += 1
+	_reset_energy_flow(int(cells.call("size")))
 	perf_probe.call("begin_tick")
 	# 阶段10：一个 tick 两批（物理前/后），每批一次 GPU 采样 dispatch + 小回读。
 	if environment_manager != null:
@@ -154,7 +194,7 @@ func advance_physics_tick(dt: float) -> void:
 	var rates: PackedFloat32Array = PackedFloat32Array()
 	rates.resize(int(cells.call("size")))
 	rates.fill(default_transfer_rate)
-	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt)
+	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt, _energy_flow)
 	_apply_base_metabolism(dt)
 	_apply_environment_metabolism(dt)
 	_apply_autonomous_lifecycle()
@@ -239,6 +279,7 @@ func _apply_base_metabolism(dt: float) -> void:
 	for cell_index in range(energies.size()):
 		if alive[cell_index] != 0:
 			energies[cell_index] = maxf(0.0, energies[cell_index] + deltas[cell_index])
+			_energy_flow_add("self_cost", cell_index, base_metabolic_cost * dt)
 	cells.set("cell_energy", energies)
 	for cell_index in range(energies.size() - 1, -1, -1):
 		if alive[cell_index] != 0 and energies[cell_index] <= 0.0:
@@ -311,12 +352,14 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 			elif types[cell_index] == CELL_TYPE_NITROCYTE:
 				consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
 			energies[cell_index] += consumed
+			_energy_flow_add("production", cell_index, consumed)
 			if consumed > 0.0:
 				energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_ENV_TO_BIO, "E_env", "E_bio", consumed, "intake_type_%d" % int(types[cell_index]))
 		var intents: PackedFloat32Array = CELL_BEHAVIOR_SCRIPT.call("get_intents", cells, cell_index)
 		var movement: float = absf(float(intents[0]))
 		var movement_cost: float = movement_energy_cost * movement * movement * dt
 		energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
+		_energy_flow_add("self_cost", cell_index, movement_cost)
 		if bool(respiration.get("toxic", false)):
 			health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
 	organisms.set("org_health", health)
@@ -369,6 +412,9 @@ func _apply_autonomous_lifecycle() -> void:
 		if not bool(organisms.call("add_developed_cell", org_id, child_index, autonomous_max_cells_per_organism)):
 			cells.call("remove_cell", child_index)
 			continue
+		# v0.14.1：成熟后的自主分裂同样遵守黏附素语义，亲子自动建连。
+		if genomes.has(org_id) and bool(GENOME_SCRIPT.call("has_glue_links", genomes[org_id])):
+			cells.call("link_cells", cell_index, child_index, maxf(autonomous_division_separation, 14.0))
 		org_state[org_id] = mature_state
 		organisms.set("org_state", org_state)
 		cell_counts = organisms.get("cell_count")
@@ -386,6 +432,8 @@ func _apply_predation(dt: float) -> void:
 		var gain: float = float(event.get("gain", 0.0))
 		var loss: float = float(event.get("loss_to_detritus", 0.0))
 		var prey_index: int = int(event.get("prey", -1))
+		_energy_flow_add("production", int(event.get("predator", -1)), gain)
+		_energy_flow_add("predation_drain", prey_index, drained)
 		energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_BIO_TO_BIO, "E_bio", "E_bio", gain, "predation_gain")
 		if loss > 0.0:
 			energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_BIO_TO_ENV, "E_bio", "E_detritus", loss, "predation_loss")

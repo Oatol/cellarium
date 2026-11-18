@@ -10,9 +10,9 @@ extends RefCounted
 
 const CAPACITY: int = 128
 ## Cell Lab y2(double) 的形态：f729c -= k*dt，<=0 池尾交换回收。
-## 本项目 food_spawn_amount 的质量标度与 Macro 不同，k 取 0.11/秒（约 110 tick 耗尽 0.2 质量），
-## 保留线性衰减 + 池尾交换；这不是 Macro 常量的逐行移植。
-const MASS_DECAY: float = 0.11
+## 本项目 food_spawn_amount 的质量标度与 Macro 不同，k 取 0.012/秒（约 830 tick 耗尽 0.2 质量），
+## 让食物在皿内停留足够久可被细胞找到；保留线性衰减 + 池尾交换；不是 Macro 常量的逐行移植。
+const MASS_DECAY: float = 0.012
 
 var _position_x: PackedFloat32Array = PackedFloat32Array()
 var _position_y: PackedFloat32Array = PackedFloat32Array()

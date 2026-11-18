@@ -3,7 +3,9 @@ extends RefCounted
 
 const MAX_LINK_FLOW: float = 0.1
 
-static func redistribute_link_energy(cells: RefCounted, transfer_rates: PackedFloat32Array, dt: float) -> bool:
+## v0.14.1：diagnostics 可选输出只记录每条连接实际转移量，供生态报告显示；
+## 不参与 deltas 计算、不写细胞状态、不进确定性 hash。传空 Dictionary 时零额外分配。
+static func redistribute_link_energy(cells: RefCounted, transfer_rates: PackedFloat32Array, dt: float, diagnostics: Dictionary = {}) -> bool:
 	if cells == null or dt < 0.0:
 		return false
 	var count: int = int(cells.call("size"))
@@ -21,6 +23,12 @@ static func redistribute_link_energy(cells: RefCounted, transfer_rates: PackedFl
 	var transfer_from: PackedInt32Array = PackedInt32Array()
 	var transfer_to: PackedInt32Array = PackedInt32Array()
 	var transfer_amounts: PackedFloat64Array = PackedFloat64Array()
+	var track_flow: bool = not diagnostics.is_empty()
+	var link_out: PackedFloat64Array = PackedFloat64Array()
+	var link_in: PackedFloat64Array = PackedFloat64Array()
+	if track_flow:
+		link_out.resize(count)
+		link_in.resize(count)
 	for link_index in range(link_a.size()):
 		var a: int = link_a[link_index]
 		var b: int = link_b[link_index]
@@ -46,8 +54,14 @@ static func redistribute_link_energy(cells: RefCounted, transfer_rates: PackedFl
 		var amount: float = transfer_amounts[transfer_index] * scale
 		deltas[donor] -= amount
 		deltas[receiver] += amount
+		if track_flow:
+			link_out[donor] += amount
+			link_in[receiver] += amount
 	for cell_index in range(count):
 		if alive[cell_index] != 0:
 			energies[cell_index] += float(deltas[cell_index])
 	cells.set("cell_energy", energies)
+	if track_flow:
+		diagnostics["link_out"] = link_out
+		diagnostics["link_in"] = link_in
 	return true

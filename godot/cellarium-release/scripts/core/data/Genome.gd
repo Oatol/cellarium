@@ -10,6 +10,15 @@ const OP_DIVIDE: int = 0
 const OP_DIFFERENTIATE: int = 1
 const OP_LINK: int = 2
 
+## v0.14.1 版本化追加：flags 位 0 表示「生成黏附素即亲子自动连接」。
+## flags 本就在 GNP1 编码（GenomeCodec 第 2–3 字节）与存档 schema 内，不新增字段、不改格式；
+## 只是给此前未使用的位赋予语义。DIVIDE 执行后按该位自动 link_cells(parent, child)，
+## 因此用户无需再单独写 LINK 指令。0 = 旧行为（需显式 LINK）。
+const FLAG_GLUE_LINKS: int = 1 << 0
+
+static func has_glue_links(genome: RefCounted) -> bool:
+	return genome != null and (int(genome.get("flags")) & FLAG_GLUE_LINKS) != 0
+
 var version: int = 1
 var flags: int = 0
 var respiration: int = 1

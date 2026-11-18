@@ -4,7 +4,8 @@ extends Control
 ## 唯一发育真相源是 draft Genome 的 dev_program（DIVIDE/DIFFERENTIATE/LINK）。
 ## Cell Lab 专有的 40 Gene 槽 / Child1-4 / 信号 lane / 95 算子只作只读证据展示；GNP1 已冻结，
 ## 不写入编码、不臆造字段。编辑只改 draft；Apply 经 signal → GameHUD → CommandBus 进入模拟。
-## 本面板不碰模拟状态、不改 dt、不改确定性 hash。
+## 本面板不碰模拟状态、不改 dt；v0.14.1 起「生成黏附素」唯一例外，会写入 draft.flags bit0
+## （GNP1 已编码字段的版本化语义追加），因此会改变该基因组的 hash；其余 Macro 字段仍只展示。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
@@ -21,7 +22,8 @@ const GENE_SLOT_COUNT: int = 40
 const RESPIRATION: Array[String] = ["兼性", "好氧", "厌氧"]
 
 ## v0.13.0：Macro 编辑器字段作为可编辑草案展示；只改本面板 Dictionary，
-## 不进入 GNP1 编码、dev_program 或确定性 hash。控件提示保留静态反编译字段来源。
+## 不进入 dev_program。v0.14.1 例外：make_glue 映射到已存在的 Genome.flags bit0。
+## 控件提示保留静态反编译字段来源。
 const MACRO_FIELD_KEYS: Array[String] = [
 	"cell_type", "make_glue", "child1", "child2", "child3", "child4",
 	"child1_angle", "child2_angle", "child3_angle", "child4_angle",
@@ -435,7 +437,7 @@ func _build_right_panel() -> Control:
 
 	box.add_child(_make_section_title("TYPE / ADHESIN · 类型与黏附"))
 	box.add_child(_make_macro_type_option("cell_type", "细胞类型", "spinner_types → Gene.C"))
-	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E"))
+	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E；本项目 v0.14.1 写入 flags bit0：子代自动连接，无需 LINK 指令"))
 	box.add_child(_make_macro_check("stay_alive", "保持存活", "checkbox_stay_alive → Gene.H"))
 	box.add_child(_make_macro_check("initial", "初始细胞", "radio_initial → Gene.I"))
 
@@ -562,7 +564,22 @@ func _format_macro_value(_key: String, value: float, digits: int) -> String:
 
 func _on_macro_bool_changed(value: bool, key: String) -> void:
 	_macro_draft[key] = value
+	if key == "make_glue":
+		_sync_glue_flag()
 	_set_macro_status(key)
+
+## v0.14.1：黏附素勾选写入 Genome.flags bit0（已编码字段，不新增 schema）。
+## DIVIDE 执行时读该位自动 link 亲子，用户无需再写 LINK 指令。
+func _sync_glue_flag() -> void:
+	if draft == null:
+		return
+	var flag: int = int((GENOME_SCRIPT as Script).get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	var value: int = int(draft.get("flags"))
+	if bool(_macro_draft.get("make_glue", false)):
+		value |= flag
+	else:
+		value &= ~flag
+	draft.set("flags", value)
 
 func _on_macro_option_changed(index: int, key: String) -> void:
 	_macro_draft[key] = index
@@ -579,8 +596,13 @@ func _on_macro_value_changed(value: float, key: String) -> void:
 	_set_macro_status(key)
 
 func _set_macro_status(key: String) -> void:
-	if _status_label != null:
-		_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / dev_program / 确定性 hash。" % key
+	if _status_label == null:
+		return
+	if key == "make_glue":
+		var on: bool = bool(_macro_draft.get("make_glue", false))
+		_status_label.text = "生成黏附素%s：子代自动连接（写入 flags bit0，影响该基因组 hash）；其余 Macro 字段仅展示。" % ("已开启" if on else "已关闭")
+		return
+	_status_label.text = "Macro 草案已改：%s · 仅本页展示，不写 GNP1 / dev_program / 确定性 hash。" % key
 
 func get_macro_draft() -> Dictionary:
 	return (_macro_draft as Dictionary).duplicate(true)
@@ -830,6 +852,7 @@ func _on_default() -> void:
 	_refresh_all()
 
 func _on_apply() -> void:
+	_sync_glue_flag()
 	if draft == null or not bool(draft.call("is_valid")):
 		if _status_label != null:
 			_status_label.text = "草案无效：指令数超过 %d 或操作数越界" % MAX_DEV_INSTRUCTIONS
@@ -855,4 +878,5 @@ func get_type_id() -> int:
 ## 供 GameHUD 读取当前草案摘要（反馈用）。
 func draft_summary() -> String:
 	var program: Array = _program()
-	return "细胞编辑草案：%d 指令 · 类型 %d · Macro 草案 %d 项（不写 GNP1）" % [program.size(), _type_id, _macro_draft.size()]
+	var glue_text: String = " · 黏附素自动连接" if bool(_macro_draft.get("make_glue", false)) else ""
+	return "细胞编辑草案：%d 指令 · 类型 %d · Macro 草案 %d 项%s" % [program.size(), _type_id, _macro_draft.size(), glue_text]

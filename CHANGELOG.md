@@ -4,6 +4,25 @@
 
 ---
 
+## 0.14.1 — 2026-11-18
+
+**类型**：反馈批次（参数校准 + 只读诊断 + GNP1 已有 flags 位的版本化语义追加；不改 tick 顺序、单帧 12 tick 上限、GNP1 布局、五通道 schema）
+**触发**：用户反馈「光合细胞效率有点低，调高一点；生态报告诊断显示细胞当前产能和耗能（标出自身耗能与传输给其他细胞的耗能）；生成黏附素即视为子代细胞连接，不用单独设置连接的指令；食物消失太快，衰亡调慢」。
+
+### 实现
+
+- **光合效率**：`OrganismManager.photosynthetic_intake_rate` `0.02 → 0.08`，充分光照时接近异养效率；仍按光场值逐 tick 摄入，不改能量守恒。
+- **食物衰亡**：`FoodStore.MASS_DECAY` `0.11 → 0.012 / 秒`，0.2 质量颗粒寿命约 830 tick；保持线性衰减 + 池尾交换，不是 Macro 常量逐行移植。
+- **黏附素即连接**：`Genome.flags` 位 0 版本化赋予「生成黏附素」语义。`DevelopmentRules.execute_divide()` 与成熟后自主分裂在该位置位时自动 `link_cells(parent, child)`，无需显式 `LINK`；清零保持旧行为。`DevEditorPanel` 勾选「生成黏附素」写入该位，其余 25 个 Macro 字段仍只展示。已同步修订 v1.1 §5.3 与 v2.1 §0.3 / §11；**置位基因组 hash 会变化**，这是有意的新版本语义。
+- **能量流诊断**：`CellMetabolism.redistribute_link_energy()` 增加可选只读诊断输出，累加顺序与 deltas 不变；`OrganismManager._energy_flow` 记录 `production / self_cost / link_out / link_in / predation_drain`，`get_live_inspection()` 逐 tick 派生；`AnalysisPanel` 显示产能、自身耗能、传输给其他细胞、连接转入（捕食流失非零时另列）。不写模拟状态、不进 hash、不进存档。
+
+### 验证 / 同步
+
+- 新增 SmokeTest 断言：60 秒食物质量残留、光合速率 0.08、能量流缓冲与面板文本、黏附素置位自动连接 / 清零不连接、编辑器 flags 位与 hash 变化；`SCRIPTS=51 FAILURES=0 EXITCODE=0`。
+- 发布工程与 D 盘运行工程分别运行通过；D 盘同步 8 个脚本（保留 autoload / `.uid` / 场景 `unique_id`）。
+
+---
+
 ## 0.14.0 — 2026-11-18
 
 **类型**：性能根因修复 + 反馈批次 + 食物实体池（规格已版本化修订；不改 tick 顺序、GNP1、dev_program 语义、五通道 schema 与确定性 hash）

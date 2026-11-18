@@ -703,8 +703,31 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 
 ### 23.3 食物实体池的规格修订与边界
 
-按 §20.5 的要求，先修订 v1.0 §2.2 与 v2.1 §0.3 / §11，再落地 `FoodStore.gd`：定长 128 池、`spawn` 池内追加、`advance` 质量线性衰减 + 池尾交换、`to_payload/from_payload` 存档、涂层字段。实体由 `apply_nutrient_sources()` 的确定型位置派生，**能量真相仍是五通道营养场**，不进 hash、不改 schema。这是派生实现，不是 Macro `Food[]` 的逐行移植（衰减系数按本项目质量标度取 0.11/s）。
+按 §20.5 的要求，先修订 v1.0 §2.2 与 v2.1 §0.3 / §11，再落地 `FoodStore.gd`：定长 128 池、`spawn` 池内追加、`advance` 质量线性衰减 + 池尾交换、`to_payload/from_payload` 存档、涂层字段。实体由 `apply_nutrient_sources()` 的确定型位置派生，**能量真相仍是五通道营养场**，不进 hash、不改 schema。这是派生实现，不是 Macro `Food[]` 的逐行移植（衰减系数按本项目质量标度先取 0.11/s，v0.14.1 调慢为 0.012/s，见 §24.1）。
 
 ### 23.4 生态报告按钮的根因（反复修复的真正原因）
 
 前两次只改了 `PanelChrome` 内部排序，但 chrome 在 `GameHUD._ready()` 安装，而 `AnalysisPanel._ready()` 在其后创建 `_body` 并 `add_child` 到面板 —— 内容成为 `ChromeRoot` 的兄弟节点，覆盖标题栏并抢走鼠标事件。v0.14.0 把 `_build_panel_chrome()` 改为 `call_deferred()`，等所有面板 `_ready()` 完成后再安装；`PanelChrome.install()` 加幂等保护。这是按钮「点了没用」的真正根因。
+
+## 24. v0.14.1 反馈批次：产能 / 耗能诊断、黏附素即连接、参数校准（2026-11-18）
+
+### 24.1 参数校准（按本项目标度，不是 Macro 常量移植）
+
+- 光合摄入 `photosynthetic_intake_rate`：`0.02 → 0.08`。默认光强下原净收益接近 0，光合细胞难维持；0.08 使充分光照时接近异养效率（异养 0.05 × 呼吸效率），仍受光场值与 `DIFFUSION[3]=0` 约束，不改能量守恒。
+- 食物质量衰减 `FoodStore.MASS_DECAY`：`0.11 → 0.012 / 秒`。按 0.2 初始质量估算，寿命由约 2 秒延长到约 17 秒（约 830 tick），与 Cell Lab `y2(double)` 的线性衰减 + 池尾交换形态一致；系数按本项目质量标度取值，不声称等于 Macro 的 0.006。
+- 验证方式：SmokeTest 断言 120 tick 后食物实体仍在且质量 > 0.15，并断言光合速率字段为 0.08；不通过视觉截图判断。
+
+### 24.2 黏附素即连接（GNP1 versioned append）
+
+- `Genome.flags` 位 0 被赋予语义「生成黏附素」。`flags` 本就在 `GenomeCodec` 第 2–3 字节编码、本就在存档 schema 内，因此**不新增字段、不改冻结布局**；此前该位未使用，0 值行为完全不变。
+- 执行点：`DevelopmentRules.execute_divide()` 在 `add_developed_cell()` 成功后按该位调用 `link_cells(parent, child, rest_length)`，rest_length 取亲子间距且至少为静息直径。`OrganismManager._apply_autonomous_lifecycle()` 对成熟后的自主分裂同样处理。`link_cells` 自带 `has_link` 幂等保护，模板里残留 `LINK` 指令不会重复建边。
+- UI：`DevEditorPanel` 的「生成黏附素」勾选通过 `_sync_glue_flag()` 写入草案 flags；其余 25 个 Macro 字段仍只展示、不写 GNP1。状态栏明确提示该例外会改变基因组 hash。
+- 后果边界：因 hash 覆盖编码后的 flags，置位基因组 hash 会变化；这是有意的新版本语义，不是确定性回归。SmokeTest 同时断言置位自动连接、清零保持旧行为、编辑器写入/清除位与 hash 变化。
+- 与 Cell Lab 的关系：Cell Lab 的黏附素是基因位掩码驱动的物理连接生成；本项目只采纳「黏附素即连接」语义，并用既有 `flags` 位与 `dev_program` 表达，不复制 Gene 表或物理实现。
+
+### 24.3 只读能量流诊断（不改变模拟数学）
+
+- `CellMetabolism.redistribute_link_energy()` 增加可选 `diagnostics` 参数；仅在实际转账完成后把 `link_out[donor]` / `link_in[receiver]` 写入诊断缓冲，deltas 计算与 float 累加顺序完全不变；空参数时零额外数组分配。
+- `OrganismManager` 新增 `_energy_flow` 五组 PackedFloat64Array：`production`（环境摄入 + 捕食获得）、`self_cost`（基础代谢 + 运动）、`link_out`（传输给其他细胞）、`link_in`（连接转入）、`predation_drain`（被捕食抽走）。每 tick 覆盖、分裂/死亡后索引仍稳定（`remove_cell` 只置 alive=0、不压缩数组）。
+- `get_live_inspection()` 把这些字段与 `energy_flow_tick` 附加到只读诊断快照；`AnalysisPanel` 显示「产能 / 自身耗能 / 传输给其他细胞 / 连接转入」四项，捕食流失非零时追加一行。全部为派生读数，不写模拟状态、不进 hash、不进存档。
+- 验证：SmokeTest 构造同一 org 的两细胞 + 非零 transfer rate，断言诊断缓冲与面板文本都出现转账数值。

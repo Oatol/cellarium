@@ -2,6 +2,8 @@ extends RefCounted
 ## 发育计划由 GNP1 dev_program 唯一决定。v1 环境快照不改变细胞数量.
 
 const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismStore.gd")
+const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
+const CELL_SHAPE_SCRIPT: Script = preload("res://scripts/core/data/CellShape.gd")
 
 static func division_count(genome: RefCounted) -> int:
 	if genome == null or not genome.has_method("division_count"):
@@ -113,5 +115,12 @@ static func execute_divide(genome: RefCounted, cells: RefCounted, organisms: Ref
 		return -1
 	if not bool(organisms.call("add_developed_cell", org_id, child_index, expected_cell_count(genome))):
 		return -1
+	# v0.14.1：黏附素语义由 Genome.flags bit0 承载。置位后每次 DIVIDE 都自动把亲子连起来，
+	# 用户不必再写 LINK 指令。静息长度沿用亲子间距，至少为静息直径。
+	# link_cells 自身幂等：若模板同时写了 LINK，不会重复建边；连接上限导致的失败不回滚分裂。
+	if bool(GENOME_SCRIPT.call("has_glue_links", genome)):
+		var rest_radius: float = float(CELL_SHAPE_SCRIPT.get_script_constant_map().get("REST_RADIUS", 7.0))
+		var rest_length: float = maxf(float(command.get("separation", 1.0)), rest_radius * 2.0)
+		cells.call("link_cells", source_index, child_index, rest_length)
 	organisms.get("org_instruction_mask")[org_id] = int(organisms.get("org_instruction_mask")[org_id]) | instruction_bit
 	return child_index

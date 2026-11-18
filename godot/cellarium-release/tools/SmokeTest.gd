@@ -184,6 +184,12 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_ui_chrome_and_filters():
 		failures += 1
+	if not await _check_v0141_food_and_photosynthesis():
+		failures += 1
+	if not await _check_v0141_energy_flow_diagnostics():
+		failures += 1
+	if not await _check_v0141_glue_link():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -3060,6 +3066,9 @@ func _check_lifecycle_and_injectors() -> bool:
 	if photo_energy_after <= photo_energy_before + 0.00001:
 		push_error("SmokeTest: photocyte did not gain energy from light field (before=%.6f after=%.6f)" % [photo_energy_before, photo_energy_after])
 		instance.queue_free(); return false
+	if float(manager.get("photosynthetic_intake_rate")) < 0.0799:
+		push_error("SmokeTest: photosynthetic intake rate regressed below v0.14.1 value")
+		instance.queue_free(); return false
 
 	# (2) 基础代谢：提高 base_metabolic_cost 后，固定能量细胞在若干 tick 内必须下降。
 	manager.set("base_metabolic_cost", 0.4)
@@ -3218,15 +3227,27 @@ func _check_dev_editor_landing() -> bool:
 	if macro_draft.size() != 26 or macro_controls.size() != 26:
 		push_error("SmokeTest: Macro draft controls incomplete")
 		dev.queue_free(); return false
-	var draft_hash_before: int = int((dev.get("draft") as RefCounted).call("hash"))
-	dev.call("_on_macro_bool_changed", true, "make_glue")
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	var draft_hash_before: int = int(draft_ref.call("hash"))
 	dev.call("_on_macro_value_changed", 0.8, "split_mass")
+	if int(draft_ref.call("hash")) != draft_hash_before:
+		push_error("SmokeTest: non-glue Macro field must not change GNP1 hash")
+		dev.queue_free(); return false
+	dev.call("_on_macro_bool_changed", true, "make_glue")
 	if not bool((dev.call("get_macro_draft") as Dictionary).get("make_glue", false)) or absf(float((dev.call("get_macro_draft") as Dictionary).get("split_mass", 0.0)) - 0.8) > 0.001:
 		push_error("SmokeTest: Macro draft edits did not persist")
 		dev.queue_free(); return false
-	if int((dev.get("draft") as RefCounted).call("hash")) != draft_hash_before:
-		push_error("SmokeTest: Macro draft must not change GNP1 hash")
+	# v0.14.1：make_glue 是版本化语义追加，写入已编码 flags 位并改变 hash；其他 Macro 字段不改变。
+	if (int(draft_ref.get("flags")) & glue_flag) == 0 or int(draft_ref.call("hash")) == draft_hash_before:
+		push_error("SmokeTest: make_glue must map to Genome.flags bit0 and change hash")
 		dev.queue_free(); return false
+	dev.call("_on_macro_bool_changed", false, "make_glue")
+	if (int(draft_ref.get("flags")) & glue_flag) != 0 or int(draft_ref.call("hash")) != draft_hash_before:
+		push_error("SmokeTest: make_glue off must clear flags bit0 and restore hash")
+		dev.queue_free(); return false
+	dev.call("_on_macro_bool_changed", true, "make_glue")
 	# 编辑 a/b/c → 写回 draft.dev_program（真实双向，非静态展示）。
 	dev.call("_on_tree_selected", 0)
 	dev.get("_param_a").set_value(9.0)
@@ -3613,4 +3634,150 @@ func _check_ui_chrome_and_filters() -> bool:
 
 	instance.queue_free()
 	print("SmokeTest: OK UI chrome/pin/toggle + inspect-select + field layer + lens filter (no zoom)")
+	return true
+
+## v0.14.1：食物衰亡变慢 + 光合产能提高，参数与行为同时回归。
+func _check_v0141_food_and_photosynthesis() -> bool:
+	var food_script: Script = load("res://scripts/core/data/FoodStore.gd") as Script
+	var decay: float = float(food_script.get_script_constant_map().get("MASS_DECAY", 0.11))
+	if decay > 0.02:
+		push_error("SmokeTest: food mass decay not slowed (%.4f)" % decay)
+		return false
+	var store: RefCounted = food_script.new() as RefCounted
+	store.call("spawn", Vector2(120.0, 120.0), 0.2, 0.5)
+	for _i in range(120):
+		store.call("advance", 1.0 / 60.0)
+	if int(store.call("active_count")) != 1 or float(store.call("get_mass", 0)) < 0.15:
+		push_error("SmokeTest: food vanished too fast within 120 ticks")
+		return false
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var rate: float = float(manager.get("photosynthetic_intake_rate"))
+	if rate < 0.0799 or rate > 0.0801:
+		push_error("SmokeTest: photosynthetic intake rate is not v0.14.1 value (%.4f)" % rate)
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.14.1 food decay + photosynthetic rate")
+	return true
+
+## v0.14.1：诊断面板显示产能/自身耗能/连接转出/连接转入，数值来自只读诊断派生。
+func _check_v0141_energy_flow_diagnostics() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var bus: Node = instance.get_node("Simulation/CommandBus")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	manager.set("base_metabolic_cost", 0.0)
+	manager.set("movement_energy_cost", 0.0)
+	manager.set("heterotrophic_intake_rate", 0.0)
+	manager.set("photosynthetic_intake_rate", 0.0)
+	manager.set("chemotrophic_intake_rate", 0.0)
+	manager.set("default_transfer_rate", 0.05)
+	# 同一 org 的两枚细胞：用 flags=0 的一次 DIVIDE 发育产生，再手动建连。
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var plain_genome: RefCounted = genome_script.new() as RefCounted
+	plain_genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	plain_genome.call("set_development_program", [{"opcode": 0, "a": 0, "b": 64, "c": 14}])
+	if int(manager.call("register_zygote", 0, 0, -1, plain_genome, Vector2(250, 250), 0.8, 0)) < 0:
+		push_error("SmokeTest: energy-flow test zygote registration failed")
+		instance.queue_free(); return false
+	manager.call("advance_development_tick")
+	if int(cells.call("size")) < 2:
+		push_error("SmokeTest: energy-flow test could not develop two cells")
+		instance.queue_free(); return false
+	var donor: int = 0
+	var receiver: int = 1
+	if not bool(cells.call("link_cells", donor, receiver, 14.0)):
+		push_error("SmokeTest: energy-flow test could not link cells")
+		instance.queue_free(); return false
+	var energies: PackedFloat32Array = cells.get("cell_energy")
+	energies[donor] = 0.8
+	energies[receiver] = 0.1
+	cells.set("cell_energy", energies)
+	manager.call("advance_physics_tick", 1.0 / 60.0)
+	var flow: Dictionary = manager.get("_energy_flow") as Dictionary
+	var out_values: PackedFloat64Array = flow.get("link_out", PackedFloat64Array())
+	var in_values: PackedFloat64Array = flow.get("link_in", PackedFloat64Array())
+	if out_values.size() <= donor or in_values.size() <= receiver or out_values[donor] <= 0.0 or in_values[receiver] <= 0.0:
+		push_error("SmokeTest: link transfer was not recorded in diagnostic buffer")
+		instance.queue_free(); return false
+	bus.call("enqueue", {"type": "INSPECT", "position": cells.call("get_position", donor), "delta": Vector2.ZERO, "kind": "world"})
+	bus.call("execute_tick_commands", 2)
+	var info: Dictionary = manager.call("get_live_inspection") as Dictionary
+	for key in ["production", "self_cost", "link_out", "link_in", "predation_drain", "energy_flow_tick"]:
+		if not info.has(key):
+			push_error("SmokeTest: live inspection missing energy flow key " + key)
+			instance.queue_free(); return false
+	if float(info.get("link_out", 0.0)) <= 0.0 or float(info.get("self_cost", 0.0)) < 0.0:
+		push_error("SmokeTest: live inspection energy flow values invalid")
+		instance.queue_free(); return false
+	var report: Node = instance.get_node_or_null("UI/AnalysisPanel")
+	if report == null:
+		push_error("SmokeTest: analysis panel missing for energy flow display")
+		instance.queue_free(); return false
+	report.call("refresh_now")
+	var inspect_label: Label = report.find_child("InspectText", true, false) as Label
+	var report_text: String = str(inspect_label.text) if inspect_label != null else ""
+	if not report_text.contains("产能") or not report_text.contains("自身耗能") or not report_text.contains("传输给其他细胞"):
+		push_error("SmokeTest: analysis panel did not render energy flow breakdown")
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.14.1 energy flow diagnostics")
+	return true
+
+## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
+func _check_v0141_glue_link() -> bool:
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var cells: RefCounted = manager.get("cells") as RefCounted
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var glue_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1))
+	var program: Array = [{"opcode": 0, "a": 0, "b": 64, "c": 14}]
+	var genome_on: RefCounted = genome_script.new() as RefCounted
+	genome_on.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome_on.set("flags", glue_flag)
+	genome_on.call("set_development_program", program)
+	var parent_on: int = int(cells.call("size"))
+	var org_on: int = int(manager.call("register_zygote", 0, 0, -1, genome_on, Vector2.ZERO, 0.8, 0))
+	if org_on < 0:
+		push_error("SmokeTest: glue genome registration failed")
+		instance.queue_free(); return false
+	manager.call("advance_development_tick")
+	if int(cells.call("size")) != parent_on + 2 or not bool(cells.call("has_link", parent_on, parent_on + 1)):
+		push_error("SmokeTest: glue genome division did not auto-link parent and child (size=%d parent=%d links=%d flag=%d has_glue=%s)" % [
+			int(cells.call("size")), parent_on, (cells.get("link_cell_a") as PackedInt32Array).size(), glue_flag,
+			str(genome_script.call("has_glue_links", manager.get("genomes")[org_on]))])
+		instance.queue_free(); return false
+	var parent_off: int = int(cells.call("size"))
+	var genome_off: RefCounted = genome_script.new() as RefCounted
+	genome_off.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome_off.set("flags", 0)
+	# DIVIDE.a 是全局细胞索引，不是个体内序号；第二个个体的母细胞索引为 parent_off。
+	genome_off.call("set_development_program", [{"opcode": 0, "a": parent_off, "b": 64, "c": 14}])
+	var org_off: int = int(manager.call("register_zygote", 1, 0, -1, genome_off, Vector2(200, 0), 0.8, 0))
+	if org_off < 0:
+		push_error("SmokeTest: non-glue genome registration failed")
+		instance.queue_free(); return false
+	manager.call("advance_development_tick")
+	if int(cells.call("size")) != parent_off + 2 or bool(cells.call("has_link", parent_off, parent_off + 1)):
+		push_error("SmokeTest: non-glue genome must not auto-link (size=%d parent=%d links=%d link_a=%s)" % [
+			int(cells.call("size")), parent_off, (cells.get("link_cell_a") as PackedInt32Array).size(), str(cells.get("link_cell_a"))])
+		instance.queue_free(); return false
+	instance.queue_free()
+	print("SmokeTest: OK v0.14.1 glue links child without LINK instruction")
 	return true
