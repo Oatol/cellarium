@@ -873,3 +873,27 @@ Cell Lab `CellWorld.f(double)` 已证实（§2）：半径 `d` 不随能量直�
 - SmokeTest `OK v0.21.0`：倍增经过 2/4/8；出生帧 `dist/contact=0.1`（即 0.2r）且半径保持 1.0；下一 tick 排斥拉开。基因预览测试断言指示器数量随分裂递增、角度在 0..TAU。双工程 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
 - 探针 `HalfCircleProbe.gd`：`BIRTH_FRAME dist=1.4 contact=14.0 ratio=0.1`；`NEXT_TICK dist=14.0 pushed_apart=true`。`DivisionProbe.gd`：1→2→4→8→16→32、能量守恒。
 - 证据边界：静态反编译 + headless CPU 回退探针；半圆持续帧数由接触排斥速度决定，未在渲染层加动画；GPU 实际观感需窗口环境复核。
+
+---
+
+## 31. v0.22.0：去掉 depth 分裂闸门（残余限制修复）
+
+### 31.1 现象与根因
+
+用户实测细胞能量 2.0892（阈值 0.05 的 40 倍）、连接 2 却不分裂，只有链末端新生细胞分裂，呈线性增长。`GateProbe.gd` 复刻候选筛选逐细胞报告：所有成熟细胞被 `depth=1>=1` 挡住，旧行为卡在 4 细胞。
+
+根因：v0.20.0 移除 per-organism cooldown 串行锁时遗漏了第二套独立闸门——`_apply_autonomous_lifecycle` 的 `depth >= mode.max_divisions` 检查 + 执行阶段母细胞 `depth+1`。对 M1→M1+M1 自增殖模式（`normalized_mode` 默认 `max_divisions=1`），每个细胞分裂一次后 depth=1 永久锁死，只剩 depth=0 的新子细胞能分裂。
+
+### 31.2 查证与修复
+
+Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode depth 闸门；分裂次数由端粒 `T∈{-1,5,10,20,40,80}` 控制，`-1` 无限、母子同减、归零死亡。本项目 `cell_telomere`（v0.18）已承担该角色，depth 闸门是本项目额外加的限制，按用户决策去掉以对齐 Cell Lab。
+
+- 删掉候选阶段 `depth >= max_divisions` 检查；母/子分裂时 depth 不再累加（继承原值，自增殖恒 0）。字段/存档/hash 兼容，不升 schema。
+- `GenomePreview` 三条派生路径同步去掉 depth 闸门与 depth+1，预览步数仍由顶层 `max_divisions` 约束。
+- 端粒继续作为分裂次数限制。GNP1、tick 顺序、单帧 12 tick 上限不动。
+
+### 31.3 验证
+
+- SmokeTest `OK v0.22.0`：单模式 max_divisions=1 自增殖突破旧上限达 ≥8、depth 恒 0；双工程 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
+- GateProbe：修复后 tick=3 为 8 细胞（修复前 4）、tick=55 为 128 细胞。
+- 证据边界：能量不足时仍按门槛停分裂（GrowthProbe 显示真实代谢下产能弱属参数平衡）；静态反编译 + headless CPU 探针，GPU 观感需窗口复核。

@@ -449,10 +449,10 @@ func _apply_autonomous_lifecycle() -> void:
 			mode_index = 0 if cell_index >= mode_ids.size() else int(mode_ids[cell_index])
 			depth = 0 if cell_index >= mode_depths.size() else int(mode_depths[cell_index])
 			mode_data = GENOME_SCRIPT.call("get_mode", genome, mode_index)
-			var local_max: int = clampi(int(mode_data.get("max_divisions", 0)), 0, int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENE_DIVISIONS", 8)))
-			if local_max <= 0 or depth >= local_max:
-				continue
 			threshold = maxf(0.05, float(mode_data.get("division_mass", threshold)))
+			# v0.22.0：去掉 mode depth/max_divisions 分裂闸门，对齐 Cell Lab e(double)。
+			# Cell Lab 无「同模式分裂 N 代后锁死」机制；分裂次数由端粒 T 控制（-1 无限），
+			# 本项目 cell_telomere 已承担该角色。depth 字段保留仅为兼容存档/预览莫斯，不再限制分裂。
 			if _is_link_division_blocked(genome, cell_index):
 				continue
 		if int(cells.call("get_telomere", cell_index)) == 0:
@@ -528,10 +528,11 @@ func _apply_autonomous_lifecycle() -> void:
 		cells.call("set_position", cell_index, birth_origin - split_dir * half_offset)
 		cells.call("set_position", child_index, birth_origin + split_dir * half_offset)
 		if has_modes:
-			var current_mode_index: int = clampi(int(candidate.get("mode_index", 0)), 0, 15)
-			var parent_depth: int = int(candidate["depth"]) + 1 if int(candidate["child1_mode"]) == current_mode_index else 0
-			_apply_cell_mode(genome, cell_index, int(candidate["child1_mode"]), parent_depth)
-			_apply_cell_mode(genome, child_index, int(candidate["child2_mode"]), 0)
+			# v0.22.0：不再累加 depth。Cell Lab 无同模式分裂代数上限；depth 字段保留为只读谱系标记，
+			# 分裂次数由端粒控制。母/子 depth 均不随分裂递增（子细胞继承母细胞 depth）。
+			var inherited_depth: int = int(candidate.get("depth", 0))
+			_apply_cell_mode(genome, cell_index, int(candidate["child1_mode"]), inherited_depth)
+			_apply_cell_mode(genome, child_index, int(candidate["child2_mode"]), inherited_depth)
 			var mode_ratio_total: float = float(energies[cell_index]) + float(energies[child_index])
 			energies[cell_index] = mode_ratio_total * ratio
 			energies[child_index] = mode_ratio_total * (1.0 - ratio)

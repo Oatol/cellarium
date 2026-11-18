@@ -4,6 +4,34 @@
 
 ---
 
+## 0.22.0 — 2026-11-19
+
+**类型**：缺陷修复（残余 depth 分裂闸门）——对齐 Cell Lab 的分裂次数控制语义
+**触发**：用户实测细胞能量 2.0892（阈值 0.05 的 40 倍）却不分裂，只有链末端新生细胞分裂，呈线性增长。程序化闸门探针复现：所有细胞 `depth=1>=1` 被挡（旧行为卡在 4 细胞）。查证 Cell Lab `e(double)` 无 mode depth 闸门，分裂次数由端粒 `T∈{-1,5,10,20,40,80}` 控制，本项目 `cell_telomere` 已承担该角色。
+
+### 根因
+
+v0.20.0 只移除了 per-organism cooldown 串行锁，但遗漏了第二套独立闸门：`_apply_autonomous_lifecycle` 里 `depth >= mode.max_divisions` 检查，配合执行阶段母细胞分裂后 `depth+1`。对 M1→M1+M1 自增殖模式（`normalized_mode` 默认 `max_divisions=1`），每个细胞分裂一次后 depth=1 永久锁死，只剩 depth=0 的新子细胞能分裂 → 1/2/3/4 线性链。
+
+### 修复
+
+- `OrganismManager`：删掉 `depth >= max_divisions` 候选闸门；母/子细胞分裂时 depth 不再累加（均继承原 depth，自增殖恒为 0）。`cell_mode_depth` 字段、存档与 hash 保持兼容，不升 schema。
+- `GenomePreview`：三条派生路径同步去掉 depth 候选限制与 depth+1，预览步数仍由顶层 `max_divisions` 约束以免无限绘制。
+- 端粒（`cell_telomere`）继续作为分裂次数限制：有限值母子同减、归零死亡，`-1` 无限。GNP1、tick 顺序、单帧 12 tick 上限、schema v7 均不动。
+
+### 验证
+
+- SmokeTest 新增 `OK v0.22.0`：单模式 max_divisions=1 自增殖，细胞数突破旧上限达到 ≥8 且 depth 恒为 0。
+- 闸门探针 `GateProbe.gd` 对比：修复前 tick=3 为 4 细胞全部 `depth=1>=1` 被挡；修复后 tick=3 为 8 细胞全部 depth=0、仅剩正常 cooldown/能量门槛，tick=55 达 128 细胞。
+- 双工程（发布工程 + D 盘运行工程）均 `SCRIPTS=51 FAILURES=0 ERRORS=0`。
+
+### 边界
+
+- 本次只加诊断探针 GateProbe.gd / GrowthProbe.gd，未改判定阈值或产能参数。能量不足时仍按能量门槛停止分裂（真实代谢下光合产能弱，见 GrowthProbe），属参数平衡而非逻辑缺陷。
+- 静态反编译证据 + headless CPU 探针；GPU 实际观感需窗口环境复核。
+
+---
+
 ## 0.21.0 — 2026-11-19
 
 **类型**：分裂机制对齐 Cell Lab（per-cell 并行倍增 + 半圆出生形状）+ 发育预览分裂指示器

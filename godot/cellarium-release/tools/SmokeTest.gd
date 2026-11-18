@@ -208,6 +208,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0210_division_doubling_and_split_shape():
 		failures += 1
+	if not await _check_v0220_no_depth_gate():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -4664,3 +4666,50 @@ func _check_v0210_division_doubling_and_split_shape() -> bool:
 	if ok:
 		print("SmokeTest: OK v0.21.0 division doubling / half-circle birth / contact separation")
 	return ok
+
+## v0.22.0：对齐 Cell Lab——去掉 mode max_divisions 的 depth 分裂闸门。
+## 旧行为：自增殖模式（子代都回自身）max_divisions=1 时母细胞分裂一次后 depth=1 永久锁死，卡在 4 细胞。
+## 新行为：depth 不累加上限，能量充足时能持续倍增；分裂次数只由端粒控制。
+func _check_v0220_no_depth_gate() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var context: Dictionary = _v0180_prepare_manager(instance)
+	var manager: Node = context["manager"]
+	var cells: RefCounted = context["cells"]
+	manager.set("default_transfer_rate", 0.0)
+	manager.set("autonomous_division_enabled", true)
+	# 单模式 M1->M1+M1，max_divisions=1（旧版会锁死在 depth=1）。
+	var genome: RefCounted = _v0180_mode_genome(genome_script, -1, -1, -1, true)
+	var modes: Array = genome.get("modes") as Array
+	var tuned: Dictionary = (modes[0] as Dictionary).duplicate()
+	tuned["max_divisions"] = 1
+	tuned["transfer_rate"] = 0.0
+	modes[0] = tuned
+	genome.call("set_modes", modes)
+	manager.call("register_zygote", 92, 92, -1, genome, Vector2(250, 250), 8.0, 0)
+	var max_seen: int = 1
+	var all_depth_zero: bool = true
+	for tick in range(40):
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		max_seen = maxi(max_seen, int(cells.call("size")))
+		var depths: PackedByteArray = cells.get("cell_mode_depth") as PackedByteArray
+		var alive: PackedByteArray = cells.get("cell_alive") as PackedByteArray
+		for i in range(depths.size()):
+			if alive[i] != 0 and depths[i] != 0:
+				all_depth_zero = false
+		if max_seen >= 8:
+			break
+	instance.queue_free()
+	# 关键断言：旧 depth 闸门会让细胞数卡在 4；去掉后应突破到 >=8。
+	if max_seen < 8:
+		push_error("SmokeTest: v0.22.0 depth gate must not cap self-proliferation at 4 (max_seen=%d)" % max_seen)
+		return false
+	if not all_depth_zero:
+		push_error("SmokeTest: v0.22.0 self-proliferating cells must keep depth=0")
+		return false
+	print("SmokeTest: OK v0.22.0 no depth gate / self-proliferation beyond depth=1")
+	return true

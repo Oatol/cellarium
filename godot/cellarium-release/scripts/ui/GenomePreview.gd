@@ -198,12 +198,12 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 			var cell: Dictionary = cells[cell_index]
 			var candidate_index: int = clampi(int(cell.get("mode", 0)), 0, modes.size() - 1)
 			var candidate: Dictionary = modes[candidate_index]
-			var depth: int = int(cell.get("depth", 0))
-			if depth < int(candidate.get("max_divisions", 0)):
-				parent_index = cell_index
-				parent_mode = candidate
-				parent_mode_index = candidate_index
-				break
+			# v0.22.0：去掉 depth 分裂闸门（对齐 Cell Lab，运行时已同步）；
+			# 预览步数只由 global_divisions 约束，避免无限绘制。任意模式细胞都可作为下一分裂源。
+			parent_index = cell_index
+			parent_mode = candidate
+			parent_mode_index = candidate_index
+			break
 		if parent_index < 0:
 			break
 		var parent: Dictionary = cells[parent_index]
@@ -222,7 +222,8 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 		parent["pos"] = split_center - direction * separation * 0.5
 		parent["type"] = int(mode1.get("cell_type", 0))
 		parent["mode"] = child1_mode
-		parent["depth"] = int(parent.get("depth", 0)) + 1 if child1_mode == parent_mode_index else 0
+		# v0.22.0：不再按分裂累加 depth（对齐运行时/Cell Lab）。
+		parent["depth"] = int(parent.get("depth", 0))
 		parent["born"] = false
 		for cell in cells:
 			if int((cell as Dictionary).get("index", -1)) != parent_index:
