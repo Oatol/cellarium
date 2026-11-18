@@ -63,7 +63,6 @@ var _trait_sliders: Array[HSlider] = []
 var _trait_labels: Array[Label] = []
 var _timeline_rows: HBoxContainer = null
 var _summary_label: Label = null
-var _type_option: OptionButton = null
 var _respiration_option: OptionButton = null
 var _status_label: Label = null
 var _gene_slot_labels: Array[Label] = []
@@ -148,7 +147,7 @@ static func gene_help_text() -> String:
 		"基因驱动发育（模仿 Cell Lab Macro，无指令序列）\n"
 		+ "① 一个基因组由多个「模式」组成（左栏列表，默认 5 个）。每个模式独立保存细胞类型、行为、两个子代、连接/镜像/角度、分裂质量与特殊控制。\n"
 		+ "② 分裂即分化：母细胞变成一个子代模式，新细胞是另一子代模式；每个模式只选择「子代 1 / 子代 2」。\n"
-		+ "③ 发育预览里的细胞可点击，直接跳到它所属模式继续编辑；预览只读，不跑第二套模拟。\n"
+		+ "③ 发育预览里的细胞可点击，直接跳到它所属模式继续编辑。\n"
 		+ "④ 连接由逐模式的黏附素与保留黏附素决定；连接传递率让相连细胞按能量差守恒转移，生态报告会显示转出/转入。\n"
 		+ "⑤ v0.18.0：个体最大细胞数默认 -1（无限），不再有 8 细胞硬上限；全局仍受 8000 容量保护。逐模式可设连接数抑制分裂与端粒/谱系分裂次数。\n"
 		+ "⑥ Macro 40 Gene 槽/完整行为总线未穷尽；本页字段只作为版本化追加写入 payload/schema，不进冻结 GNP1。"
@@ -168,7 +167,7 @@ static func instruction_help_text() -> String:
 	return (
 		"指令集（dev_program 从上到下按 tick 顺序执行，不做并行）\n"
 		+ "① DIVIDE 分裂：a=被分裂的细胞索引（从 0 合子开始）；b=分裂角度 0–255（0=向右，64=向下，128=向左，192=向上）；c=亲子间距（世界单位，建议 14，太小会重叠）。每 1 条 DIVIDE 多 1 个细胞。\n"
-		+ "② DIFFERENTIATE 分化：a=细胞索引；b=目标类型（光合 4、硝化 10 等，见表现类型下拉）；c 保留。\n"
+		+ "② DIFFERENTIATE 分化：a=细胞索引；b=目标类型（光合 4、硝化 10 等，见右栏「细胞类型」）；c 保留。\n"
 		+ "③ LINK 连接：a/b=两个细胞索引；c=连接静息长度（14 起）。不填连接也能分裂，只是不构成协作体。\n"
 		+ "不会分裂最常见原因：dev_program 里没有 DIVIDE，或只改了草案没点「装载合成器」并在皿内点击放置。用上面「分裂×1」模板即可立刻验证。"
 	)
@@ -192,17 +191,10 @@ func _build_ui() -> void:
 	var title: Label = _make_section_title("细胞编辑 · CELL EDITOR · 参考 Cell Lab / Macro")
 	_content.add_child(title)
 
-	# 顶部工具条：表现类型 + 呼吸方式 + 模板 + Apply（写入仍只经 CommandBus）。
+	# 顶部工具条：呼吸方式 + 模板 + Apply（写入仍只经 CommandBus）。
+	# 表现类型不再单独选择：真相源是当前模式的「细胞类型」，由右栏 Macro Draft 编辑。
 	var toolbar: HBoxContainer = HBoxContainer.new()
 	toolbar.add_theme_constant_override("separation", 6)
-	var type_label: Label = Label.new()
-	type_label.text = "表现类型"
-	_type_option = OptionButton.new()
-	_type_option.custom_minimum_size = Vector2(150, 0)
-	for entry in VISUALS.call("entries"):
-		_type_option.add_item("%d %s" % [int(entry.get("id", 0)), str(entry.get("label", "?"))])
-	toolbar.add_child(type_label)
-	toolbar.add_child(_type_option)
 	var respiration_label: Label = Label.new()
 	respiration_label.text = "呼吸"
 	_respiration_option = OptionButton.new()
@@ -246,24 +238,7 @@ func _build_ui() -> void:
 		toolbar.add_child(button)
 	_content.add_child(toolbar)
 
-	# 指令集说明：把 dev_program 的三个 opcode 与 a/b/c 语义写清楚，避免「不会用、细胞不分裂」。
-	var help_panel: PanelContainer = PanelContainer.new()
-	help_panel.name = "InstructionHelp"
-	var help_margin: MarginContainer = MarginContainer.new()
-	help_margin.add_theme_constant_override("margin_left", 8)
-	help_margin.add_theme_constant_override("margin_top", 5)
-	help_margin.add_theme_constant_override("margin_right", 8)
-	help_margin.add_theme_constant_override("margin_bottom", 5)
-	var help_label: Label = Label.new()
-	help_label.name = "InstructionHelpLabel"
-	help_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	help_label.add_theme_font_size_override("font_size", 11)
-	help_label.text = gene_help_text()
-	help_margin.add_child(help_label)
-	help_panel.add_child(help_margin)
-	_content.add_child(help_panel)
-
-	# 主体三栏。
+	# 主体三栏（v0.27.0：删除顶部长篇说明，减少滚动；字段含义见各控件 tooltip）。
 	var body: HSplitContainer = HSplitContainer.new()
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	body.custom_minimum_size = Vector2(0, 420)
@@ -311,7 +286,7 @@ func _build_left_panel() -> Control:
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_bottom", 6)
 	var box: VBoxContainer = VBoxContainer.new()
-	box.add_child(_make_section_title("GENOME PREVIEW · 发育预览（只读，不跑第二套模拟）"))
+	box.add_child(_make_section_title("GENOME PREVIEW · 发育预览"))
 	_genome_preview = (GENOME_PREVIEW_SCENE as PackedScene).instantiate()
 	_genome_preview.name = "GenomePreview"
 	if _genome_preview.has_signal("mode_selected") and not _genome_preview.is_connected("mode_selected", Callable(self, "_on_preview_mode_selected")):
@@ -1182,7 +1157,7 @@ func _on_apply() -> void:
 		if _status_label != null:
 			_status_label.text = "草案无效：指令数超过 %d 或操作数越界" % MAX_DEV_INSTRUCTIONS
 		return
-	_type_id = 0 if _type_option == null else _type_option.selected
+	_type_id = _current_type_id()
 	draft_applied.emit(draft.duplicate_genome(), _type_id)
 	visible = false
 
@@ -1197,8 +1172,12 @@ func set_dev_program(program: Array) -> bool:
 	_write_program(program)
 	return true
 
+## 表现类型下拉已删除；类型真相源是当前模式的 cell_type（右栏 Macro Draft）。
+func _current_type_id() -> int:
+	return clampi(int(_macro_draft.get("cell_type", 0)), 0, 17)
+
 func get_type_id() -> int:
-	return 0 if _type_option == null else _type_option.selected
+	return _current_type_id()
 
 ## 供 GameHUD 读取当前草案摘要（反馈用）。
 func draft_summary() -> String:

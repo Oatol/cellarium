@@ -87,6 +87,7 @@ func _initialize() -> void:
 		 "make_glue": true, "initial": true, "telomere": -1},
 	]
 	inst.call("set_program", [], {}, true, modes)
+	_check(int(inst.call("get_current_tick")) == 0, "预览时间轴默认 t=0（避免一拖就重跑）")
 	var nstate: int = int(inst.call("get_state_count"))
 	_check(nstate >= 2, "GenomePreview 多模式真实模拟状态 >=2 (got " + str(nstate) + ")")
 	var cells_last: int = int(inst.call("get_cell_count_at", nstate - 1))

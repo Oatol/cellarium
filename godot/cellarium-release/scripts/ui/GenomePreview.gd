@@ -23,6 +23,9 @@ const MAX_DIVISION_EVENTS: int = 8   # 里程碑快照上限（供只读 API/回
 const VIEW_SCALE_MAX: float = 2.4
 const VIEW_SCALE_MIN: float = 0.12
 const VIEW_MARGIN_PX: float = 12.0
+## 默认草案 division_mass=1.0 超出真实能量上限，永远不会分裂；空跑到 4000 tick 会卡死。
+## 连续 N tick 没有分裂就认为该草案不再发育，提前收尾（有分裂时仍按真实发育继续）。
+const IDLE_STOP_TICKS: int = 240
 
 var _world: RefCounted = null
 var _pan: Vector2 = Vector2.ZERO
@@ -209,12 +212,14 @@ func _run_simulation(genes: Array[Dictionary], initial_slot: int, max_events: in
 	_world.setup(_genes, _initial_slot)
 	var accumulated_splits: Array[Dictionary] = []
 	var divisions: int = 0
+	var last_split_tick: int = 0
 	# 初始快照（合子）
 	_states.append(_make_snapshot(0, "真实模拟 · 合子 · t=0", []))
 	for _t in range(4000):
 		_world.step()
 		var splits: Array[Dictionary] = _world.consume_splits()
 		if not splits.is_empty():
+			last_split_tick = int(_world.get_tick())
 			for entry in splits:
 				accumulated_splits.append((entry as Dictionary).duplicate(true))
 				divisions += 1
@@ -222,22 +227,25 @@ func _run_simulation(genes: Array[Dictionary], initial_slot: int, max_events: in
 				var cells: Array[Dictionary] = _world.snapshot_cells()
 				var caption: String = "真实模拟 · 分裂 %d · %d 细胞 · t=%d" % [divisions, cells.size(), int(_world.get_tick())]
 				_states.append(_make_snapshot(divisions, caption, accumulated_splits.duplicate(true)))
-		if bool(_world.is_grown()):
+		# 无分裂草案（如默认 division_mass=1.0）不再空跑满 4000 tick。
+		if bool(_world.is_grown()) or int(_world.get_tick()) - last_split_tick >= IDLE_STOP_TICKS:
 			break
 	_max_tick = int(_world.get_tick())
-	# 时间轴范围 = 发育完成 tick；初始停在末态（Cell Lab 默认展示已发育形态，可拖回合子）。
+	# 时间轴范围 = 本次发育收尾 tick；初始停在 t=0，拖到末态才需重跑。
 	_init_timeline()
 
 ## 连续时间定位：拖动滑块 → 真实模拟续跑/重置到该 tick → 渲染那一刻。
+## 默认停在 t=0（合子）：先跑完整段只为拿 _max_tick/里程碑，拖到末态才需重跑 74 tick，
+## 默认在末态时用户一拖就会触发重置+重跑而卡顿（Cell Lab Macro 也是从 0 小时开始）。
 func _init_timeline() -> void:
 	if _timeline != null:
 		_timeline.min_value = 0.0
 		_timeline.max_value = float(maxi(1, _max_tick))
 		_timeline.step = 1.0
 		_syncing_timeline = true
-		_timeline.value = float(_max_tick)
+		_timeline.value = 0.0
 		_syncing_timeline = false
-	_seek_to(_max_tick)
+	_seek_to(0)
 
 func _on_timeline_changed(value: float) -> void:
 	if _syncing_timeline:

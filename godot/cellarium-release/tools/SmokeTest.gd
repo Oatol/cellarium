@@ -3254,6 +3254,10 @@ func _check_dev_editor_landing() -> bool:
 	if dev.get_node_or_null("Panel/Content") == null:
 		push_error("SmokeTest: dev editor content skeleton missing")
 		dev.queue_free(); return false
+	# v0.27.0：顶部长篇说明已删除，避免遮挡预览并减少滚动。
+	if dev.find_child("InstructionHelp", true, false) != null:
+		push_error("SmokeTest: dev editor instruction help panel must be removed")
+		dev.queue_free(); return false
 	# v0.15.0：默认基因模式，dev_program 为空；DIVIDE/DIFFERENTIATE/LINK UI 全部隐藏。
 	if not (dev.call("_program") as Array).is_empty():
 		push_error("SmokeTest: gene-mode editor must have empty dev_program")
@@ -3310,6 +3314,10 @@ func _check_dev_editor_landing() -> bool:
 		"max_divisions": 3, "make_glue": true, "max_connections": 16,
 	}
 	preview_node.call("set_program", [], preview_draft, true)
+	# v0.27.0：默认停在 t=0（合子），避免初始就停在末态导致一拖就重置重跑。
+	if int(preview_node.call("get_current_tick")) != 0:
+		push_error("SmokeTest: preview timeline must default to tick 0")
+		dev.queue_free(); return false
 	var state_count_gp: int = int(preview_node.call("get_state_count"))
 	if state_count_gp < 2 or int(preview_node.call("get_cell_count_at", state_count_gp - 1)) < 2:
 		push_error("SmokeTest: gene preview did not simulate division sequence")
