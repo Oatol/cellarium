@@ -688,15 +688,26 @@ func _on_add_mode() -> void:
 	_commit_current_mode()
 	var created: Dictionary = GENOME_SCRIPT.call("normalized_mode", {}, _modes.size())
 	_modes.append(created)
-	_load_mode(_modes.size() - 1)
+	_load_mode(_modes.size() - 1, false)
 	_set_macro_status("mode")
 
 func _on_remove_mode() -> void:
 	if _modes.size() <= 1:
 		return
 	_commit_current_mode()
-	_modes.remove_at(_selected_mode)
-	_load_mode(clampi(_selected_mode, 0, _modes.size() - 1))
+	var removed_index: int = _selected_mode
+	_modes.remove_at(removed_index)
+	# 子代模式引用按删除后的数组重编号：指向被删槽的回退到 0，后续槽索引前移。
+	for mode_index in range(_modes.size()):
+		var mode: Dictionary = _modes[mode_index]
+		for key in ["child1_mode", "child2_mode"]:
+			var reference: int = int(mode.get(key, 0))
+			if reference == removed_index:
+				mode[key] = 0
+			elif reference > removed_index:
+				mode[key] = reference - 1
+	# 槽已删除，不能再提交旧 _macro_draft：否则会把旧槽写回越界索引并闪退。
+	_load_mode(clampi(removed_index, 0, _modes.size() - 1), false)
 	_set_macro_status("mode")
 
 func _on_mode_name_changed(value: String) -> void:
@@ -714,9 +725,12 @@ func _on_mode_name_changed(value: String) -> void:
 func select_mode(index: int) -> void:
 	_load_mode(index)
 
-func _load_mode(index: int) -> void:
-	if not _modes.is_empty():
+func _load_mode(index: int, commit_current: bool = true) -> void:
+	if commit_current and not _modes.is_empty():
 		_commit_current_mode()
+	# 增删槽后不再提交旧草稿，但仍要把最新模式列表同步进 Genome 草案。
+	if draft != null and not _modes.is_empty():
+		draft.call("set_modes", _modes)
 	_selected_mode = clampi(index, 0, maxi(0, _modes.size() - 1))
 	if _modes.is_empty():
 		_macro_draft = default_macro_draft()

@@ -4,6 +4,28 @@
 
 ---
 
+## 0.17.1 — 2026-11-18
+
+**类型**：崩溃修复（模式槽删除）
+**触发**：用户反馈删除已有模式会直接闪退，编辑器跳到 `DevEditorPanel.gd` 的子代角度写入循环附近。
+
+### 根因
+
+- `_on_remove_mode()` 先调用 `_commit_current_mode()`，随后 `_load_mode()` 默认又提交一次旧的 `_macro_draft`。槽已从 `_modes` 删除，但第二次提交仍把旧草稿写回已越界的索引，触发 `Invalid assignment of index`。
+- 删除槽后其余模式的 `child1_mode / child2_mode` 未重编号，可能指向不存在的模式。
+
+### 修复
+
+- `_load_mode(index, commit_current := true)`：增删槽路径传 `false`，只同步最新 `modes` 到 Genome 草案，不再重复提交旧草稿。
+- 删除槽时把指向被删槽的子代模式引用回退到 0，引用后续槽的索引前移。
+- 新增 SmokeTest 覆盖：删除当前/末位/中间模式、删除后新增模式、草稿有效性与模式数量一致。
+
+### 验证 / 同步
+
+- 发布工程 `SCRIPTS=51 FAILURES=0 EXITCODE=0`；D 盘工程同步 `DevEditorPanel.gd` 与 `SmokeTest.gd` 后同口径回归。
+
+---
+
 ## 0.17.0 — 2026-11-18
 
 **类型**：玩法机制版本化追加（多模式基因组 / 两子代分裂 / 连接能量传递；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）

@@ -198,6 +198,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0170_mode_editor_and_preview():
 		failures += 1
+	if not await _check_v0170_mode_remove():
+		failures += 1
 	if not await _check_v0170_runtime_transfer_and_modes():
 		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
@@ -4025,6 +4027,43 @@ func _check_v0170_mode_editor_and_preview() -> bool:
 		dev.queue_free(); return false
 	dev.queue_free()
 	print("SmokeTest: OK v0.17.0 mode editor / two child modes / preview jump / hash boundary")
+	return true
+
+## v0.17.1：删除任意模式槽不得崩溃，且剩余槽数量/名称保持一致。
+func _check_v0170_mode_remove() -> bool:
+	var dev_scene: PackedScene = load("res://scenes/ui/DevEditorPanel.tscn") as PackedScene
+	var dev: Node = dev_scene.instantiate()
+	root.add_child(dev)
+	await process_frame
+	var before: int = (dev.call("get_modes") as Array).size()
+	if before <= 1:
+		push_error("SmokeTest: remove-mode check needs multiple modes")
+		dev.queue_free(); return false
+	# 删除当前模式、末位模式、中间模式各一次。
+	dev.call("_on_remove_mode")
+	if (dev.call("get_modes") as Array).size() != before - 1:
+		push_error("SmokeTest: remove current mode failed")
+		dev.queue_free(); return false
+	dev.call("select_mode", (dev.call("get_modes") as Array).size() - 1)
+	dev.call("_on_remove_mode")
+	if (dev.call("get_modes") as Array).size() != before - 2:
+		push_error("SmokeTest: remove last mode failed")
+		dev.queue_free(); return false
+	dev.call("select_mode", 0)
+	dev.call("_on_remove_mode")
+	if (dev.call("get_modes") as Array).size() != before - 3:
+		push_error("SmokeTest: remove middle mode failed")
+		dev.queue_free(); return false
+	dev.call("_on_add_mode")
+	if (dev.call("get_modes") as Array).size() != before - 2:
+		push_error("SmokeTest: add mode after removal failed")
+		dev.queue_free(); return false
+	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	if not bool(draft_ref.call("is_valid")) or (draft_ref.get("modes") as Array).size() != before - 2:
+		push_error("SmokeTest: draft invalid after mode removal")
+		dev.queue_free(); return false
+	dev.queue_free()
+	print("SmokeTest: OK v0.17.1 mode removal")
 	return true
 
 ## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v4 存档往返。
