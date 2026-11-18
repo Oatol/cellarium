@@ -45,6 +45,10 @@ var cell_telomere: PackedInt32Array = PackedInt32Array()
 ## >=0=上次分裂 tick。取代旧「按个体」串行闸门，让每个细胞独立 cooldown → 链按 1/2/4/8 倍增。
 ## 属于确定性状态，进 hash/存档。
 var cell_division_tick: PackedInt32Array = PackedInt32Array()
+## v0.29.0：细胞朝向（世界弧度）与连接世界方向角，来自 Cell Lab Cell.k / Link.c 的
+## 方向语义；用于分裂旧连接重分配与 FLAGELLOCYTE 后向连接校验。进 hash/存档。
+var cell_orientation: PackedFloat32Array = PackedFloat32Array()
+var link_angle: PackedFloat32Array = PackedFloat32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -78,6 +82,7 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_mode_depth.append(0)
 	cell_telomere.append(-1)
 	cell_division_tick.append(-2)
+	cell_orientation.append(0.0)
 	return index
 
 func size() -> int:
@@ -118,6 +123,7 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	cell_mode_depth[child_index] = cell_mode_depth[index]
 	cell_telomere[child_index] = cell_telomere[index]
 	cell_division_tick[child_index] = cell_division_tick[index]
+	cell_orientation[child_index] = cell_orientation[index]
 	return child_index
 
 func get_position(index: int) -> Vector2:
@@ -235,6 +241,17 @@ func set_position(index: int, position: Vector2) -> bool:
 	cell_pos_y[index] = position.y
 	return true
 
+func get_orientation(index: int) -> float:
+	if index < 0 or index >= cell_orientation.size():
+		return 0.0
+	return float(cell_orientation[index])
+
+func set_orientation(index: int, angle: float) -> bool:
+	if index < 0 or index >= size():
+		return false
+	cell_orientation[index] = fposmod(angle, TAU)
+	return true
+
 func total_energy_for_org(org_id: int) -> float:
 	var total: float = 0.0
 	for i in range(size()):
@@ -254,20 +271,27 @@ func remove_cell(index: int) -> float:
 			link_cell_a.remove_at(link_index)
 			link_cell_b.remove_at(link_index)
 			link_rest_length.remove_at(link_index)
+			if link_index < link_angle.size():
+				link_angle.remove_at(link_index)
 	cell_alive[index] = 0
 	cell_energy[index] = 0.0
 	return released_energy
 
-func link_cells(a: int, b: int, rest_length: float) -> bool:
+func link_cells(a: int, b: int, rest_length: float, angle_world: float = NAN) -> bool:
 	if a < 0 or b < 0 or a >= size() or b >= size() or a == b or rest_length <= 0.0:
 		return false
 	if cell_org_id[a] != cell_org_id[b] or int(cell_link_count[a]) >= MAX_LINKS_PER_CELL or int(cell_link_count[b]) >= MAX_LINKS_PER_CELL:
 		return false
 	if has_link(a, b):
 		return false
+	var stored_angle: float = angle_world
+	if is_nan(stored_angle):
+		var delta: Vector2 = get_position(b) - get_position(a)
+		stored_angle = atan2(delta.y, delta.x) if delta.length_squared() > 0.0 else 0.0
 	link_cell_a.append(a)
 	link_cell_b.append(b)
 	link_rest_length.append(rest_length)
+	link_angle.append(stored_angle)
 	cell_link_count[a] += 1
 	cell_link_count[b] += 1
 	return true
@@ -277,6 +301,48 @@ func has_link(a: int, b: int) -> bool:
 		if (link_cell_a[link_index] == a and link_cell_b[link_index] == b) or (link_cell_a[link_index] == b and link_cell_b[link_index] == a):
 			return true
 	return false
+
+## v0.29.0：旧连接重分配的原子写接口。仅改端点/方向，不改静止长度（Cell Lab Link.a() 深拷贝继承）。
+func get_link_angle(link_index: int) -> float:
+	if link_index < 0 or link_index >= link_angle.size():
+		return 0.0
+	return float(link_angle[link_index])
+
+func set_link_endpoint(link_index: int, new_a: int, new_b: int, angle_world: float) -> bool:
+	if link_index < 0 or link_index >= link_cell_a.size() or new_a < 0 or new_b < 0 \
+		or new_a >= size() or new_b >= size() or new_a == new_b:
+		return false
+	var old_a: int = link_cell_a[link_index]
+	var old_b: int = link_cell_b[link_index]
+	if new_a == old_a and new_b == old_b:
+		pass
+	elif new_a == old_b and new_b == old_a:
+		link_cell_a[link_index] = new_a
+		link_cell_b[link_index] = new_b
+	else:
+		if old_a >= 0 and old_a < size(): cell_link_count[old_a] -= 1
+		if old_b >= 0 and old_b < size(): cell_link_count[old_b] -= 1
+		cell_link_count[new_a] += 1
+		cell_link_count[new_b] += 1
+		link_cell_a[link_index] = new_a
+		link_cell_b[link_index] = new_b
+	if link_index < link_angle.size():
+		link_angle[link_index] = angle_world
+	return true
+
+func remove_link(link_index: int) -> bool:
+	if link_index < 0 or link_index >= link_cell_a.size():
+		return false
+	var a: int = link_cell_a[link_index]
+	var b: int = link_cell_b[link_index]
+	if a >= 0 and a < size(): cell_link_count[a] -= 1
+	if b >= 0 and b < size(): cell_link_count[b] -= 1
+	link_cell_a.remove_at(link_index)
+	link_cell_b.remove_at(link_index)
+	link_rest_length.remove_at(link_index)
+	if link_index < link_angle.size():
+		link_angle.remove_at(link_index)
+	return true
 
 func is_symmetric_link(cell_index: int) -> bool:
 	if cell_index < 0 or cell_index >= size():

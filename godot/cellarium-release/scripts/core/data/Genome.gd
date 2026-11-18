@@ -26,7 +26,7 @@ const FLAG_GENE_MODE: int = 1 << 1
 ## v0.17.0 版本化追加：一个基因模式基因组由多个「模式槽」组成，对应 Macro 的 Gene 模式页。
 ## 每个模式有自己的类型、行为/特殊控制、两个子代模式；GNP1 布局仍冻结，modes 只随
 ## CommandBus 的 genome_gene payload 与存档 schema v5 走，且仅在基因模式下参与 hash。
-const MAX_GENOME_MODES: int = 16
+const MAX_GENOME_MODES: int = 40
 const DEFAULT_TRANSFER_RATE: float = 0.12
 ## v0.18.0：取消 per-organism 8 细胞硬上限；-1 表示无限，>=2 才作为显式个体上限。
 const UNLIMITED_CELLS: int = -1
@@ -140,6 +140,9 @@ static func normalized_mode(value: Variant, index: int = 0) -> Dictionary:
 	# v0.18.0：旧模式缺字段时保持旧行为（不抑制分裂、端粒无限）。
 	result["link_division_limit"] = clampi(int(source.get("link_division_limit", -1)), -1, 16)
 	result["telomere"] = normalize_telomere(source.get("telomere", UNLIMITED_TELOMERE))
+	# v0.29.0：官方 Gene.m/n —— 分裂时旧连接是否重分配给母/子。默认 false 保持旧行为与旧 hash。
+	result["link_keep_mother"] = bool(source.get("link_keep_mother", false))
+	result["link_keep_child"] = bool(source.get("link_keep_child", false))
 	return result
 
 static func get_mode(genome: RefCounted, index: int) -> Dictionary:
@@ -393,6 +396,18 @@ func hash() -> int:
 						for byte_value in str(entry).to_utf8_buffer():
 							quantized = int((quantized ^ int(byte_value)) * 16777619) & 0x7fffffff
 					value = _mix_quantized(value, quantized)
+		# v0.29.0：Gene.m/n 只在任一模式开启时混入，两个都 false 的旧基因组 hash 与 v0.28 逐位一致。
+		var link_split_enabled: bool = false
+		for raw_mode in modes:
+			if bool((raw_mode as Dictionary).get("link_keep_mother", false)) \
+				or bool((raw_mode as Dictionary).get("link_keep_child", false)):
+				link_split_enabled = true
+				break
+		if link_split_enabled:
+			for mode_index in range(modes.size()):
+				var split_mode: Dictionary = normalized_mode(modes[mode_index], mode_index)
+				value = _mix_quantized(value, 1 if bool(split_mode.get("link_keep_mother", false)) else 0)
+				value = _mix_quantized(value, 1 if bool(split_mode.get("link_keep_child", false)) else 0)
 	return value
 
 func duplicate_genome() -> RefCounted:

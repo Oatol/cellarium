@@ -1045,3 +1045,23 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 删除 `child1_type` / `child2_type` 控件；`_commit_current_mode()` 写兼容字段 `child_types` 时，改为按 `child1_mode/child2_mode`（及可选的 child3/4 模式槽）到目标模式的 `cell_type` 取值。运行时多模式路径本就由 `_apply_cell_mode()` 从目标模式写 `cell_type`，无需独立子代类型。
 
 **验证**：预览探针新增「当前细胞分裂指示器数量 1..N」断言（实测 8 细胞 = 8 组指示点，不再是历史堆积）；SmokeTest 新增无子代类型控件、无说明面板、存在防抖定时器断言。
+
+### 32.11 v0.29.0：分裂机制进一步对齐——40 槽分化树、旧连接重分配、FLAG 后向连接校验
+
+**用户诉求**：「分裂机制进一步对齐 Cell Lab：40 槽分化树 i/j、旧连接重分配、FLAG 后向连接形态校验。」
+
+**官方版源码证据（`decompiled_zh/com_saterskog_cell_lab_CellWorld.java`，`e(double):1968-2257`）**：
+- 分化树：`Cell.I = new Gene[40]`，`cell.D ∈ [0,39]`；分裂执行时 `cell2.D = cell.I[cell.D].j`（新细胞）、`cell.D = cell.I[cell.D].i`（母细胞）。即分化槽由当前 Gene 的 i/j 两级索引决定，不存在「只有 16 槽」的限制。
+- 旧连接重分配：`J[20]` 暂存母细胞分裂前的连接，按 `cos(分裂轴 − 连接世界角) − (1 − 2·Gene.c)` 的 `d14` 与 ±0.2 双阈值分给母/子；中间带用左/右两侧投影的最大、最小四个极值索引补齐；双方连接数 `<20` 才重建；新角度 = 旧世界角减新朝向，对端连接的 c/d 端点互换。
+- FLAG 形态校验：D 槽切换后按**新类型**检查 FLAGELLOCYTE，母、子任一端存在 `cos(link.c) < -0.8` 的后向连接即置死亡标记。
+- 本轮反编译复核的项目：`CellWorld.java:1968-2257`、`Gene.java`、`Cell.java`、`Link.java`。
+
+**Macro 版差异（`decompiled_macro/com_saterskog_cell_lab_enzymeglv_SimulationWorld.java`，`f1(D)V`）**：Macro 的 `Gene.r/s` 才是子代槽索引，`Gene.i/j` 已是浮点参数；连接中间带处理与官方版不完全相同，FLAG 校验只判母细胞并读 `Cell.e1`。本项目以**官方版的完整机制**为对齐目标，Macro 差异保留在证据记录中，不混写为同一口径。
+
+**落地口径（版本化追加，不复制 Gene 表）**：
+- `Genome.MAX_GENOME_MODES: 16 → 40`；`child1_mode` / `child2_mode` 分别对应官方 `Gene.i` / `Gene.j`，槽 39 不再被钳回旧上限。`normalized_mode()` 新增 `link_keep_mother` / `link_keep_child`，对应官方 `Gene.m` / `Gene.n`。
+- `CellArray` 新增 `cell_orientation` 与 `link_angle` 两条 SoA 数组；`link_cells()` 可显式给世界角，新增 `get_link_angle()` / `set_link_endpoint()` / `remove_link()` / `get_orientation()` / `set_orientation()`，使旧连接重分配能原地改端点与角度，不必拆建连接对象。分裂时母子朝向分别由 `split_angle` / `split_angle2` 写入。
+- `OrganismManager._redistribute_inherited_links()` 只处理分裂前母细胞已有连接（排除新生 child），按 `d14` 与 ±0.2 判定，中间带四个极值补齐，双方连接数小于 `MAX_LINKS_PER_CELL` 才保留；未命中者删除。`_has_backward_link()` 仅对新类型为 FLAGELLOCYTE（3）的细胞检查 `cos(相对连接角) < -0.8`，命中后按新死因 `DEATH_BACKWARD_LINK=6` 判死，母、子都检查。
+- 兼容边界：新字段走 `genome_gene` payload 与存档 `schema_version=8`；旧档 `cell_orientation` 填 0、`link_angle` 按恢复后的两端位置重算。只有当任一模式开启 `link_keep_mother/link_keep_child` 时才混入 hash，默认全关时 hash 与 v0.28 逐位一致。GNP1 二进制布局、tick 阶段顺序、单帧 12 tick 上限未改。
+
+**验证**：新增 `tools/DivisionAlignmentProbe.gd`（已登记 SmokeTest manifest，脚本数 53→54），程序化断言槽 39/27 保留、Gene.m/n 字段落地、正向旧连接归子、反向归母、连接计数守恒、FLAG 后向 `cos<-0.8` 判死、非 FLAG 不触发，实测 `FAILURES=0`。发布工程与 D 盘运行工程均为 `SCRIPTS=54 FAILURES=0 EXITCODE=0`，预览探针 `FAILURES=0`；全程无截图/鼠标操作。

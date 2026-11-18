@@ -484,6 +484,8 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_section_title("TYPE / ADHESIN · 当前模式类型与黏附"))
 	box.add_child(_make_macro_type_option("cell_type", "细胞类型", "spinner_types → Gene.C"))
 	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E；本项目 v0.14.1 写入 flags bit0：子代自动连接，无需 LINK 指令"))
+	box.add_child(_make_macro_check("link_keep_mother", "旧连接归母", "Gene.m：分裂时按方向点积把旧连接重分配给母细胞（v0.29.0）"))
+	box.add_child(_make_macro_check("link_keep_child", "旧连接归子", "Gene.n：分裂时按方向点积把旧连接重分配给新细胞（v0.29.0）"))
 	box.add_child(_make_macro_check("stay_alive", "保持存活", "checkbox_stay_alive → Gene.H"))
 	box.add_child(_make_macro_check("initial", "初始细胞", "radio_initial → Gene.I"))
 

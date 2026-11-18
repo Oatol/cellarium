@@ -24,6 +24,7 @@ const PERF_PROBE_SCRIPT: Script = preload("res://scripts/system/PerfProbe.gd")
 const CELL_TYPE_ZYGOTE: int = 0
 const CELL_TYPE_PHOTOCYTE: int = 4
 const CELL_TYPE_NITROCYTE: int = 10
+const CELL_TYPE_FLAGELLOCYTE: int = 3
 
 var cells: RefCounted = CELL_ARRAY_SCRIPT.new() as RefCounted
 var organisms: RefCounted = ORGANISM_STORE_SCRIPT.new() as RefCounted
@@ -491,8 +492,10 @@ func _apply_autonomous_lifecycle() -> void:
 		var glue: bool = bool(GENOME_SCRIPT.call("has_glue_links", genome))
 		if has_modes:
 			var mode_data: Dictionary = candidate["mode"] as Dictionary
-			var child1_mode: int = clampi(int(mode_data.get("child1_mode", 0)), 0, 15)
-			var child2_mode: int = clampi(int(mode_data.get("child2_mode", 0)), 0, 15)
+			var max_mode_slot: int = maxi(0, int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENOME_MODES", 40)) - 1)
+			# Cell Lab Gene.i/j：母细胞切到 i（child1_mode），新细胞切到 j（child2_mode）。
+			var gene_i: int = clampi(int(mode_data.get("child1_mode", 0)), 0, max_mode_slot)
+			var gene_j: int = clampi(int(mode_data.get("child2_mode", 0)), 0, max_mode_slot)
 			var child1_angle: float = clampf(float(mode_data.get("child1_angle", 0.0)), 0.0, 1.0)
 			var child2_angle: float = clampf(float(mode_data.get("child2_angle", 0.25)), 0.0, 1.0)
 			if bool(mode_data.get("child2_mirror", false)):
@@ -503,9 +506,9 @@ func _apply_autonomous_lifecycle() -> void:
 			if bool(mode_data.get("invert_split_mass", false)):
 				ratio = 1.0 - ratio
 			glue = bool(mode_data.get("child1_glue", false)) or bool(mode_data.get("child2_glue", true))
-			# 子代模式槽在 divide_cell 之后确定：母细胞索引继续作为子代 1，新细胞为子代 2。
-			candidate["child1_mode"] = child1_mode
-			candidate["child2_mode"] = child2_mode
+			# 子代模式槽在 divide_cell 之后确定：母细胞索引切到 Gene.i，新细胞切到 Gene.j。
+			candidate["child1_mode"] = gene_i
+			candidate["child2_mode"] = gene_j
 		elif gene_mode:
 			radius_scale = float(cells.call("get_radius_scale", cell_index))
 			ratio = clampf(float(genome.get("split_ratio")), 0.05, 0.95)
@@ -527,6 +530,15 @@ func _apply_autonomous_lifecycle() -> void:
 		var half_offset: float = birth_separation * 0.5
 		cells.call("set_position", cell_index, birth_origin - split_dir * half_offset)
 		cells.call("set_position", child_index, birth_origin + split_dir * half_offset)
+		var split_mode: Dictionary = candidate.get("mode", {}) as Dictionary
+		if gene_mode and not split_mode.is_empty():
+			# Cell Lab e(double)：k = sign*Gene.e/f + 分裂轴；朝向是方向型连接语义的真相源。
+			var mother_sign: float = -1.0 if bool(split_mode.get("child1_mirror", false)) else 1.0
+			var child_sign: float = -1.0 if bool(split_mode.get("child2_mirror", false)) else 1.0
+			cells.call("set_orientation", cell_index, angle + mother_sign * TAU * clampf(float(split_mode.get("split_angle", 0.0)), 0.0, 1.0))
+			cells.call("set_orientation", child_index, angle + child_sign * TAU * clampf(float(split_mode.get("split_angle2", 0.0)), 0.0, 1.0))
+			# v0.29.0：先按旧连接的朝向分给母/子，再切换 Gene.i/j 模式槽。
+			_redistribute_inherited_links(cell_index, child_index, angle, ratio, split_mode)
 		if has_modes:
 			# v0.22.0：不再累加 depth。Cell Lab 无同模式分裂代数上限；depth 字段保留为只读谱系标记，
 			# 分裂次数由端粒控制。母/子 depth 均不随分裂递增（子细胞继承母细胞 depth）。
@@ -565,6 +577,13 @@ func _apply_autonomous_lifecycle() -> void:
 				_remove_cell_with_cause(cell_index, telomere_death)
 			if child_telomere == 0:
 				_remove_cell_with_cause(child_index, telomere_death)
+		# v0.29.0：Cell Lab e(double) 末尾的 FLAGELLOCYTE 形态校验（新 D 槽类型生效后）。
+		if gene_mode:
+			var backward_death: int = int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_BACKWARD_LINK"])
+			if _has_backward_link(cell_index):
+				_remove_cell_with_cause(cell_index, backward_death)
+			if _has_backward_link(child_index):
+				_remove_cell_with_cause(child_index, backward_death)
 		if int(organisms.get("org_alive")[org_id]) != 0:
 			org_state = organisms.get("org_state")
 			org_state[org_id] = mature_state
@@ -873,6 +892,121 @@ func _is_link_division_blocked(genome: RefCounted, cell_index: int) -> bool:
 		return false
 	var link_counts: PackedByteArray = cells.get("cell_link_count")
 	return cell_index >= 0 and cell_index < link_counts.size() and int(link_counts[cell_index]) >= limit
+
+## v0.29.0：官方 CellWorld.e(double) 的旧连接重分配（Gene.m/n + ±0.2 双阈值）。
+## 只处理分裂前母细胞已有的连接；亲子新连接在此之后建立，不会被重分配。
+func _redistribute_inherited_links(mother_index: int, child_index: int, split_angle: float,
+		split_ratio: float, mode_data: Dictionary) -> void:
+	if mode_data.is_empty():
+		return
+	var keep_mother: bool = bool(mode_data.get("link_keep_mother", false))
+	var keep_child: bool = bool(mode_data.get("link_keep_child", false))
+	if not keep_mother and not keep_child:
+		return
+	var max_link_count: int = int(CELL_ARRAY_SCRIPT.get_script_constant_map().get("MAX_LINKS_PER_CELL", 20))
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var link_b: PackedInt32Array = cells.get("link_cell_b")
+	var counts: PackedByteArray = cells.get("cell_link_count")
+	var mother_pos: Vector2 = cells.call("get_position", mother_index)
+	var axis: Vector2 = Vector2.RIGHT.rotated(split_angle)
+	var inherited: Array[Dictionary] = []
+	for link_index in range(link_a.size()):
+		var a: int = link_a[link_index]
+		var b: int = link_b[link_index]
+		var other: int = -1
+		if a == mother_index and b != child_index:
+			other = b
+		elif b == mother_index and a != child_index:
+			other = a
+		if other >= 0:
+			inherited.append({"link": link_index, "other": other})
+	if inherited.is_empty():
+		return
+	# 中间带四极值索引：左/右投影的最大与最小，对应官方 i13/i12/i9/i11。
+	var left_max: int = -1
+	var left_min: int = -1
+	var right_max: int = -1
+	var right_min: int = -1
+	var left_max_v: float = -INF
+	var left_min_v: float = INF
+	var right_max_v: float = -INF
+	var right_min_v: float = INF
+	for entry in inherited:
+		var link_index: int = int(entry.get("link", -1))
+		var world_angle: float = _link_world_angle_from(link_index, mother_index)
+		var d14: float = cos(split_angle - world_angle) - (1.0 - 2.0 * split_ratio)
+		if absf(d14) > 0.2:
+			continue
+		var other_pos: Vector2 = cells.call("get_position", int(entry.get("other", -1)))
+		var projection: float = (other_pos - mother_pos).dot(axis)
+		var cross_value: float = sin(world_angle - split_angle)
+		if cross_value > 0.0:
+			if projection > left_max_v:
+				left_max_v = projection; left_max = link_index
+			if projection < left_min_v:
+				left_min_v = projection; left_min = link_index
+		else:
+			if projection > right_max_v:
+				right_max_v = projection; right_max = link_index
+			if projection < right_min_v:
+				right_min_v = projection; right_min = link_index
+	# 逆序处理，remove_link 导致的索引位移只影响更后面的元素（已先处理）。
+	for reverse_index in range(inherited.size() - 1, -1, -1):
+		var entry: Dictionary = inherited[reverse_index] as Dictionary
+		var link_index: int = int(entry.get("link", -1))
+		if link_index < 0 or link_index >= link_a.size():
+			continue
+		var other: int = int(entry.get("other", -1))
+		var world_angle: float = _link_world_angle_from(link_index, mother_index)
+		var d14: float = cos(split_angle - world_angle) - (1.0 - 2.0 * split_ratio)
+		var to_child: bool = keep_child and (d14 > 0.2 or (d14 > -0.2 \
+			and (link_index == left_max or link_index == right_max)))
+		var to_mother: bool = keep_mother and (d14 < -0.2 or (d14 < 0.2 \
+			and (link_index == left_min or link_index == right_min)))
+		if to_child and int(counts[child_index]) < max_link_count \
+			and int(counts[other]) < max_link_count \
+			and not bool(cells.call("has_link", child_index, other)):
+			cells.call("set_link_endpoint", link_index, child_index, other, _angle_between(child_index, other))
+		elif to_mother and int(counts[mother_index]) < max_link_count \
+			and int(counts[other]) < max_link_count:
+			cells.call("set_link_endpoint", link_index, mother_index, other, _angle_between(mother_index, other))
+		else:
+			cells.call("remove_link", link_index)
+
+func _angle_between(from_index: int, to_index: int) -> float:
+	var delta: Vector2 = cells.call("get_position", to_index) - cells.call("get_position", from_index)
+	return atan2(delta.y, delta.x) if delta.length_squared() > 0.0 else 0.0
+
+## 连接在某端看到的世界方向角（b 端为反向 +PI），用于点积与 FLAG 相对角。
+func _link_world_angle_from(link_index: int, endpoint: int) -> float:
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var link_b: PackedInt32Array = cells.get("link_cell_b")
+	if link_index < 0 or link_index >= link_a.size():
+		return 0.0
+	var a: int = link_a[link_index]
+	var b: int = link_b[link_index]
+	var angle: float = _angle_between(a, b)
+	if endpoint == b:
+		angle += PI
+	return fposmod(angle, TAU)
+
+## 官方 e(double) 末尾：新 D 槽类型为 FLAGELLOCYTE 时，任一后向连接 cos<-0.8 即判死。
+func _has_backward_link(cell_index: int) -> bool:
+	if cell_index < 0 or cell_index >= int(cells.call("size")):
+		return false
+	var types: PackedByteArray = cells.get("cell_type")
+	if int(types[cell_index]) != CELL_TYPE_FLAGELLOCYTE:
+		return false
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var link_b: PackedInt32Array = cells.get("link_cell_b")
+	var orientation: float = float(cells.call("get_orientation", cell_index))
+	for link_index in range(link_a.size()):
+		if link_a[link_index] != cell_index and link_b[link_index] != cell_index:
+			continue
+		var relative: float = _link_world_angle_from(link_index, cell_index) - orientation
+		if cos(relative) < -0.8:
+			return true
+	return false
 
 func _can_add_link(genome: RefCounted, a: int, b: int) -> bool:
 	if genome == null or not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
@@ -1396,12 +1530,12 @@ func get_state_hash() -> int:
 	for value in cells.get("behavior_intents"):
 		hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
 	# v0.19.0：半径低通的确定性状态（有效半径参与碰撞/分裂间距）。缺省空数组不参与，旧档无影响。
-	for array_name in ["cell_radius_baseline", "cell_energy_scale", "cell_division_tick"]:
+	for array_name in ["cell_radius_baseline", "cell_energy_scale", "cell_division_tick", "cell_orientation"]:
 		for value in cells.get(array_name):
 			hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
-	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length"]:
+	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length", "link_angle"]:
 		for value in cells.get(array_name):
-			var quantized: int = int(round(float(value) * 1000000.0)) if array_name == "link_rest_length" else int(value)
+			var quantized: int = int(round(float(value) * 1000000.0)) if array_name == "link_rest_length" or array_name == "link_angle" else int(value)
 			hash_value = _hash_int(hash_value, quantized)
 	for array_name in ["org_alive", "org_genome_id", "org_species_id", "org_parent_id", "org_age", "org_health", "org_death_cause", "org_state", "org_instruction_mask", "org_dev_cursor", "cell_offset", "cell_count"]:
 		for value in organisms.get(array_name):

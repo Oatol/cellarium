@@ -56,6 +56,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/core/data/PreviewWorld.gd",
 	"res://scripts/ui/GenomePreview.gd",
 	"res://tools/PreviewReplicaProbe.gd",
+	"res://tools/DivisionAlignmentProbe.gd",
 ]
 
 func _initialize() -> void:
@@ -3798,7 +3799,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 7:
+	if int(snapshot.get("schema_version", -1)) != 8:
 		push_error("SmokeTest: save schema must be version 7")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
@@ -3812,7 +3813,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v7)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v8)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3999,8 +4000,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 7 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v7 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != 8 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v8 must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -4013,7 +4014,7 @@ func _check_v0160_runtime_phenotype() -> bool:
 		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v7 fallback")
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v8 fallback")
 	return true
 
 ## v0.17.0：模式列表逐模式编辑、两个子代模式、预览点击跳转，以及 hash 兼容边界。
@@ -4137,7 +4138,7 @@ func _check_v0170_mode_remove() -> bool:
 	print("SmokeTest: OK v0.17.1 mode removal")
 	return true
 
-## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v7 存档往返。
+## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v8 存档往返。
 func _check_v0170_runtime_transfer_and_modes() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -4218,10 +4219,10 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		instance.queue_free(); return false
 
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 7 \
+	if int(snapshot.get("schema_version", -1)) != 8 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
 		or (snapshot.get("genomes", []) as Array).is_empty():
-		push_error("SmokeTest: schema v7 must persist modes and cell_mode")
+		push_error("SmokeTest: schema v8 must persist modes and cell_mode")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.call("set_modes", [])
@@ -4248,7 +4249,7 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		push_error("SmokeTest: legacy snapshot must default cell_mode to 0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v7")
+	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v8")
 	return true
 
 ## v0.18.0：构造「单模式光合带」基因组；cell_cap=-1 表示无限，link_limit=-1 不抑制。
@@ -4296,7 +4297,7 @@ static func _v0180_prepare_manager(instance: Node) -> Dictionary:
 	manager.set("autonomous_division_cooldown", 1)
 	return {"manager": manager, "env": env, "tick": tick_core, "cells": manager.get("cells")}
 
-## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v7 与编辑器同测。
+## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v8 与编辑器同测。
 func _check_v0180_population_limits() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var cell_array_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
@@ -4394,7 +4395,7 @@ func _check_v0180_population_limits() -> bool:
 		instance.queue_free(); return false
 	instance.queue_free()
 
-	# 5) 端粒：每次母子同减，归零死亡；schema v7 保存新字段并兼容旧快照。
+	# 5) 端粒：每次母子同减，归零死亡；schema v8 保存新字段并兼容旧快照。
 	var mortal: RefCounted = _v0180_mode_genome(genome_script, -1, 5, -1, false)
 	instance = scene.instantiate()
 	instance.set("create_demo_organism", false)
@@ -4430,10 +4431,10 @@ func _check_v0180_population_limits() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 7 \
+	if int(snapshot.get("schema_version", -1)) != 8 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere") \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_energy_scale"):
-		push_error("SmokeTest: schema v7 must persist telomere and energy-radius arrays")
+		push_error("SmokeTest: schema v8 must persist telomere and energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	(legacy.get("cells", {}) as Dictionary).erase("cell_telomere")
@@ -4517,11 +4518,11 @@ func _check_v0180_population_limits() -> bool:
 		push_error("SmokeTest: cell cap must affect gene-mode hash when modes exist")
 		return false
 
-	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v7 / editor")
+	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v8 / editor")
 	return true
 
 ## v0.19.0：半径-能量低通。稳态 = sqrt(E / E_ref)，一阶平滑；基线×因子 = 有效倍率；
-## 非基因模式与关闭开关保持固定半径；schema v7 保存新数组且旧档逐位兼容。
+## 非基因模式与关闭开关保持固定半径；schema v8 保存新数组且旧档逐位兼容。
 func _check_v0190_energy_radius_relaxation() -> bool:
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
@@ -4594,12 +4595,12 @@ func _check_v0190_energy_radius_relaxation() -> bool:
 		push_error("SmokeTest: disabled growth must freeze energy factor")
 		instance.queue_free(); return false
 
-	# 5) schema v7 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
+	# 5) schema v8 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
 	var snap_cells: Dictionary = snapshot.get("cells", {}) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 7 \
+	if int(snapshot.get("schema_version", -1)) != 8 \
 		or not snap_cells.has("cell_radius_baseline") or not snap_cells.has("cell_energy_scale"):
-		push_error("SmokeTest: schema v7 must persist energy-radius arrays")
+		push_error("SmokeTest: schema v8 must persist energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	var legacy_cells: Dictionary = legacy.get("cells", {}) as Dictionary
@@ -4625,7 +4626,7 @@ func _check_v0190_energy_radius_relaxation() -> bool:
 		instance.queue_free(); return false
 
 	instance.queue_free()
-	print("SmokeTest: OK v0.19.0 energy-radius lowpass / schema v7")
+	print("SmokeTest: OK v0.19.0 energy-radius lowpass / schema v8")
 	return true
 
 ## v0.20.0/v0.21.0：per-cell 并行分裂（1/2/4/8 倍增）+ Cell Lab e(double) 半圆出生形状。

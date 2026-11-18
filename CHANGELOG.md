@@ -4,6 +4,31 @@
 
 ---
 
+## 0.29.0 — 2026-11-19
+
+**类型**：分裂机制进一步对齐 Cell Lab（40 槽分化树、旧连接重分配、FLAG 后向连接校验）
+**触发**：用户专项「分裂机制进一步对齐 Cell Lab：40 槽分化树 i/j、旧连接重分配、FLAG 后向连接形态校验」。
+
+### 源码依据
+
+- 官方 `CellWorld.e(double):1968-2257`：`Cell.I = new Gene[40]`，母细胞 `D=Gene.i`、新细胞 `D=Gene.j`；`J[20]` 暂存旧连接，按 `cos(轴−世界角)−(1−2·Gene.c)` 与 ±0.2 双阈值重分配，中间带用左右投影四极值补齐，双方连接数 `<20` 才重建，对端 c/d 互换；D 槽切换后新类型为 FLAGELLOCYTE 时母/子后向连接 `cos(link.c)<-0.8` 判死。
+- Macro `SimulationWorld.f1(D)V` 差异：`Gene.r/s` 是子代槽、`i/j` 为浮点；中间带处理不同且 FLAG 只判母细胞。以官方版完整机制为对齐目标，差异记入分析文档 §32.11。
+
+### 实现
+
+- `Genome.gd`：`MAX_GENOME_MODES` 16→40，`child1_mode/child2_mode` 对应官方 `Gene.i/j`，槽 39 保留；新增 `link_keep_mother/link_keep_child`（官方 `Gene.m/n`），仅任一开启时混入 hash，默认全关与 v0.28 逐位一致。
+- `CellArray.gd`：新增 `cell_orientation` / `link_angle` SoA 数组；`link_cells()` 支持显式世界角，新增 `get_link_angle` / `set_link_endpoint` / `remove_link` / `get_orientation` / `set_orientation`，使旧连接可原地换端点与角度。
+- `OrganismManager.gd`：分裂时按 `split_angle/split_angle2` 写母子朝向；`_redistribute_inherited_links()` 排除新生 child，按 `d14` ±0.2 与中间带四极值重分配，未命中者删除；`_has_backward_link()` 仅对 FLAG 类型（3）按 `cos(相对角)<-0.8` 判死，新死因 `DEATH_BACKWARD_LINK=6`，母/子均检查。
+- `SaveManager.gd`：schema v7→v8，保存朝向/连接角；旧档朝向填 0、连接角按端点位置重算，兼容 `Array` 与 `PackedFloat32Array`。
+- `DevEditorPanel.gd`：新增「旧连接归母 / 旧连接归子」两个 Macro 勾选项。GNP1、tick 顺序、单帧 12 tick 上限未改。
+
+### 验证
+
+- 新增 `tools/DivisionAlignmentProbe.gd`（登记入 manifest，脚本数 53→54），8 项断言全过：40 槽、槽 39/27 保留、Gene.m/n 落地、正向归子/反向归母、连接守恒、FLAG 后向判死、非 FLAG 不触发。
+- 发布工程与 D 盘运行工程均 `SCRIPTS=54 FAILURES=0 EXITCODE=0`，`PreviewReplicaProbe FAILURES=0`；全程程序化无头验证。
+
+---
+
 ## 0.28.0 — 2026-11-19
 
 **类型**：对齐 Cell Lab 的指示点语义、预览刷新与模式化类型

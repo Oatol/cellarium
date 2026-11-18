@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 7
+const SCHEMA_VERSION: int = 8
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -31,6 +31,9 @@ const ENERGY_RADIUS_ARRAY_NAMES: Array[String] = ["cell_radius_baseline", "cell_
 
 ## v0.20.0：schema 1–6 的旧快照没有逐细胞分裂 tick，恢复时填 -2（未过宽限）。
 const DIVISION_TICK_ARRAY_NAMES: Array[String] = ["cell_division_tick"]
+
+## v0.29.0：schema 1–7 没有细胞朝向与连接方向；恢复时朝向填 0、连接方向按两端位置重算。
+const LINK_DIRECTION_ARRAY_NAMES: Array[String] = ["cell_orientation", "link_angle"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -68,6 +71,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in ENERGY_RADIUS_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 	for array_name in DIVISION_TICK_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in LINK_DIRECTION_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -232,6 +237,43 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			restored_ticks.resize(cell_count)
 			restored_ticks.fill(-2)
 			cells.set(array_name, restored_ticks)
+
+	# v0.29.0：旧档没有方向数组，朝向填 0、连接方向按恢复后的两端位置重算。
+	var restored_orientation: PackedFloat32Array = PackedFloat32Array()
+	if cell_data.has("cell_orientation"):
+		var raw_orientation: Variant = _copy_array(cell_data["cell_orientation"])
+		if raw_orientation is PackedFloat32Array:
+			restored_orientation = raw_orientation as PackedFloat32Array
+		elif raw_orientation is Array:
+			for value in raw_orientation as Array:
+				restored_orientation.append(float(value))
+	else:
+		restored_orientation.resize(cell_count)
+		restored_orientation.fill(0.0)
+	cells.set("cell_orientation", restored_orientation)
+	var restored_link_angles: PackedFloat32Array = PackedFloat32Array()
+	if cell_data.has("link_angle"):
+		var raw_angles: Variant = _copy_array(cell_data["link_angle"])
+		if raw_angles is PackedFloat32Array:
+			restored_link_angles = raw_angles as PackedFloat32Array
+		elif raw_angles is Array:
+			for value in raw_angles as Array:
+				restored_link_angles.append(float(value))
+	else:
+		var links_a: Variant = cell_data.get("link_cell_a", [])
+		var links_b: Variant = cell_data.get("link_cell_b", [])
+		var pos_x: Variant = cell_data.get("cell_pos_x", [])
+		var pos_y: Variant = cell_data.get("cell_pos_y", [])
+		for link_index in range(int(links_a.size())):
+			var a: int = int(links_a[link_index])
+			var b: int = int(links_b[link_index])
+			if a >= 0 and b >= 0 and a < int(pos_x.size()) and b < int(pos_x.size()):
+				var dx: float = float(pos_x[b]) - float(pos_x[a])
+				var dy: float = float(pos_y[b]) - float(pos_y[a])
+				restored_link_angles.append(atan2(dy, dx) if dx * dx + dy * dy > 0.0 else 0.0)
+			else:
+				restored_link_angles.append(0.0)
+	cells.set("link_angle", restored_link_angles)
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary
