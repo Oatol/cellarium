@@ -1065,3 +1065,61 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 兼容边界：新字段走 `genome_gene` payload 与存档 `schema_version=8`；旧档 `cell_orientation` 填 0、`link_angle` 按恢复后的两端位置重算。只有当任一模式开启 `link_keep_mother/link_keep_child` 时才混入 hash，默认全关时 hash 与 v0.28 逐位一致。GNP1 二进制布局、tick 阶段顺序、单帧 12 tick 上限未改。
 
 **验证**：新增 `tools/DivisionAlignmentProbe.gd`（已登记 SmokeTest manifest，脚本数 53→54），程序化断言槽 39/27 保留、Gene.m/n 字段落地、正向旧连接归子、反向归母、连接计数守恒、FLAG 后向 `cos<-0.8` 判死、非 FLAG 不触发，实测 `FAILURES=0`。发布工程与 D 盘运行工程均为 `SCRIPTS=54 FAILURES=0 EXITCODE=0`，预览探针 `FAILURES=0`；全程无截图/鼠标操作。
+
+## 33. v0.30.0 性能专项基线：SoA + 批渲染对齐 Cell Lab（2026-11-19）
+
+### 33.1 当前工程实测基线（无头程序化，非截图）
+
+- `tools/BenchTest.gd`（每档 120 tick，单档墙钟 15 s 硬上限）实测：
+
+| 细胞数 | 每 tick | behavior | physics | metabolism |
+| --- | --- | --- | --- | --- |
+| 300 | 29.0 ms | 9.5 ms | 14.3 ms | 4.5 ms |
+| 1000 | 114.2 ms | 37.9 ms | 57.5 ms | 16.7 ms |
+| 3000 | 389.1 ms（15 s 只跑 38 tick） | 139.8 ms | 192.7 ms | 49.7 ms |
+
+- `tools/ViewCostProbe.gd` 实测：15 细胞链视图重建 2.30 ms/帧、30 细胞 5.25 ms/帧，近似超线性；固定场纹理重建 3.29 ms、食物层 1.99 ms、场扩散 2.10 ms（CPU 回退）。
+- 结论：3000 细胞离目标相差一个数量级。性能瓶颈既在模拟（behavior/physics 重复建空间哈希、场采样线性查找），也在视图（逐细胞 CellView + 逐对弦重建；>512 细胞时直接退化成 MultiMesh 纯色块，丢失 Cell Lab 的膜弦外观）。
+
+### 33.2 Cell Lab 源码证据（本轮重读全量反编译代码）
+
+**数据布局（官方 `CellWorld.java`，附 file:line）**：
+- 构造期一次性分配固定池：`Cell[Environment.r]`、`Food[Environment.s]`、`Link[20]`、`u[...]` 弦对象、`ByteBuffer/ShortBuffer/FloatBuffer`（`CellWorld.java:474-501`）；运行期零增长，池耗尽即拒绝新细胞/新连接（`e(double):2227-2257`、`c(int,int):2470`）。
+- 逐细胞标量按类型分拆到并行 `double[]`：位置 `C/D`、前一位置 `E/F`、速度 `g/h`、半径 `d`、质量 `w`、朝向 `k`、类型 `s`、槽 `D`、信号 `U[4]` 等（类字段 `:100-300`）；连接同样拆成并行 `n/o/p/q/r/s/t`（`Link.java:5-45`）。这是 Cell Lab 的 SoA：遍历只触碰连续数组，无逐细胞对象解引用。
+- Macro `SimulationWorld.java:205-280` 是同构 SoA，列表 `X(细胞)/Y(食物)/Z(连接)/aa(气味)/ab(弦)`，并额外提供 `D` 端角度数组。
+
+**tick 阶段（`CellWorld.java:1495-1520`、`a(boolean,double):1495`）**：
+- update1 顺序：`i(dt)` 食物 → `k()` 补细胞 → `f(dt)` 位置/半径 → `e(dt)` 分裂 → `j()` 回收 → `g()` 网格 → `d(dt)` 食物 → `h(dt)` → `c(z,dt)` 逐细胞感知/接触 → `c(dt)` 速度积分 → `h()`；update2：`g(dt)` 代谢 → `b(dt)` 4 子步信号（`:3186`）。阶段锁 `X` 保证同 tick 所有读取同一快照。
+- 空间哈希 `g()`（`:2527-2618`）：格边长 `0.03`，格数 `Z = min(206, (int)(k/0.03 - 0.1))` 且取偶数；`aV[Z]` 存格内细胞索引，子桶 `ba/bb/bc` 上限 203；每细胞按包围盒写 4 个格槽 `K/L/M/N`（重复置 -1）；`c(z,dt)` 只从 `i4=i3+1` 开始处理，配对唯一；格饱和时截断，避免病态长链退化成 O(n²)。
+- 接触 `d(int)`（`:2804-3176`）：只用 ` Heron` 相交面积算力并写速度累加器 `g/h`；**同一循环顺带写出圆-圆相交弦端点** `A[]`：`a/b`=一端、`c/d`=另一端、`e`=遮挡剔除、`f`=截断标记、`g`=对端索引；皿壁弦由大圆内切同一公式生成。物理与渲染共享这组端点是贴合外观的根本。
+- 渲染 `a(FFFF)`（`:1192-1477`）：先把弦两两求交截断、按 `u.compareTo()` 极角排序，再用圆心扇形三角剖分 + 相邻端点间补圆弧；颜色/纹理/连接桥/纤毛全部写进预分配的 `FloatBuffer`，一次批提交。`RENDERMODE_WHEN_DIRTY` 保证无变化时不重绘；片元 `discard(ds>r²)` 解析裁圆，不用逐细胞 64 点圆。
+
+**Macro 版（`SimulationWorld.java`）**：同构 SoA + `D` 端角度数组，格边长 0.03、`aa[Z]` 气味桶上限 404；`f1(D)V` 在 `Z/T/V/W` 缓存上做断点续算；`J4.java` 预览复用同一真实世界实例。渲染路径与官方一致，不另起一套算法。
+
+### 33.3 本项目差距与 v0.30.0 落地映射
+
+| Cell Lab 机制 | 本项目现状（实测/代码） | 本版落点 |
+| --- | --- | --- |
+| 固定池 + 并行数组 | `CellArray` 已是 Packed*Array SoA，但热路径仍有 Dictionary/Array 临时分配 | 保持 SoA 数据契约；把邻域/场采样改为扁平 CSR 视图，不新增 schema |
+| 一次建格、配对唯一 | `CellPhysics.build_spatial_hash` 每 tick 被 behavior、collisions、每个捕食者、renderer 重复构建；捕食 `Predation.gd:38` 每次 `query_neighbors` 都重建整格 | 一次建格 + 缓存复用；捕食改 `query_neighbors_cached`；碰撞对用扁平 PackedInt32Array，保持遍历顺序与状态 hash 不变 |
+| O(1) 场采样 | `EnvironmentManager.sample_fields()` 用 `_sample_positions.find(position)` 线性查找，3000 细胞即 O(n²) | 新增按 cell_index 直接索引的批量采样路径，旧 API 保留兼容 |
+| 物理/渲染共享弦端点 | `CellSceneRenderer._build_shared_chords` 已同源，但 >512 细胞直接隐藏、退回 MultiMesh 色块 | 新增单 CanvasItem 批绘制管线：复用同一共享弦 + `prepare_for_render` 切平膜，按类型/表型色批量提交，保留膜弦外观 |
+| 按需绘制 | 现有 `_dirty` 节流已在用 | 批渲染层沿用脏标记，tick 更新才重建 |
+
+**冻结边界**：GNP1 布局、tick 阶段顺序与 1/60 固定步长、单帧 12 tick 上限、`CommandBus` 单写者、五通道场与存档 schema 不改。本版只改计算的数据结构与渲染批提交方式；若任何优化改变浮点累加顺序导致状态 hash 变化，必须回退或显式版本化，不得以「更快」为由静默改确定性。
+
+### 33.4 v0.30.0 终验实测与结论（未达标，如实记录）
+
+**优化后基准**（同一 `BenchTest.gd`，无头程序化）：
+
+| 细胞数 | 每 tick（前→后） | behavior | physics | metabolism |
+| --- | --- | --- | --- | --- |
+| 300 | 29.0 → 17.1 ms | 5.4 ms | 7.0 ms | 4.1 ms |
+| 1000 | 114.2 → 60.2 ms | 18.7 ms | 24.7 ms | 14.5 ms |
+| 3000 | 389.1 → 204.1 ms | 63.1 ms | 85.0 ms | 48.0 ms |
+
+- 三项主要优化全部生效：O(1) 场采样、一次建格共享（捕食/碰撞/邻域复用）、神经 `WorkerThreadPool` 静态分区；3000 细胞约提速 1.9×。`PerfBreakdownProbe.gd` 显示 3000 细胞 `physics_collisions≈108ms`、`behavior_neural≈84ms`、`behavior_environment≈46ms` 是剩余大头。
+- **未达标说明**：204 ms/tick 仍远低于 60fps（16.7 ms）或倍速档预算，`cpu_budget_met=false`。Cell Lab 的 3000 细胞流畅依赖 Java JIT + 原生 OpenGL 批提交 + 固定池 SoA；本项目 GDScript 解释执行存在约一个数量级的结构性差距，不是单次算法修补能填平。**不把该数字表述为达标**（§8.1 验收口径）。
+- **中途踩坑（已回退）**：在 GDScript 中对 `PackedInt32Array` 手写插入排序构建 CSR 邻域，3000 细胞 tick 反从 211ms 劣化到 473ms——GDScript 解释层的插入排序远慢于原生 `Array.sort()`；已回退为 `query_neighbors_flat()` + append。碰撞候选若只保留当前真实接触对，会破坏「原本不接触、被邻胞推动后才接触」的连锁分离语义（SmokeTest `chained overlap` 失败）；改为只过滤距离 > 2×接触距离的远邻后恢复。
+- **批渲染**：新增 `CellPolygonBatchRenderer.gd`，>512 细胞时用单 `CanvasItem` 批量绘制共享弦切平膜 + 外轮廓 + 核点 + 连接线，保留 Cell Lab 膜外观而非 MultiMesh 纯色块。`BatchRenderProbe.gd` 600 细胞功能断言全过、状态 hash 不变；但重建仍约 158–167ms/600 细胞（初版全量 `_build_shared_chords` 约 901ms，跳过 O(k²) 遮挡与 `clip_unit_circle` 去重后降到 ~167ms）。**功能正确但重建成本仍高**，属于下一步优化点。
+- **下一步（超出本版范围）**：要真正逼近 3000 细胞流畅，需把热点循环（神经推理、碰撞、场采样、共享弦构建）下沉到 GDExtension/C++ 或计算着色器，而非继续在 GDScript 解释层挤压；同时批渲染改走 `RenderingServer` 直接提交顶点。两者都涉及底层实现替换，须另立专项并守住冻结边界。

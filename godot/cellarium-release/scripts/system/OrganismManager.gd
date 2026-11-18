@@ -181,7 +181,7 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("begin_tick")
 	# 阶段10：一个 tick 两批（物理前/后），每批一次 GPU 采样 dispatch + 小回读。
 	if environment_manager != null:
-		environment_manager.call("begin_field_sampling", _field_sample_positions())
+		environment_manager.call("begin_field_sampling_indexed", _field_sample_positions(), _field_sample_cell_indices())
 	# LOD 神经降频（§2.6）：高倍速下按 tick_core 间隔更新神经，中间 tick 复用上次 intents。
 	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
 	perf_probe.call("begin", "behavior")
@@ -202,7 +202,7 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
 	if environment_manager != null:
-		environment_manager.call("begin_field_sampling", _field_sample_positions())
+		environment_manager.call("begin_field_sampling_indexed", _field_sample_positions(), _field_sample_cell_indices())
 	# v0.17.0：按细胞所属模式的 transfer_rate 派生传递率；无 modes 的旧基因组保持 0，
 	# 因此 v0.14–v0.16 的确定性能量账本不被悄悄改写。
 	var rates: PackedFloat32Array = _build_transfer_rates()
@@ -240,6 +240,15 @@ func _field_sample_positions() -> Array[Vector2]:
 			positions.append(cells.call("get_position", cell_index))
 	return positions
 
+## v0.30.0：与 _field_sample_positions() 一一对应的活细胞索引，供 O(1) 场采样查找。
+func _field_sample_cell_indices() -> Array[int]:
+	var indices: Array[int] = []
+	var alive: PackedByteArray = cells.get("cell_alive")
+	for cell_index in range(int(cells.call("size"))):
+		if alive[cell_index] != 0:
+			indices.append(cell_index)
+	return indices
+
 ## v0.17.0：连接传递率真相源。新多模式基因组逐模式配置；旧基因组保持 v0.14–v0.16 行为。
 func _build_transfer_rates() -> PackedFloat32Array:
 	var count: int = int(cells.call("size"))
@@ -265,29 +274,34 @@ func _build_transfer_rates() -> PackedFloat32Array:
 	return rates
 
 func _build_behavior_environment() -> Dictionary:
-	## 一次 tick 只建一次空间哈希；neighbors 用 Array 索引替代 Dictionary，减少热路径哈希开销。
-	var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash", cells)
-	var neighbors: Array[Array] = []
+	## v0.30.0：扁平空间哈希 + CSR 邻域。旧的每细胞 Array[int] 与 Vector2i 桶键
+	## 在 3000 细胞下占 behavior 阶段一半以上；这里保持 sorted 邻居顺序与旧路径一致。
+	var cell_count: int = int(cells.call("size"))
+	var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash_flat", cells)
+	var neighbor_offsets: PackedInt32Array = PackedInt32Array()
+	neighbor_offsets.resize(cell_count + 1)
+	var neighbor_values: PackedInt32Array = PackedInt32Array()
 	var alive: PackedByteArray = cells.get("cell_alive")
-	for cell_index in range(int(cells.call("size"))):
+	for cell_index in range(cell_count):
+		neighbor_offsets[cell_index] = neighbor_values.size()
 		if alive[cell_index] == 0:
-			neighbors.append([])
 			continue
-		var found: Array[int] = CELL_PHYSICS_SCRIPT.call("query_neighbors_cached", cells, cell_index, buckets)
-		neighbors.append(found)
-	var field_values: Array = []
-	for cell_index in range(int(cells.call("size"))):
-		if alive[cell_index] == 0:
-			field_values.append(PackedFloat32Array())
-			continue
-		var position: Vector2 = cells.call("get_position", cell_index)
-		var sampled: PackedFloat32Array = PackedFloat32Array()
-		if environment_manager != null:
-			sampled = environment_manager.call("sample_fields", position)
-		field_values.append(sampled)
+		var found: PackedInt32Array = CELL_PHYSICS_SCRIPT.call("query_neighbors_flat", cells, cell_index, buckets)
+		for neighbor in found:
+			neighbor_values.append(neighbor)
+	neighbor_offsets[cell_count] = neighbor_values.size()
+	var fields_flat: PackedFloat32Array = PackedFloat32Array()
+	var sample_indices: PackedInt32Array = PackedInt32Array()
+	if environment_manager != null:
+		fields_flat = environment_manager.call("get_field_samples_flat")
+		sample_indices = environment_manager.call("get_field_sample_index_array", cell_count)
 	return {
-		"fields_by_cell": field_values,
-		"neighbors": neighbors,
+		"fields_by_cell": [],
+		"fields_flat": fields_flat,
+		"field_sample_indices": sample_indices,
+		"neighbor_offsets": neighbor_offsets,
+		"neighbor_values": neighbor_values,
+		"neighbors": [],
 		"energy_max": 1.0
 	}
 
@@ -328,33 +342,17 @@ func _compute_base_metabolism_range(first: int, last: int, dt: float, _energies:
 			deltas[cell_index] = -base_metabolic_cost * dt
 
 func _apply_environment_metabolism(dt: float) -> void:
-	var snapshots: Array[PackedFloat32Array] = []
+	## v0.30.0：场采样已是扁平缓冲 + cell_index 索引，无需每细胞 PackedFloat32Array 快照，
+	## 也不再为该步开 WorkerThreadPool 任务；静态分区的代谢主循环仍在 _apply_base_metabolism。
 	var count: int = int(cells.call("size"))
-	snapshots.resize(count)
-	for cell_index in range(count):
-		snapshots[cell_index] = PackedFloat32Array()
-		snapshots[cell_index].resize(5)
-	var range_count: int = mini(OS.get_processor_count(), count)
-	if range_count > 1:
-		var sample_task_ids: PackedInt32Array = PackedInt32Array()
-		for range_index in range(range_count):
-			var first: int = int(float(count * range_index) / float(range_count))
-			var last: int = int(float(count * (range_index + 1)) / float(range_count))
-			sample_task_ids.append(WorkerThreadPool.add_task(_sample_environment_range.bind(first, last, snapshots), false, "cellarium field sample %d" % range_index))
-		for task_id in sample_task_ids:
-			WorkerThreadPool.wait_for_task_completion(task_id)
-	else:
-		_sample_environment_range(0, count, snapshots)
-	_apply_environment_metabolism_ranges(dt, snapshots)
+	var fields_flat: PackedFloat32Array = PackedFloat32Array()
+	var sample_indices: PackedInt32Array = PackedInt32Array()
+	if environment_manager != null:
+		fields_flat = environment_manager.call("get_field_samples_flat")
+		sample_indices = environment_manager.call("get_field_sample_index_array", count)
+	_apply_environment_metabolism_ranges(dt, fields_flat, sample_indices)
 
-func _sample_environment_range(first: int, last: int, snapshots: Array[PackedFloat32Array]) -> void:
-	for cell_index in range(first, last):
-		if cells.get("cell_alive")[cell_index] == 0:
-			continue
-		var position: Vector2 = Vector2(cells.get("cell_pos_x")[cell_index], cells.get("cell_pos_y")[cell_index])
-		snapshots[cell_index] = environment_manager.call("sample_fields", position)
-
-func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[PackedFloat32Array]) -> void:
+func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat32Array, sample_indices: PackedInt32Array) -> void:
 	if environment_manager == null or dt <= 0.0:
 		return
 	var energies: PackedFloat32Array = cells.get("cell_energy")
@@ -377,18 +375,20 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: Array[Packed
 		if alive[cell_index] == 0:
 			continue
 		var org_id: int = org_ids[cell_index]
-		var field_values: PackedFloat32Array = field_samples[cell_index]
-		var oxygen: float = clampf(float(field_values[2]), 0.0, 1.0)
+		var sample_index: int = int(sample_indices[cell_index]) if cell_index < sample_indices.size() else -1
+		var field_offset: int = sample_index * 5
+		var has_fields: bool = sample_index >= 0 and field_offset + 5 <= field_samples.size()
+		var oxygen: float = clampf(float(field_samples[field_offset + 2]), 0.0, 1.0) if has_fields else 0.0
 		var respiration: Dictionary = RESPIRATION_RULES_SCRIPT.call("evaluate", int(respiration_values[org_id]), oxygen, facultative_aerobic_efficiency)
 		var feeding_factor: float = 0.25 + 1.5 * float(priority_values[org_id])
 		var light_factor: float = 1.75 - 1.5 * float(priority_values[org_id])
 		var food_gain: float = 0.0
 		if types[cell_index] == CELL_TYPE_ZYGOTE:
-			food_gain = maxf(0.0, float(field_values[0])) * heterotrophic_intake_rate * feeding_factor * float(respiration.get("efficiency", 0.0)) * dt
+			food_gain = maxf(0.0, float(field_samples[field_offset])) * heterotrophic_intake_rate * feeding_factor * float(respiration.get("efficiency", 0.0)) * dt if has_fields else 0.0
 		elif types[cell_index] == CELL_TYPE_PHOTOCYTE:
-			food_gain = maxf(0.0, float(field_values[3])) * photosynthetic_intake_rate * light_factor * dt
+			food_gain = maxf(0.0, float(field_samples[field_offset + 3])) * photosynthetic_intake_rate * light_factor * dt if has_fields else 0.0
 		elif types[cell_index] == CELL_TYPE_NITROCYTE:
-			food_gain = maxf(0.0, float(field_values[4])) * chemotrophic_intake_rate * feeding_factor * dt
+			food_gain = maxf(0.0, float(field_samples[field_offset + 4])) * chemotrophic_intake_rate * feeding_factor * dt if has_fields else 0.0
 		if food_gain > 0.0:
 			var consumed: float = food_gain
 			if types[cell_index] == CELL_TYPE_ZYGOTE:

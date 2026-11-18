@@ -4,6 +4,31 @@
 
 ---
 
+## 0.30.0 — 2026-11-19
+
+**类型**：物理性能专项 — SoA 计算路径 + 单 CanvasItem 批渲染对齐 Cell Lab（目标 3000 细胞流畅）
+**触发**：用户专项「物理性能专项：SoA + 批渲染，目标 3000 细胞流畅」。**本版性能优化生效但 3000 细胞流畅目标未达标**，如实记录（见下）。
+
+### 源码依据（分析文档 §33）
+
+- 官方 `CellWorld.java` / Macro `SimulationWorld.java`：构造期固定池、逐细胞标量拆成并行 `double[]`（SoA）；空间哈希格边长 0.03、格上限 203、每细胞写 4 格、配对只从 `i4=i3+1`；接触循环 `d(int)` 顺带写共享弦 `A[]`，物理/渲染同源；渲染按类型分桶一次批提交 + `RENDERMODE_WHEN_DIRTY`。
+
+### 实现
+
+- 场采样：`EnvironmentManager.gd` 新增按 cell_index 的 O(1) 索引采样（`begin_field_sampling_indexed` / `get_field_samples_flat`），`EnvironmentField.gd` 新增 `sample_cells_flat()`，消除 `_sample_positions.find()` 的 O(n²) 线性查找；`OrganismManager.gd` 的两次场采样与代谢改为扁平消费。旧 API 保留兼容。
+- 空间哈希：`CellPhysics.gd` 新增扁平键与 `build_spatial_hash_flat` / `query_neighbors_flat` / `build_collision_pairs_flat`；`Predation.gd` 每 tick 只建一次格、改 `query_neighbors_cached`。碰撞改扁平 pairs + 距离平方早退，过滤阈值取 2×接触距离以保留连锁分离语义。
+- 神经行为：`CellBehavior.gd` 的 flat 输出计算/应用支持 `WorkerThreadPool` 静态分区（≥256 细胞写不重叠切片），确定性不变。
+- 批渲染：新增 `CellPolygonBatchRenderer.gd`（单 `CanvasItem` 批量画共享弦切平膜/外轮廓/核点/连接线，>512 细胞启用），`CellSceneRenderer.gd` 与 `main.tscn` 接线 `CellBatchPoly` 节点；大规模 LOD 下保留 Cell Lab 膜外观而非 MultiMesh 纯色块。
+- **冻结边界未动**：GNP1、tick 阶段顺序与 1/60 步长、单帧 12 tick 上限、`CommandBus` 单写者、五通道场 schema、存档 schema v8、状态 hash 逐位不变。
+
+### 验证与实测
+
+- 新增 `tools/PerfBreakdownProbe.gd`、`tools/BatchRenderProbe.gd` 并登记 manifest（脚本数 54→57）；双工程 `SCRIPTS=57 FAILURES=0 EXITCODE=0`，`PreviewReplica` / `DivisionAlignment` / `BatchRender` 探针均 `FAILURES=0`。
+- `BenchTest.gd`：300 细胞 29.0→17.1 ms/tick、1000 细胞 114.2→60.2 ms/tick、3000 细胞 389.1→204.1 ms/tick（约 1.9×）；3000 细胞细分 behavior 63.1 / physics 85.0 / metabolism 48.0 ms。
+- **未达标**：204 ms/tick 仍远低于 60fps 与倍速预算，`cpu_budget_met=false`；GDScript 解释执行与 Cell Lab 原生实现存在结构性差距，不把该数字表述为达标。批渲染功能断言全过且 hash 不变，但 600 细胞重建仍约 158–167ms。真正逼近流畅需把热点下沉到 GDExtension/C++ 或计算着色器，另立专项。
+
+---
+
 ## 0.29.0 — 2026-11-19
 
 **类型**：分裂机制进一步对齐 Cell Lab（40 槽分化树、旧连接重分配、FLAG 后向连接校验）

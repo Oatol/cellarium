@@ -387,6 +387,31 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 	_gpu_readback_usec += maxi(0, Time.get_ticks_usec() - begin)
 	return result
 
+## v0.30.0：零逐细胞分配版。CPU 回退直接写扁平 PackedFloat32Array；GPU 路径复用
+## sample_cells() 的 dispatch/缓存语义后拷贝到扁平缓冲，数值与旧路径逐位一致。
+func sample_cells_flat(positions: Array[Vector2]) -> PackedFloat32Array:
+	var result: PackedFloat32Array = PackedFloat32Array()
+	result.resize(positions.size() * CHANNEL_COUNT)
+	if positions.is_empty():
+		return result
+	if backend_name != "gpu_compute" or positions.size() > MAX_GPU_SAMPLE_CELLS or not _sample_pipeline.is_valid():
+		for index in range(positions.size()):
+			var position: Vector2 = positions[index]
+			if channels.size() != CHANNEL_COUNT or not _is_inside(position):
+				continue
+			var cell_index: int = _cell_index(position)
+			var offset: int = index * CHANNEL_COUNT
+			for channel_index in range(CHANNEL_COUNT):
+				result[offset + channel_index] = channels[channel_index][cell_index]
+		return result
+	var sampled: Array[PackedFloat32Array] = sample_cells(positions)
+	for index in range(mini(sampled.size(), positions.size())):
+		var values: PackedFloat32Array = sampled[index]
+		var offset: int = index * CHANNEL_COUNT
+		for channel_index in range(mini(values.size(), CHANNEL_COUNT)):
+			result[offset + channel_index] = values[channel_index]
+	return result
+
 func _sample_cells_cpu(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 	var result: Array[PackedFloat32Array] = []
 	for position in positions:

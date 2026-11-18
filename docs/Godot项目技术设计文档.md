@@ -46,6 +46,8 @@ v2.1 为**资料核对增补版**：新增 §0.5 记录四个外部参考原型�
 
 **v0.29.0 版本化追加（分化树 40 槽 / 旧连接方向重分配 / FLAG 后向连接校验）**：全量精读官方 `CellWorld.e(double)` 后，把此前 §0.6 标为「不采纳」的 40 Gene 槽分化树改为**版本化采纳**：`Genome.MAX_GENOME_MODES` 16→40，母细胞切到 `child_mode1`（官方 `Gene.i`）、子细胞切到 `child_mode2`（`Gene.j`）；模式槽仍只存 `Genome.modes` 字典，不进 GNP1。连接新增 `CellArray.link_angle`（连接的世界方向角）与 `cell_orientation`（细胞朝向），均为确定性状态，schema v8 保存（旧档 link_angle 由两端位置重算、朝向填 0），纳入 `get_state_hash()`。分裂时按官方点积 `cos(axis−link_angle)−(1−2·Gene.c)` 与 ±0.2 双阈值把旧连接分给母/子，中间带用四极值索引（左/右投影 max/min）补齐；未命中者丢弃，双方连接数上限仍为 20。新增逐模式 `link_keep_mother`/`link_keep_child`（官方 `Gene.m/n`，默认 false，旧 hash 不变）。细胞类型为 FLAGELLOCYTE（id=3）时，按 `cos(link_angle−cell_orientation)<−0.8` 标记后向连接形态异常并走统一死亡路径（新死因 `DEATH_BACKWARD_LINK=6`）。tick 顺序、单帧 12 tick 上限、CommandBus 单写者与 GNP1 布局不动；新字段只在对应开关置位时改变行为。
 
+**v0.30.0 版本化实现约束（物理性能专项：SoA 缓存复用 + 单 CanvasItem 批渲染）**：Cell Lab `CellWorld` 的构造期固定池、并行 `double[]` SoA、一次性建格（`g()`，格边长 0.03、每细胞写 4 格、只处理 `i4=i3+1` 的唯一配对）与「物理接触阶段写 `A[]` 弦、渲染阶段只读 `A[]` 批量提交顶点」是本项目性能对齐目标（证据见分析文档 §33.2）。本版不改 `CellArray` 的 Packed*Array 数据契约、不改 GNP1/tick 顺序/单帧 12 tick 上限/`CommandBus` 单写者/场 schema：① 场采样改为按 `cell_index` 的 O(1) 索引，消除 `EnvironmentManager.sample_fields()` 的 `_sample_positions.find()` 线性查找；② 空间哈希一次构建后传给 behavior、碰撞与捕食共享，捕食不再按捕食者重建整格；邻域与场值改为扁平 CSR 视图，遍历顺序与旧路径一致；③ 新增单 CanvasItem 批渲染管线，复用现有共享弦与 `prepare_for_render` 切平膜，在 >512 细胞规模取代 MultiMesh 纯色块 LOD，保留类型/表型色、连接桥与选中环。所有优化都不得改变状态 hash 与存档；若浮点顺序变化导致 hash 漂移，必须回退或版本化，不允许静默改变确定性。
+
 **v0.22.0 缺陷修复（去掉 depth 分裂闸门）**：Cell Lab `e(double)` 无 mode depth 闸门，分裂次数由端粒 `T∈{-1,5,10,20,40,80}` 控制；本项目 `cell_telomere` 已承担该角色。v0.20.0 遗漏的第二套闸门（`depth >= mode.max_divisions` + 母细胞 depth+1）使自增殖模式（默认 `max_divisions=1`）每细胞分裂一次即锁死、卡在 4 细胞。本版删掉该闸门、母子 depth 不再累加（继承原值，自增殖恒 0），分裂次数统一由端粒控制；`cell_mode_depth` 字段/存档/hash 兼容、不升 schema；`GenomePreview` 三条派生路径同步去掉 depth 限制（预览步数仍由顶层 max_divisions 约束）。GNP1、tick 顺序、单帧 12 tick 上限不动。SmokeTest `OK v0.22.0` 验证 max_divisions=1 自增殖突破旧上限达 ≥8 且 depth 恒 0。
 
 **v0.21.0 版本化追加（分裂倍增 / 半圆出生形状 / 发育预览分裂指示器）**：Cell Lab `CellWorld.e(double)` 逐细胞独立判定分裂、无 per-organism cooldown（同一 tick 所有成熟且能量达标者同时分裂 → 1/2/4/8 倍增）；出生时母子各偏分裂轴 `0.1r`（中心距 `0.2r`）、半径保留母半径、零力，靠下一 tick 接触弹开成两个半圆；Macro `GenomeEditorFragment` 有 `checkbox_show_split_indicators`。实现：① 分裂调度从 per-org 闸门改为逐细胞 cooldown，`CellArray.cell_division_tick`（上次分裂 sim_tick）进 hash/存档、schema v7（旧档填 -2），schema v6→v7 升级；② 出生间距 `max(0.5, 0.2·r·scale)`、母子各偏 `0.1r`、半径当帧不变、连接静止长度仍 `2r`，分裂在 metabolism 阶段（碰撞之后），下一 tick 接触排斥弹开；③ `GenomePreview.show_split_indicators` 纯绘制叠加切面线+方向箭头，新增 `get_split_count_at` / `get_split_angle_at` 只读接口。GNP1 二进制布局、tick 顺序、单帧 12 tick 上限不动；并行倍增改变默认演示体与旧快照的细胞数轨迹（由 max_divisions 链与能量减半约束上限）。
@@ -844,6 +846,8 @@ v2.0 扩展接口（不改动上游契约，单独列出）：`sim.step()`、`si
 | 启动时间 | 冷启动到主菜单 ≤ 4 s | 启动埋点 |
 
 **规模口径（v2.1）**：`Cell Lab` 官方标定"最多 1000 个细胞仍流畅"（移动端、矢量渲染），`ALIEN` 则面向百万级 CUDA 粒子。本文取中间量级并明确**不追求百万粒子**：以 1000 生物 / 8000 细胞为性能达标线、3000 / 24000 为软上限，因为本版的开销大头是逐生物神经、发育程序与谱系记账，而不是纯粒子物理。所有跨原型对比都只用于校准量级，不作为提升目标的依据；任何规模目标上调需先重跑 §9.4 的三档基准。
+
+**v0.30.0 专项验收口径**：v0.29 基线（无头 CPU 回退）为 300 细胞 29.0 ms/tick、1000 细胞 114.2 ms/tick、3000 细胞 389.1 ms/tick，且 30 细胞视图重建 5.25 ms/帧、>512 细胞退化为 MultiMesh 色块。本专项的「3000 细胞流畅」以同口径基准对比：去掉 O(n²) 场采样与重复建格后，3000 细胞 tick 成本须显著下降；批渲染层须在 3000 细胞规模保留共享弦切平膜而非纯色块，且不破坏 `get_state_hash()` 与存档兼容。测得数字写入 CHANGELOG 与分析文档 §33，不把未达标的数字表述为达标。
 
 ### 8.2 计算分工
 

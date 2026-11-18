@@ -38,6 +38,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellVisualCatalog.gd",
 	"res://scripts/rendering/CellView.gd",
 	"res://scripts/rendering/CellSceneRenderer.gd",
+	"res://scripts/rendering/CellPolygonBatchRenderer.gd",
 	"res://scripts/rendering/CameraController.gd",
 	"res://scripts/rendering/CellMembrane.gd",
 	"res://scripts/rendering/CellContactChords.gd",
@@ -57,6 +58,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/ui/GenomePreview.gd",
 	"res://tools/PreviewReplicaProbe.gd",
 	"res://tools/DivisionAlignmentProbe.gd",
+	"res://tools/PerfBreakdownProbe.gd",
+	"res://tools/BatchRenderProbe.gd",
 ]
 
 func _initialize() -> void:

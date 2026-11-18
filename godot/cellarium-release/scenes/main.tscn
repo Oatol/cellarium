@@ -19,6 +19,7 @@
 [ext_resource type="Script" path="res://scripts/rendering/FieldLayer.gd" id="18_fieldlayer"]
 [ext_resource type="Script" path="res://scripts/rendering/SelectionLayer.gd" id="19_selectionlayer"]
 [ext_resource type="Script" path="res://scripts/rendering/FoodLayer.gd" id="20_foodlayer"]
+[ext_resource type="Script" path="res://scripts/rendering/CellPolygonBatchRenderer.gd" id="21_polybatch"]
 
 [node name="Main" type="Node2D" unique_id=201441505]
 script = ExtResource("1_tbgi4")
@@ -54,6 +55,10 @@ cell_scene = ExtResource("13_cellbase")
 
 [node name="CellBatch" type="MultiMeshInstance2D" parent="DishView" unique_id=1492566719]
 script = ExtResource("11_batch")
+
+[node name="CellBatchPoly" type="Node2D" parent="DishView"]
+visible = false
+script = ExtResource("21_polybatch")
 
 [node name="ParticleLayer" type="Node2D" parent="DishView" unique_id=910565151]
 

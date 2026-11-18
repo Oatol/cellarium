@@ -26,6 +26,9 @@ static func resolve_predation(cells: RefCounted, physics: Script, transfer_effic
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var consumed_as_prey: Dictionary = {}
+	## v0.30.0：整 tick 只建一次空间哈希。旧路径在每个捕食者上调用 query_neighbors()，
+	## 后者每次都重建整张哈希，3000 细胞且有大量捕食意图时是模拟侧最大热点之一。
+	var buckets: Dictionary = {}
 	for predator in range(alive.size()):
 		if alive[predator] == 0 or consumed_as_prey.has(predator):
 			continue
@@ -35,7 +38,9 @@ static func resolve_predation(cells: RefCounted, physics: Script, transfer_effic
 		var attack: float = float(intents[intent_index])
 		if attack < attack_threshold:
 			continue
-		var neighbors: Array = physics.call("query_neighbors", cells, predator)
+		if buckets.is_empty():
+			buckets = physics.call("build_spatial_hash", cells)
+		var neighbors: Array = physics.call("query_neighbors_cached", cells, predator, buckets)
 		var prey: int = -1
 		for neighbor_value in neighbors:
 			var candidate: int = int(neighbor_value)

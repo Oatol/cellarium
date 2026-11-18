@@ -13,12 +13,15 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export var batch_renderer_path: NodePath = ^"../CellBatch"
+## v0.30.0：>max_instances 时用单 CanvasItem 批量画共享弦膜，取代纯色块 MultiMesh。
+@export var polygon_batch_path: NodePath = ^"../CellBatchPoly"
 @export var max_instances: int = 512
 
 var organism_manager: Node = null
 var tick_core: Node = null
 var command_bus: Node = null
 var batch_renderer: CanvasItem = null
+var polygon_batch: CanvasItem = null
 var _pool: Array[Node2D] = []
 var _active_count: int = 0
 var _last_contacts_sent: int = 0
@@ -32,6 +35,7 @@ func _ready() -> void:
 	tick_core = get_node_or_null(tick_core_path)
 	command_bus = get_node_or_null(command_bus_path)
 	batch_renderer = get_node_or_null(batch_renderer_path) as CanvasItem
+	polygon_batch = get_node_or_null(polygon_batch_path) as CanvasItem
 	if tick_core != null and tick_core.has_signal("tick_advanced"):
 		var on_tick: Callable = Callable(self, "_on_tick_advanced")
 		if not tick_core.is_connected("tick_advanced", on_tick):
@@ -103,9 +107,13 @@ func _rebuild() -> void:
 		_hide_all()
 		if batch_renderer != null:
 			batch_renderer.visible = true
+		if polygon_batch != null:
+			polygon_batch.visible = true
 		return
 	if batch_renderer != null:
 		batch_renderer.visible = false
+	if polygon_batch != null:
+		polygon_batch.visible = false
 	_ensure_pool(indices.size())
 	var radius: float = SHAPE.REST_RADIUS
 	var radius_value: Variant = organism_manager.get("cell_radius")

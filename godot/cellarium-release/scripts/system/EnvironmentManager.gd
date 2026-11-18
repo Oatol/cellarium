@@ -7,6 +7,7 @@ const CONTEXT_SCRIPT: GDScript = preload("res://scripts/core/data/DevelopmentCon
 const FIELD_SCRIPT: GDScript = preload("res://scripts/system/EnvironmentField.gd")
 const FOOD_STORE_SCRIPT: GDScript = preload("res://scripts/core/data/FoodStore.gd")
 const FIELD_RESOLUTION: int = 32
+const FIELD_CHANNEL_COUNT: int = 5
 
 ## v0.13.0：环境设置快照键。只做版本化追加，不改 schema_version。
 const ENVIRONMENT_SETTING_KEYS: Array[String] = [
@@ -43,7 +44,10 @@ var field_diagnostics: Dictionary = {}
 var food_store: RefCounted = FOOD_STORE_SCRIPT.new() as RefCounted
 ## 阶段10：每 tick 一次批量采样，行为/代谢复用同一批结果，不再逐细胞触发小回读。
 var _sample_positions: Array[Vector2] = []
+var _sample_cell_indices: Array[int] = []
+var _sample_index_by_cell: Dictionary = {}
 var _field_samples: Array[PackedFloat32Array] = []
+var _field_samples_flat: PackedFloat32Array = PackedFloat32Array()
 
 func _ready() -> void:
 	bind_preset()
@@ -208,13 +212,50 @@ func advance_field_tick(source_additions: Array[PackedFloat32Array] = []) -> boo
 
 func begin_field_sampling(positions: Array[Vector2]) -> void:
 	_sample_positions = positions.duplicate()
+	_sample_cell_indices.clear()
+	_sample_index_by_cell.clear()
 	_field_samples = field.call("sample_cells", positions)
+	_field_samples_flat = PackedFloat32Array()
+
+## v0.30.0：按 cell_index 建一次索引，消除 sample_fields() 的 O(n) 线性查找。
+## cell_indices 与 positions 一一对应（由 OrganismManager 按活细胞升序生成）。
+func begin_field_sampling_indexed(positions: Array[Vector2], cell_indices: Array[int]) -> void:
+	_sample_positions = positions.duplicate()
+	_sample_cell_indices = cell_indices.duplicate()
+	_sample_index_by_cell.clear()
+	for sample_index in range(_sample_cell_indices.size()):
+		_sample_index_by_cell[_sample_cell_indices[sample_index]] = sample_index
+	_field_samples_flat = field.call("sample_cells_flat", positions)
 
 func sample_fields(position: Vector2) -> PackedFloat32Array:
 	var index: int = _sample_positions.find(position)
 	if index >= 0 and index < _field_samples.size():
 		return _field_samples[index]
 	return field.call("sample", position)
+
+## 兼容接口：按 cell_index 取 5 通道副本；热路径请优先用扁平数组 + 索引。
+func sample_fields_for_cell(cell_index: int) -> PackedFloat32Array:
+	var result: PackedFloat32Array = PackedFloat32Array()
+	result.resize(FIELD_CHANNEL_COUNT)
+	var sample_index: int = int(_sample_index_by_cell.get(cell_index, -1))
+	if sample_index < 0:
+		return result
+	var offset: int = sample_index * FIELD_CHANNEL_COUNT
+	for channel_index in range(FIELD_CHANNEL_COUNT):
+		if offset + channel_index < _field_samples_flat.size():
+			result[channel_index] = _field_samples_flat[offset + channel_index]
+	return result
+
+func get_field_samples_flat() -> PackedFloat32Array:
+	return _field_samples_flat
+
+func get_field_sample_index_array(cell_count: int) -> PackedInt32Array:
+	var indices: PackedInt32Array = PackedInt32Array()
+	indices.resize(cell_count)
+	indices.fill(-1)
+	for cell_index in range(cell_count):
+		indices[cell_index] = int(_sample_index_by_cell.get(cell_index, -1))
+	return indices
 
 func get_field_diagnostics() -> Dictionary:
 	field_diagnostics = field.call("get_backend_diagnostics")

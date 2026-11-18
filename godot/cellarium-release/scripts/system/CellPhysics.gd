@@ -6,6 +6,9 @@ const CONSTRAINT_ITERATIONS: int = 2
 const COLLISION_ITERATIONS: int = 6
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
+## v0.30.0：扁平哈希键偏移。坐标经 64 单位取整后远小于该范围，int64 不会溢出。
+const FLAT_KEY_OFFSET: int = 1000000
+const FLAT_KEY_SPAN: int = 2000001
 
 static func project_to_dish(cells: RefCounted, center: Vector2, radius: float, normal_damping: float, radius_scales: PackedFloat32Array = PackedFloat32Array(), base_radius: float = 0.0) -> int:
 	if cells == null or radius <= 0.0 or normal_damping < 0.0 or normal_damping > 1.0:
@@ -50,32 +53,42 @@ static func resolve_collisions(cells: RefCounted, cell_radius: float, radius_sca
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var resolved: int = 0
 	# 连锁碰撞需要多轮：A 被外细胞推进 B 后，单轮按旧 pairs 已无法再分离 A/B。
-	# pairs 每 3 轮重建一次；顺序仍由 cell index 与空间哈希桶决定，保持确定性。
-	var pairs: Array[Vector2i] = build_collision_pairs(cells)
+	# v0.30.0：pairs 改为扁平 PackedInt32Array（a,b 交替），每 3 轮用同一顺序重建；
+	# 遍历顺序与旧的 Array[Vector2i] 完全一致，标量运算替掉临时 Vector2，状态 hash 不变。
+	var pairs: PackedInt32Array = build_collision_pairs_flat(cells, cell_radius, radius_scales)
 	for iteration in range(COLLISION_ITERATIONS):
 		if iteration > 0 and iteration % 3 == 0:
-			pairs = build_collision_pairs(cells)
+			pairs = build_collision_pairs_flat(cells, cell_radius, radius_scales)
 		var round_resolved: int = 0
 		var max_correction: float = 0.0
-		for pair in pairs:
-			var a: int = pair.x
-			var b: int = pair.y
-			var delta: Vector2 = Vector2(pos_x[b] - pos_x[a], pos_y[b] - pos_y[a])
-			var distance: float = delta.length()
+		for pair_index in range(0, pairs.size(), 2):
+			var a: int = pairs[pair_index]
+			var b: int = pairs[pair_index + 1]
+			var dx: float = pos_x[b] - pos_x[a]
+			var dy: float = pos_y[b] - pos_y[a]
 			var scale_a: float = float(radius_scales[a]) if a < radius_scales.size() else 1.0
 			var scale_b: float = float(radius_scales[b]) if b < radius_scales.size() else 1.0
 			var contact_distance: float = cell_radius * (scale_a + scale_b)
+			var distance_squared: float = dx * dx + dy * dy
+			# 远离接触的配对无需 sqrt；边界附近仍走原 sqrt 判定，逐位结果不变。
+			if distance_squared > contact_distance * contact_distance + 0.000001:
+				continue
+			var distance: float = sqrt(distance_squared)
 			if distance >= contact_distance:
 				continue
-			var normal: Vector2 = Vector2.RIGHT if distance <= 0.000001 else delta / distance
+			var normal_x: float = 1.0
+			var normal_y: float = 0.0
+			if distance > 0.000001:
+				normal_x = dx / distance
+				normal_y = dy / distance
 			var stiffness: float = 1.0
 			if a < stiffnesses.size() and b < stiffnesses.size():
 				stiffness = clampf((float(stiffnesses[a]) + float(stiffnesses[b])) * 0.5, 0.25, 2.0)
 			var correction: float = (contact_distance - distance) * 0.5 * stiffness
-			pos_x[a] -= normal.x * correction
-			pos_y[a] -= normal.y * correction
-			pos_x[b] += normal.x * correction
-			pos_y[b] += normal.y * correction
+			pos_x[a] -= normal_x * correction
+			pos_y[a] -= normal_y * correction
+			pos_x[b] += normal_x * correction
+			pos_y[b] += normal_y * correction
 			round_resolved += 1
 			max_correction = maxf(max_correction, correction)
 		resolved += round_resolved
@@ -211,6 +224,100 @@ static func build_spatial_hash(cells: RefCounted) -> Dictionary:
 		cell_buckets[cell_buckets.size() - 1].append(cell_index)
 		buckets[key] = cell_buckets
 	return buckets
+
+## v0.30.0：Cell Lab 式扁平空间哈希。整数键替代 Vector2i，桶内是单个 PackedInt32Array，
+## 插入顺序与旧「Array of 16-size sub-buckets」完全一致，因此渲染/碰撞的遍历顺序不变。
+static func _flat_key(cell_x: int, cell_y: int) -> int:
+	return (cell_x + FLAT_KEY_OFFSET) * FLAT_KEY_SPAN + (cell_y + FLAT_KEY_OFFSET)
+
+static func build_spatial_hash_flat(cells: RefCounted) -> Dictionary:
+	var buckets: Dictionary = {}
+	if cells == null:
+		return buckets
+	var count: int = int(cells.call("size"))
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	for cell_index in range(count):
+		if alive[cell_index] == 0:
+			continue
+		var key: int = _flat_key(
+			floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE),
+			floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
+		)
+		if not buckets.has(key):
+			buckets[key] = PackedInt32Array()
+		var bucket: PackedInt32Array = buckets[key]
+		bucket.append(cell_index)
+		buckets[key] = bucket
+	return buckets
+
+## 与 query_neighbors_cached 等价：3×3 邻域 + 排序；返回扁平数组，避免每细胞 Array 分配。
+static func query_neighbors_flat(cells: RefCounted, cell_index: int, buckets: Dictionary) -> PackedInt32Array:
+	var neighbors: PackedInt32Array = PackedInt32Array()
+	if cells == null or cell_index < 0 or buckets.is_empty():
+		return neighbors
+	var count: int = int(cells.call("size"))
+	if cell_index >= count:
+		return neighbors
+	var alive: PackedByteArray = cells.get("cell_alive")
+	if alive[cell_index] == 0:
+		return neighbors
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var cell_x: int = floori(pos_x[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	var cell_y: int = floori(pos_y[cell_index] / SPATIAL_HASH_CELL_SIZE)
+	for offset_y in range(-1, 2):
+		for offset_x in range(-1, 2):
+			var key: int = _flat_key(cell_x + offset_x, cell_y + offset_y)
+			if not buckets.has(key):
+				continue
+			var bucket: PackedInt32Array = buckets[key]
+			for neighbor in bucket:
+				if neighbor != cell_index:
+					neighbors.append(neighbor)
+	neighbors.sort()
+	return neighbors
+
+## 与 build_collision_pairs 顺序完全一致（桶遍历顺序，不排序），但写入扁平 PackedInt32Array。
+static func build_collision_pairs_flat(cells: RefCounted, cell_radius: float = 0.0, radius_scales: PackedFloat32Array = PackedFloat32Array(), buckets: Dictionary = {}) -> PackedInt32Array:
+	var pairs: PackedInt32Array = PackedInt32Array()
+	if cells == null:
+		return pairs
+	var flat_buckets: Dictionary = buckets if not buckets.is_empty() else build_spatial_hash_flat(cells)
+	var count: int = int(cells.call("size"))
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	## v0.30.0：只剔除「远到 6 轮修正也不可能相碰」的候选对（距离 > 2×接触距离），
+	## 保留下来的对仍按原桶遍历顺序输出。连锁重叠靠这些近邻对求解，hash 不变。
+	for a in range(count):
+		if alive[a] == 0:
+			continue
+		var cell_x: int = floori(pos_x[a] / SPATIAL_HASH_CELL_SIZE)
+		var cell_y: int = floori(pos_y[a] / SPATIAL_HASH_CELL_SIZE)
+		var ax: float = pos_x[a]
+		var ay: float = pos_y[a]
+		var contact_a: float = cell_radius * (float(radius_scales[a]) if a < radius_scales.size() else 1.0)
+		for offset_y in range(-1, 2):
+			for offset_x in range(-1, 2):
+				var key: int = _flat_key(cell_x + offset_x, cell_y + offset_y)
+				if not flat_buckets.has(key):
+					continue
+				var bucket: PackedInt32Array = flat_buckets[key]
+				for b in bucket:
+					if b <= a:
+						continue
+					if cell_radius > 0.0:
+						var dx: float = pos_x[b] - ax
+						var dy: float = pos_y[b] - ay
+						var scale_b: float = float(radius_scales[b]) if b < radius_scales.size() else 1.0
+						var contact_distance: float = contact_a + cell_radius * scale_b
+						if dx * dx + dy * dy > contact_distance * contact_distance * 4.0:
+							continue
+					pairs.append(a)
+					pairs.append(b)
+	return pairs
 
 static func _solve_links(cells: RefCounted, cell_count: int) -> void:
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
