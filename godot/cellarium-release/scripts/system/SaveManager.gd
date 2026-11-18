@@ -4,7 +4,7 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 4
+const SCHEMA_VERSION: int = 5
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
 
 const CELL_ARRAY_NAMES: Array[String] = [
@@ -21,6 +21,9 @@ const PHENOTYPE_ARRAY_NAMES: Array[String] = [
 
 ## v0.17.0：schema 1–3 的旧快照没有逐细胞模式槽，恢复时按 0 补齐。
 const MODE_ARRAY_NAMES: Array[String] = ["cell_mode", "cell_mode_depth"]
+
+## v0.18.0：schema 1–4 的旧快照没有逐细胞端粒，恢复时按 -1（无限）补齐。
+const TELOMERE_ARRAY_NAMES: Array[String] = ["cell_telomere"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -52,6 +55,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in PHENOTYPE_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 	for array_name in MODE_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in TELOMERE_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -86,6 +91,7 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 			"color_b": float(genome.get("color_b")),
 			"modes": (genome.get("modes") as Array).duplicate(true),
 			"transfer_rate": float(genome.get("transfer_rate")),
+			"max_cells_per_organism": int(genome.get("max_cells_per_organism")),
 			"species_id": int(genome.get("species_id")),
 			"lineage_id": int(genome.get("lineage_id")),
 		})
@@ -179,6 +185,15 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			restored_mode_values.resize(int(cells.get("cell_pos_x").size()))
 			cells.set(array_name, restored_mode_values)
 
+	for array_name in TELOMERE_ARRAY_NAMES:
+		if cell_data.has(array_name):
+			cells.set(array_name, _copy_array(cell_data[array_name]))
+		else:
+			var restored_telomeres: PackedInt32Array = PackedInt32Array()
+			restored_telomeres.resize(int(cells.get("cell_pos_x").size()))
+			restored_telomeres.fill(-1)
+			cells.set(array_name, restored_telomeres)
+
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary
 	for array_name in ORGANISM_ARRAY_NAMES:
@@ -212,6 +227,10 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 		genome.set("color_b", clampf(float(record.get("color_b", 0.75)), 0.0, 1.0))
 		# 旧快照缺 transfer_rate 时填 0.0：保持 v0.16.0 及更早的连接传递行为不变。
 		genome.set("transfer_rate", clampf(float(record.get("transfer_rate", 0.0)), 0.0, 1.0))
+		# v0.18.0：旧快照缺 max_cells_per_organism 时回退 max_divisions+1。
+		var legacy_cell_cap: int = clampi(int(record.get("max_divisions", 3)) + 1, 2, 8000)
+		var restored_cell_cap: int = clampi(int(record.get("max_cells_per_organism", legacy_cell_cap)), -1, 8000)
+		genome.set("max_cells_per_organism", -1 if restored_cell_cap < 2 else restored_cell_cap)
 		if not bool(genome.call("set_modes", record.get("modes", []))):
 			push_error("SaveManager: invalid genome modes in save")
 			return false

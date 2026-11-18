@@ -63,6 +63,7 @@ func _ready() -> void:
 		genome.set("flags", int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2)))
 		genome.set("division_mass", 0.05)
 		genome.set("max_divisions", 3)
+		genome.set("max_cells_per_organism", 4)
 		genome.set("child_types", PackedByteArray([2, 4, 5, 10]))
 		genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
 		genome.call("set_modes", genome_script.call("demo_modes"))

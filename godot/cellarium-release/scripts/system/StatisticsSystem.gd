@@ -3,7 +3,7 @@ extends RefCounted
 ## 三条产物：多物种折线图数据、物种与死因面板、"记录到的事实"（全部模板生成，禁止手写死文案）。
 ## 纯 RefCounted，无 class_name，调用方 preload。确定性：只依赖采样输入。
 
-const DEATH_LABELS: Dictionary = {0: "未死亡", 1: "饥饿", 2: "中毒", 3: "被捕食", 4: "干预"}
+const DEATH_LABELS: Dictionary = {0: "未死亡", 1: "饥饿", 2: "中毒", 3: "被捕食", 4: "干预", 5: "端粒耗尽"}
 
 @export var capacity: int = 7200
 @export var sample_interval_ticks: int = 30

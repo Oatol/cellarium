@@ -798,6 +798,8 @@ func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -
 			"max_divisions": int(_draft_genome.get("max_divisions")),
 			"child_types": (_draft_genome.get("child_types") as PackedByteArray).duplicate(),
 			"split_angles": (_draft_genome.get("split_angles") as PackedByteArray).duplicate(),
+			# v0.18.0：个体上限与逐模式限制只走 CommandBus payload，不进 GNP1 冻结二进制。
+			"max_cells_per_organism": int(_draft_genome.get("max_cells_per_organism")),
 			# v0.16.0：Macro 表型字段同样经 CommandBus 传入，不进 GNP1 冻结二进制。
 			"nutrition_priority": float(_draft_genome.get("nutrition_priority")),
 			"cell_stiffness": float(_draft_genome.get("cell_stiffness")),

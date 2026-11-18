@@ -805,3 +805,24 @@ CPU 镜像：仅 set_value / paint_terrain / snapshot / get_state_hash / 存档�
 
 - 新增 SmokeTest：两子代模式与逐模式编辑不串数据、预览点击跳转、hash 兼容边界（空 modes / flags 清零仍保持旧 hash）、模式分裂与表型继承、跨连接能量守恒、`genome_gene` payload 往返、schema v4 与旧快照缺字段回退。
 - 同步更新旧断言：默认演示体改为多模式、速度探针使用单细胞避免中途分裂、模式子代类型按集合而非固定索引校验、schema 版本从 3 升到 4。
+
+## 28. v0.18.0：个体规模上限修订、连接数抑制分裂与端粒（2026-11-18）
+
+### 28.1 证据与决策
+
+- Cell Lab 官方 `CellWorld` 只有全局 `Cell[Environment.r]` 对象池与 `z` 活细胞计数；静态搜索没有 `Organism` / `Group` / `Colony` 一级实体，个体是 `Link` 连通分量，因此没有显式 per-organism max cell count。
+- 规模约束来自：全局对象池空位、`Gene.u[9]` 连接数分裂条件 `P <= Gene.u[9]`、每细胞连接硬上限 20 / GLUE 5、端粒 `T ∈ {-1,5,10,20,40,80}`，以及寿命/浓度/拉断。Macro 的 `SimulationWorld` 尚未逐方法穷尽，只能说「现有证据未发现」。
+- 用户确认修订基线：本项目取消「每个个体最多 8 细胞」硬上限，`max_cells_per_organism=-1` 无限，保留全局容量保护，并把连接数抑制分裂与端粒/谱系分裂次数放到细胞编辑。
+
+### 28.2 实现口径
+
+- `CellArray.max_cell_capacity` 默认 8000；`append_cell()` 与 `divide_cell()` 在容量触顶时拒绝。它是全局保护，不替代个体语义。
+- `Genome.max_cells_per_organism`：`-1` 无限；旧命令/旧存档缺字段回退 `max_divisions + 1`。默认演示体显式为 4，保持 4 细胞/3 连接快照；新编辑器草案为 -1。
+- 逐模式 `link_division_limit`：`-1` 关闭；`>=0` 时当前细胞连接数 `>=` 阈值即不进入分裂候选。旧模式缺字段回退 -1。Cell Lab 的 `<=` 语义与本项目的「达到即停」不同，按版本化追加记录。
+- 逐模式 `telomere`：`-1` 无限或 5/10/20/40/80；`CellArray.cell_telomere` 按细胞保存。初始细胞取当前模式值；每次分裂母子同减 1，归零时双方死亡并记死因 5「端粒耗尽」。
+- 新字段不进 GNP1；走 `genome_gene` payload 与 `schema_version=5`，旧档逐字段回退；只在基因模式混入 hash，flags 清零保持旧 hash。
+
+### 28.3 验证
+
+- SmokeTest 覆盖：个体无限生长超过 8、全局容量拒绝、连接数抑制分裂、有限端粒递减与归零死亡、`-1` 无限端粒、schema v5 新旧回退、编辑器控件写入与 hash 边界。
+- 验证口径：发布工程与 D 盘工程均 `SCRIPTS=51 FAILURES=0 EXITCODE=0`。

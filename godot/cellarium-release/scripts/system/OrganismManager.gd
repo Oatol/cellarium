@@ -72,6 +72,7 @@ var adhesion_anchor: int = -1
 func _ready() -> void:
 	species_system.call("configure", speciation_distance, speciation_cooldown)
 	statistics.call("configure", 7200, 30)
+	cells.set("max_cell_capacity", maxi(1, global_cell_capacity))
 
 @export var dish_center: Vector2 = Vector2.ZERO
 @export var dish_radius: float = 512.0
@@ -81,7 +82,10 @@ func _ready() -> void:
 @export var autonomous_division_enabled: bool = true
 @export var autonomous_division_energy: float = 0.16
 @export var autonomous_division_cooldown: int = 300
-@export var autonomous_max_cells_per_organism: int = 8
+## v0.18.0：旧的 per-organism 硬上限已废弃；-1 表示不再按 8 细胞截断个体。
+@export var autonomous_max_cells_per_organism: int = -1
+## v0.18.0：全局容量保护；达到后所有新增细胞/分裂路径一律拒绝。
+@export var global_cell_capacity: int = 8000
 @export var autonomous_division_separation: float = 14.0
 @export var default_transfer_rate: float = 0.0
 @export var facultative_aerobic_efficiency: float = 2.0
@@ -429,7 +433,7 @@ func _apply_autonomous_lifecycle() -> void:
 		var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
 		var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
 		var threshold: float = maxf(0.05, float(genome.get("division_mass"))) if gene_mode else autonomous_division_energy
-		var max_cells: int = clampi(int(genome.get("max_divisions")) + 1, 2, autonomous_max_cells_per_organism) if gene_mode else autonomous_max_cells_per_organism
+		var max_cells: int = _resolve_max_cells(genome)
 		var mode_data: Dictionary = {}
 		var mode_index: int = 0
 		var depth: int = 0
@@ -441,7 +445,11 @@ func _apply_autonomous_lifecycle() -> void:
 			if local_max <= 0 or depth >= local_max:
 				continue
 			threshold = maxf(0.05, float(mode_data.get("division_mass", threshold)))
-		if energies[cell_index] < threshold or int(cell_counts[org_id]) >= max_cells:
+			if _is_link_division_blocked(genome, cell_index):
+				continue
+		if int(cells.call("get_telomere", cell_index)) == 0:
+			continue
+		if energies[cell_index] < threshold or (max_cells >= 0 and int(cell_counts[org_id]) >= max_cells):
 			continue
 		# 首次具备分裂资格时记录起点并跳过本 tick：给发育完成一个 cooldown 宽限期，
 		# 否则成熟当 tick 就分裂，会打破旧版「发育程序 9 指令 → 4 细胞 3 连接」快照。
@@ -463,8 +471,8 @@ func _apply_autonomous_lifecycle() -> void:
 		# 一个个体每 tick 最多分裂一次：多模式不再让所有合格细胞在同一 tick 连锁分化。
 		if _autonomous_division_tick.has(org_id) and _sim_tick - int(_autonomous_division_tick[org_id]) < autonomous_division_cooldown:
 			continue
-		var max_cells: int = clampi(int(genome.get("max_divisions")) + 1, 2, autonomous_max_cells_per_organism) if gene_mode else autonomous_max_cells_per_organism
-		if int(cell_counts[org_id]) >= max_cells:
+		var max_cells: int = _resolve_max_cells(genome)
+		if max_cells >= 0 and int(cell_counts[org_id]) >= max_cells:
 			continue
 		var division_index: int = maxi(0, int(cell_counts[org_id]) - 1)
 		var angle: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
@@ -499,7 +507,8 @@ func _apply_autonomous_lifecycle() -> void:
 		var child_index: int = int(cells.call("divide_cell", cell_index, angle, division_separation))
 		if child_index < 0:
 			continue
-		if not bool(organisms.call("add_developed_cell", org_id, child_index, max_cells)):
+		var add_limit: int = maxi(int(cell_counts[org_id]) + 1, max_cells)
+		if not bool(organisms.call("add_developed_cell", org_id, child_index, add_limit)):
 			cells.call("remove_cell", child_index)
 			continue
 		if has_modes:
@@ -530,8 +539,19 @@ func _apply_autonomous_lifecycle() -> void:
 			cells.call("link_cells", cell_index, child_index, rest_length)
 		if gene_mode:
 			_apply_min_connections(genome, org_id, child_index, rest_length)
-		org_state[org_id] = mature_state
-		organisms.set("org_state", org_state)
+		# v0.18.0：端粒按细胞谱系递减，归零时母子同死（Cell Lab Gene.B[6]）。
+		if gene_mode:
+			var parent_telomere: int = int(cells.call("decrement_telomere", cell_index))
+			var child_telomere: int = int(cells.call("decrement_telomere", child_index))
+			var telomere_death: int = int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_TELOMERE"])
+			if parent_telomere == 0:
+				_remove_cell_with_cause(cell_index, telomere_death)
+			if child_telomere == 0:
+				_remove_cell_with_cause(child_index, telomere_death)
+		if int(organisms.get("org_alive")[org_id]) != 0:
+			org_state = organisms.get("org_state")
+			org_state[org_id] = mature_state
+			organisms.set("org_state", org_state)
 		cell_counts = organisms.get("cell_count")
 		_autonomous_division_tick[org_id] = _sim_tick
 
@@ -616,6 +636,11 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 		_apply_cell_mode(stored_genome, cell_index, 0, 0)
 	else:
 		_apply_cell_phenotype(stored_genome, cell_index)
+	# v0.18.0：初始细胞继承当前模式的端粒；-1 表示无限。
+	var initial_telomere: int = -1
+	if bool(GENOME_SCRIPT.call("has_modes", stored_genome)):
+		initial_telomere = int(GENOME_SCRIPT.call("get_mode", stored_genome, 0).get("telomere", -1))
+	cells.call("set_cell_telomere", cell_index, initial_telomere)
 	CELL_BEHAVIOR_SCRIPT.call("initialize_weights", cells, cell_index, int(genome.call("hash")))
 	organisms.call("add_developed_cell", org_id, cell_index, int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome)))
 	# add_developed_cell 会把状态改回 DEVELOPING；基因模式出生即成熟，必须恢复初值。
@@ -676,6 +701,12 @@ func _apply_gene_payload(genome: RefCounted, payload: Variant) -> void:
 	genome.set("division_mass", clampf(float(gene.get("division_mass", 1.0)), 0.05, 100.0))
 	genome.set("split_ratio", clampf(float(gene.get("split_ratio", 0.5)), 0.05, 0.95))
 	genome.set("max_divisions", clampi(int(gene.get("max_divisions", 3)), 0, 8))
+	# v0.18.0：旧 payload 缺字段时回退为 max_divisions+1，保持 v0.17 及更早行为。
+	if gene.has("max_cells_per_organism"):
+		var restored_cell_cap: int = clampi(int(gene.get("max_cells_per_organism")), -1, int(GENOME_SCRIPT.get_script_constant_map().get("GLOBAL_CELL_CAPACITY", 8000)))
+		genome.set("max_cells_per_organism", -1 if restored_cell_cap < 2 else restored_cell_cap)
+	else:
+		genome.set("max_cells_per_organism", clampi(int(genome.get("max_divisions")) + 1, 2, int(GENOME_SCRIPT.get_script_constant_map().get("GLOBAL_CELL_CAPACITY", 8000))))
 	var child_types: PackedByteArray = gene.get("child_types", PackedByteArray())
 	var split_angles: PackedByteArray = gene.get("split_angles", PackedByteArray())
 	if child_types is PackedByteArray:
@@ -756,6 +787,31 @@ func _mode_for_cell(genome: RefCounted, cell_index: int) -> Dictionary:
 	var mode_ids: PackedByteArray = cells.get("cell_mode")
 	var mode_id: int = 0 if cell_index < 0 or cell_index >= mode_ids.size() else int(mode_ids[cell_index])
 	return GENOME_SCRIPT.call("get_mode", genome, mode_id)
+
+## v0.18.0：基因模式按 Genome.max_cells_per_organism 限制个体；-1 无限。
+## 旧非基因模式仍按 dev_program 固定细胞数，旧 payload 缺字段时由 _apply_gene_payload 回退。
+func _resolve_max_cells(genome: RefCounted) -> int:
+	if genome == null:
+		return -1
+	if not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
+		return int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome))
+	# 旧快照/外部构造的 RefCounted 可能没有该字段；缺失时按 v0.17 的 max_divisions+1 回退。
+	var raw_cap: Variant = genome.get("max_cells_per_organism")
+	var cap: int = int(genome.get("max_divisions")) + 1 if raw_cap == null else int(raw_cap)
+	if cap == int(GENOME_SCRIPT.get_script_constant_map().get("UNLIMITED_CELLS", -1)) or cap < 2:
+		return -1
+	return mini(cap, maxi(1, global_cell_capacity))
+
+## v0.18.0：当前模式连接数达到 link_division_limit 即抑制分裂；-1 保持旧行为。
+func _is_link_division_blocked(genome: RefCounted, cell_index: int) -> bool:
+	if genome == null or not bool(GENOME_SCRIPT.call("is_gene_mode", genome)) \
+		or not bool(GENOME_SCRIPT.call("has_modes", genome)):
+		return false
+	var limit: int = clampi(int(_mode_for_cell(genome, cell_index).get("link_division_limit", -1)), -1, 16)
+	if limit < 0:
+		return false
+	var link_counts: PackedByteArray = cells.get("cell_link_count")
+	return cell_index >= 0 and cell_index < link_counts.size() and int(link_counts[cell_index]) >= limit
 
 func _can_add_link(genome: RefCounted, a: int, b: int) -> bool:
 	if genome == null or not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):

@@ -10,6 +10,7 @@ extends Control
 ## 两者都会改变该基因组的 hash；其余 Macro 字段（split_mass/ratio/角度等）仍只展示。
 ## v0.17.0：改为逐模式编辑——一个基因组含多个模式槽，每个模式独立保存类型、行为、两子代与
 ## 特殊控制；发育预览中的细胞可点击跳到对应模式。GNP1 仍冻结，modes 只走 payload / 存档。
+## v0.18.0：新增顶层个体最大细胞数（-1 无限）与逐模式连接数抑制分裂 / 端粒，均在此页设置。
 
 signal draft_applied(genome: RefCounted, type_id: int)
 
@@ -38,6 +39,7 @@ const MACRO_FIELD_KEYS: Array[String] = [
 	"stiffness", "cell_size", "max_connections", "min_connections",
 	"adhesion_strength", "adhesion_length", "adhesion_stretch",
 	"color_r", "color_g", "color_b",
+	"link_division_limit", "telomere",
 ]
 
 @export var content_path: NodePath = ^"Panel/Content"
@@ -125,6 +127,10 @@ static func default_macro_draft() -> Dictionary:
 	draft_value["max_divisions"] = 3
 	draft_value["division_mass"] = 1.0
 	draft_value["mode_max_divisions"] = int(draft_value.get("max_divisions", 1))
+	# v0.18.0：新草案默认无限个体规模；连接阈值按 Cell Lab Gene.u[9] 风格默认 4；端粒无限。
+	draft_value["max_cells_per_organism"] = -1
+	draft_value["link_division_limit"] = 4
+	draft_value["telomere"] = -1
 	draft_value["child3"] = 4
 	draft_value["child4"] = 10
 	draft_value["child3_angle"] = 0.5
@@ -144,7 +150,8 @@ static func gene_help_text() -> String:
 		+ "② 分裂即分化：母细胞变成一个子代模式，新细胞是另一子代模式；每个模式只选择「子代 1 / 子代 2」。\n"
 		+ "③ 发育预览里的细胞可点击，直接跳到它所属模式继续编辑；预览只读，不跑第二套模拟。\n"
 		+ "④ 连接由逐模式的黏附素与保留黏附素决定；连接传递率让相连细胞按能量差守恒转移，生态报告会显示转出/转入。\n"
-		+ "⑤ Macro 40 Gene 槽/完整行为总线未穷尽；本页字段只作为版本化追加写入 payload/schema，不进冻结 GNP1。"
+		+ "⑤ v0.18.0：个体最大细胞数默认 -1（无限），不再有 8 细胞硬上限；全局仍受 8000 容量保护。逐模式可设连接数抑制分裂与端粒/谱系分裂次数。\n"
+		+ "⑥ Macro 40 Gene 槽/完整行为总线未穷尽；本页字段只作为版本化追加写入 payload/schema，不进冻结 GNP1。"
 	)
 
 ## 分裂模板：每条 DIVIDE 增加 1 个细胞；a=被分裂的母细胞索引，b=角度(0..255→0..360°)，
@@ -483,6 +490,14 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_section_title("MODE · 模式槽（点击预览细胞也可跳转）"))
 	box.add_child(_build_mode_bar())
 
+	box.add_child(_make_section_title("SCALE · 个体规模 / 谱系限制（v0.18.0）"))
+	box.add_child(_make_macro_slider("max_cells_per_organism", "个体最大细胞数", -1.0, 64.0, 1.0,
+		"-1 = 无限；>=2 才作为个体上限。全局仍受 8000 细胞容量保护。", 0))
+	box.add_child(_make_macro_slider("link_division_limit", "连接数抑制分裂", -1.0, 16.0, 1.0,
+		"当前模式细胞连接数 >= 该值即停止分裂；-1 = 不抑制（旧行为）。", 0))
+	box.add_child(_make_macro_slider("telomere", "端粒 / 谱系分裂次数", -1.0, 80.0, 1.0,
+		"-1 = 无限；有限值只允许 5/10/20/40/80。每次分裂母子同减，归零死亡。", 0))
+
 	box.add_child(_make_section_title("TYPE / ADHESIN · 当前模式类型与黏附"))
 	box.add_child(_make_macro_type_option("cell_type", "细胞类型", "spinner_types → Gene.C"))
 	box.add_child(_make_macro_check("make_glue", "生成黏附素", "checkbox_make_glue → Gene.E；本项目 v0.14.1 写入 flags bit0：子代自动连接，无需 LINK 指令"))
@@ -505,7 +520,7 @@ func _build_right_panel() -> Control:
 	box.add_child(_make_macro_slider("split_ratio", "分裂质量比（母细胞保留）", 0.05, 0.95, 0.01,
 		"Gene.c：亲子能量按此比例分配，子代获得 1-ratio。", 2))
 	box.add_child(_make_macro_slider("mode_max_divisions", "本模式最大分裂层数", 0.0, 8.0, 1.0,
-		"该模式最多再分裂几层；0 表示终末模式。个体总细胞数仍受顶层最大分裂次数约束。", 0))
+		"该模式最多再分裂几层；0 表示终末模式。个体总细胞数由上方「个体最大细胞数」约束。", 0))
 
 	box.add_child(_make_section_title("SPLIT · Macro 参考字段（仅草案）"))
 	box.add_child(_make_macro_slider("split_mass", "分裂质量（Macro 比例）", 0.0, 1.0, 0.01, "seek_mass → splitMassFraction(Gene)，仅草案", 2))
@@ -687,6 +702,8 @@ func _on_add_mode() -> void:
 		return
 	_commit_current_mode()
 	var created: Dictionary = GENOME_SCRIPT.call("normalized_mode", {}, _modes.size())
+	created["link_division_limit"] = 4
+	created["telomere"] = -1
 	_modes.append(created)
 	_load_mode(_modes.size() - 1, false)
 	_set_macro_status("mode")
@@ -739,6 +756,8 @@ func _load_mode(index: int, commit_current: bool = true) -> void:
 		_macro_draft["max_divisions"] = 3
 		_macro_draft["mode_max_divisions"] = int((_modes[_selected_mode] as Dictionary).get("max_divisions", 1))
 		_macro_draft["stiffness"] = float(_macro_draft.get("cell_stiffness", 0.5))
+		var draft_cap: int = int(draft.get("max_cells_per_organism")) if draft != null else -1
+		_macro_draft["max_cells_per_organism"] = clampi(draft_cap, -1, 64)
 		for legacy_key in ["child3", "child4", "child3_angle", "child4_angle", "split_mass"]:
 			if not _macro_draft.has(legacy_key):
 				_macro_draft[legacy_key] = default_macro_draft().get(legacy_key, 0)
@@ -774,6 +793,18 @@ func _refresh_macro_controls() -> void:
 			var slider: HSlider = control["slider"] as HSlider
 			slider.set_value_no_signal(float(value))
 			(control["value_label"] as Label).text = _format_macro_value(key, float(value), int(control.get("digits", 2)))
+	# v0.18.0：个体上限不在 MACRO_FIELD_KEYS（它是 Genome 顶层字段），单独刷新。
+	_refresh_scale_control()
+
+## v0.18.0：个体上限是 Genome 顶层字段，不属于模式槽，需单独刷新控件。
+func _refresh_scale_control() -> void:
+	var key: String = "max_cells_per_organism"
+	var control: Dictionary = _macro_controls.get(key, {})
+	if not control.has("slider"):
+		return
+	var value: float = float(_macro_draft.get(key, -1))
+	(control["slider"] as HSlider).set_value_no_signal(value)
+	(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 0)))
 
 func _format_macro_value(_key: String, value: float, digits: int) -> String:
 	return String.num(value, digits)
@@ -822,6 +853,9 @@ func _commit_current_mode() -> void:
 	draft.set("division_mass", float(normalized.get("division_mass", 1.0)))
 	draft.set("split_ratio", float(normalized.get("split_ratio", 0.5)))
 	draft.set("max_divisions", global_divisions)
+	# v0.18.0：个体规模是顶层字段，不属于任何模式槽；-1 表示无限，>=2 才作为上限。
+	var cell_cap: int = clampi(int(round(float(_macro_draft.get("max_cells_per_organism", -1)))), -1, 64)
+	draft.set("max_cells_per_organism", -1 if cell_cap < 2 else cell_cap)
 	var child_types: PackedByteArray = PackedByteArray()
 	var split_angles: PackedByteArray = PackedByteArray()
 	child_types.append(clampi(int(normalized.get("child1_type", 0)), 0, 255))
@@ -850,7 +884,8 @@ func _on_macro_option_changed(index: int, key: String) -> void:
 	_set_macro_status(key)
 
 func _on_macro_value_changed(value: float, key: String) -> void:
-	if key == "max_connections" or key == "min_connections" or key == "mode_max_divisions":
+	if key == "max_connections" or key == "min_connections" or key == "mode_max_divisions" \
+		or key == "max_cells_per_organism" or key == "link_division_limit" or key == "telomere":
 		_macro_draft[key] = int(round(value))
 	else:
 		_macro_draft[key] = value
@@ -872,6 +907,12 @@ func _set_macro_status(key: String) -> void:
 		return
 	if key == "transfer_rate":
 		_status_label.text = "连接传递率已改：%.2f · 相连细胞按能量差守恒转移，生态报告可看转出/转入。" % float(_macro_draft.get("transfer_rate", 0.0))
+		return
+	if key == "max_cells_per_organism":
+		_status_label.text = "个体最大细胞数已改：%d · -1 无限；全局仍受 8000 细胞容量保护。" % int(_macro_draft.get(key, -1))
+		return
+	if key == "link_division_limit" or key == "telomere":
+		_status_label.text = "谱系限制已改：%s=%d · 写入当前模式，影响 hash。" % [key, int(_macro_draft.get(key, -1))]
 		return
 	if key == "division_mass" or key == "split_ratio" or key == "max_divisions" or key.begins_with("child"):
 		_status_label.text = "基因模式参数已改：%s · 写入 Genome（Cell Lab Gene.b/c/i/j），影响 hash。" % key

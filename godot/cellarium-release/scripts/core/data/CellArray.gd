@@ -5,6 +5,10 @@ extends RefCounted
 const MAX_LINKS_PER_CELL: int = 20
 const NEURAL_WEIGHT_COUNT: int = 56
 const BEHAVIOR_OUTPUT_COUNT: int = 6
+## v0.18.0：全局容量保护；与 §8.1 的 8000 细胞目标一致，与个体上限无关。
+const DEFAULT_MAX_CELL_CAPACITY: int = 8000
+
+var max_cell_capacity: int = DEFAULT_MAX_CELL_CAPACITY
 
 var cell_pos_x: PackedFloat32Array = PackedFloat32Array()
 var cell_pos_y: PackedFloat32Array = PackedFloat32Array()
@@ -31,9 +35,13 @@ var cell_color_b: PackedFloat32Array = PackedFloat32Array()
 ## v0.17.0：逐细胞所属模式槽与该模式已分裂层数。默认 0，旧细胞/旧存档行为不变。
 var cell_mode: PackedByteArray = PackedByteArray()
 var cell_mode_depth: PackedByteArray = PackedByteArray()
+## v0.18.0：逐细胞剩余谱系分裂次数，-1 无限，旧细胞默认 -1。
+var cell_telomere: PackedInt32Array = PackedInt32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
+		return -1
+	if size() >= maxi(1, max_cell_capacity):
 		return -1
 	var index: int = size()
 	cell_pos_x.append(position.x)
@@ -58,6 +66,7 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 	cell_color_b.append(-1.0)
 	cell_mode.append(0)
 	cell_mode_depth.append(0)
+	cell_telomere.append(-1)
 	return index
 
 func size() -> int:
@@ -68,12 +77,16 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 		return -1
 	if int(cell_link_count[index]) >= MAX_LINKS_PER_CELL:
 		return -1
+	if size() >= maxi(1, max_cell_capacity):
+		return -1
 	var org_id: int = cell_org_id[index]
 	var child_energy: float = cell_energy[index] * 0.5
 	var child_position: Vector2 = get_position(index) + Vector2.RIGHT.rotated(angle) * separation
 	var child_type: int = int(cell_type[index])
 	cell_energy[index] -= child_energy
 	var child_index: int = append_cell(org_id, child_position, child_energy, child_type)
+	if child_index < 0:
+		return -1
 	var neural_start: int = index * NEURAL_WEIGHT_COUNT
 	for weight_index in range(NEURAL_WEIGHT_COUNT):
 		neural_weights[child_index * NEURAL_WEIGHT_COUNT + weight_index] = neural_weights[neural_start + weight_index]
@@ -90,6 +103,7 @@ func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	cell_color_b[child_index] = cell_color_b[index]
 	cell_mode[child_index] = cell_mode[index]
 	cell_mode_depth[child_index] = cell_mode_depth[index]
+	cell_telomere[child_index] = cell_telomere[index]
 	return child_index
 
 func get_position(index: int) -> Vector2:
@@ -140,6 +154,28 @@ func get_mode_depth(index: int) -> int:
 	if index < 0 or index >= cell_mode_depth.size():
 		return 0
 	return int(cell_mode_depth[index])
+
+## v0.18.0：端粒读写与递减。-1 为无限；有限值每次消耗 1，最低 0。
+func set_cell_telomere(index: int, value: int) -> bool:
+	if index < 0 or index >= size():
+		return false
+	cell_telomere[index] = clampi(value, -1, 80)
+	return true
+
+func get_telomere(index: int) -> int:
+	if index < 0 or index >= cell_telomere.size():
+		return -1
+	return int(cell_telomere[index])
+
+func decrement_telomere(index: int) -> int:
+	if index < 0 or index >= cell_telomere.size():
+		return -1
+	var remaining: int = int(cell_telomere[index])
+	if remaining < 0:
+		return -1
+	remaining = maxi(0, remaining - 1)
+	cell_telomere[index] = remaining
+	return remaining
 
 func set_position(index: int, position: Vector2) -> bool:
 	if index < 0 or index >= size():

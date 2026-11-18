@@ -202,6 +202,8 @@ func _initialize() -> void:
 		failures += 1
 	if not await _check_v0170_runtime_transfer_and_modes():
 		failures += 1
+	if not await _check_v0180_population_limits():
+		failures += 1
 	print("SmokeTest: SCRIPTS=", SCRIPT_MANIFEST.size(), " FAILURES=", failures)
 	quit(1 if failures > 0 else 0)
 
@@ -2930,6 +2932,8 @@ func _check_multicell_editor() -> bool:
 		push_error("SmokeTest: default division mass / max divisions wrong")
 		instance.queue_free(); return false
 	editor.call("_on_macro_value_changed", 2.5, "division_mass")
+	# v0.18.0：旧断言期望 4 细胞；显式把个体上限设回 4，无限增长另由新测试覆盖。
+	editor.call("_on_macro_value_changed", 4.0, "max_cells_per_organism")
 	if absf(float(draft_ref.get("division_mass")) - 2.5) > 0.001:
 		push_error("SmokeTest: division mass slider did not write draft")
 		instance.queue_free(); return false
@@ -3739,8 +3743,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 4:
-		push_error("SmokeTest: save schema must be version 4")
+	if int(snapshot.get("schema_version", -1)) != 5:
+		push_error("SmokeTest: save schema must be version 5")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -3753,7 +3757,7 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene fields lost during save roundtrip")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v4)")
+	print("SmokeTest: OK v0.15.0 gene-mode save roundtrip (schema v5)")
 	return true
 
 ## v0.14.1：make_glue 置位的 genome 分裂后自动连接亲子，未置位时保持旧行为。
@@ -3936,8 +3940,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 4 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v4 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != 5 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: schema v5 must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -3950,7 +3954,7 @@ func _check_v0160_runtime_phenotype() -> bool:
 		push_error("SmokeTest: legacy snapshot must default radius scale to 1.0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v4 fallback")
+	print("SmokeTest: OK v0.16.0 runtime phenotype / link limits / schema v5 fallback")
 	return true
 
 ## v0.17.0：模式列表逐模式编辑、两个子代模式、预览点击跳转，以及 hash 兼容边界。
@@ -4066,7 +4070,7 @@ func _check_v0170_mode_remove() -> bool:
 	print("SmokeTest: OK v0.17.1 mode removal")
 	return true
 
-## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v4 存档往返。
+## v0.17.0：连接传递真实发生且守恒；模式随 payload、分裂与 schema v5 存档往返。
 func _check_v0170_runtime_transfer_and_modes() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
@@ -4147,10 +4151,10 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		instance.queue_free(); return false
 
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 4 \
+	if int(snapshot.get("schema_version", -1)) != 5 \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
 		or (snapshot.get("genomes", []) as Array).is_empty():
-		push_error("SmokeTest: schema v4 must persist modes and cell_mode")
+		push_error("SmokeTest: schema v5 must persist modes and cell_mode")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.call("set_modes", [])
@@ -4177,5 +4181,273 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		push_error("SmokeTest: legacy snapshot must default cell_mode to 0")
 		instance.queue_free(); return false
 	instance.queue_free()
-	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v4")
+	print("SmokeTest: OK v0.17.0 connected transfer / per-mode division / schema v5")
+	return true
+
+## v0.18.0：构造「单模式光合带」基因组；cell_cap=-1 表示无限，link_limit=-1 不抑制。
+static func _v0180_mode_genome(script: Script, cell_cap: int, telomere: int, link_limit: int, glue: bool) -> RefCounted:
+	var genome: RefCounted = script.new() as RefCounted
+	genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	genome.set("flags", int(script.get_script_constant_map().get("FLAG_GENE_MODE", 2)))
+	genome.set("division_mass", 0.05)
+	genome.set("split_ratio", 0.5)
+	genome.set("max_divisions", 8)
+	genome.set("max_cells_per_organism", cell_cap)
+	genome.set("child_types", PackedByteArray([0, 0, 0, 0]))
+	genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+	var mode: Dictionary = script.call("normalized_mode", {
+		"name": "M1_Band", "cell_type": 0,
+		"child1_type": 0, "child2_type": 0,
+		"child1_mode": 0, "child2_mode": 0,
+		"child1_glue": glue, "child2_glue": glue,
+		"make_glue": glue,
+		"division_mass": 0.05, "max_divisions": 8,
+		"link_division_limit": link_limit, "telomere": telomere,
+	}, 0)
+	genome.call("set_modes", [mode])
+	return genome
+
+static func _v0180_feed_energy(cells: RefCounted, amount: float, org_id: int) -> void:
+	var energies: PackedFloat32Array = cells.get("cell_energy") as PackedFloat32Array
+	var alive: PackedByteArray = cells.get("cell_alive") as PackedByteArray
+	var org_ids: PackedInt32Array = cells.get("cell_org_id") as PackedInt32Array
+	for i in range(energies.size()):
+		if alive[i] != 0 and org_ids[i] == org_id:
+			energies[i] = amount
+	cells.set("cell_energy", energies)
+
+static func _v0180_prepare_manager(instance: Node) -> Dictionary:
+	var manager: Node = instance.get_node("Simulation/OrganismManager")
+	var env: Node = instance.get_node("Simulation/EnvironmentManager")
+	var tick_core: Node = instance.get_node("Simulation/TickCore")
+	tick_core.set("running", false)
+	manager.set("base_metabolic_cost", 0.0)
+	manager.set("movement_energy_cost", 0.0)
+	manager.set("heterotrophic_intake_rate", 0.0)
+	manager.set("photosynthetic_intake_rate", 0.0)
+	manager.set("chemotrophic_intake_rate", 0.0)
+	manager.set("autonomous_division_cooldown", 1)
+	return {"manager": manager, "env": env, "tick": tick_core, "cells": manager.get("cells")}
+
+## v0.18.0：移除 8 细胞硬上限；全局容量、连接抑制、端粒、schema v5 与编辑器同测。
+func _check_v0180_population_limits() -> bool:
+	var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var cell_array_script: Script = load("res://scripts/core/data/CellArray.gd") as Script
+	var scene: PackedScene = load("res://scenes/main.tscn") as PackedScene
+
+	# 1) 数据契约：缺省值、端粒离散档、合法性边界与 CellArray 全局容量。
+	var default_mode: Dictionary = genome_script.call("normalized_mode", {})
+	if int(default_mode.get("link_division_limit", 99)) != -1 or int(default_mode.get("telomere", 99)) != -1:
+		push_error("SmokeTest: v0.18.0 legacy mode defaults must keep old behavior")
+		return false
+	if int(genome_script.call("normalize_telomere", 7)) != 5 or int(genome_script.call("normalize_telomere", 81)) != 80:
+		push_error("SmokeTest: telomere must snap to Cell Lab discrete options")
+		return false
+	var invalid: RefCounted = genome_script.new() as RefCounted
+	invalid.set("max_cells_per_organism", 8001)
+	if bool(invalid.call("is_valid")):
+		push_error("SmokeTest: cell cap above global capacity must be invalid")
+		return false
+	var array: RefCounted = cell_array_script.new() as RefCounted
+	array.set("max_cell_capacity", 3)
+	for _i in range(3):
+		if int(array.call("append_cell", 0, Vector2.ZERO, 1.0, 0)) < 0:
+			push_error("SmokeTest: capacity probe could not fill 3 cells")
+			return false
+	if int(array.call("append_cell", 0, Vector2.ZERO, 1.0, 0)) != -1 \
+		or int(array.call("divide_cell", 0, 0.0, 1.0)) != -1:
+		push_error("SmokeTest: global cell capacity must reject append and divide")
+		return false
+
+	# 2) 无限个体：单模式光合带应突破旧的 8 细胞硬上限。
+	var band: RefCounted = _v0180_mode_genome(genome_script, -1, -1, -1, false)
+	var instance: Node = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	var context: Dictionary = _v0180_prepare_manager(instance)
+	var manager: Node = context["manager"]
+	var cells: RefCounted = context["cells"]
+	var base: int = int(cells.call("size"))
+	var org_id: int = int(manager.call("register_zygote", 80, 80, -1, band, Vector2(250, 250), 1.5, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.18.0 band zygote failed")
+		instance.queue_free(); return false
+	for _step in range(60):
+		_v0180_feed_energy(cells, 2.0, org_id)
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+		if int(cells.call("size")) >= base + 12:
+			break
+	if int(cells.call("size")) < base + 12:
+		push_error("SmokeTest: unlimited organism must exceed 8 cells (got %d)" % (int(cells.call("size")) - base))
+		instance.queue_free(); return false
+	instance.queue_free()
+
+	# 3) 显式个体上限仍生效：旧 payload/存档回退值也必须能挡住分裂。
+	var capped: RefCounted = _v0180_mode_genome(genome_script, 4, -1, -1, false)
+	instance = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	context = _v0180_prepare_manager(instance)
+	manager = context["manager"]
+	cells = context["cells"]
+	base = int(cells.call("size"))
+	org_id = int(manager.call("register_zygote", 81, 81, -1, capped, Vector2(250, 250), 1.5, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.18.0 capped zygote failed")
+		instance.queue_free(); return false
+	for _step in range(30):
+		_v0180_feed_energy(cells, 2.0, org_id)
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	if int(cells.call("size")) != base + 4:
+		push_error("SmokeTest: explicit max_cells_per_organism=4 must cap at 4 cells (got %d)" % int(cells.call("size")))
+		instance.queue_free(); return false
+	instance.queue_free()
+
+	# 4) 连接数抑制：有 1 条连接即停止分裂，个体上限保持无限。
+	var linked: RefCounted = _v0180_mode_genome(genome_script, -1, -1, 1, true)
+	instance = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	context = _v0180_prepare_manager(instance)
+	manager = context["manager"]
+	cells = context["cells"]
+	base = int(cells.call("size"))
+	org_id = int(manager.call("register_zygote", 82, 82, -1, linked, Vector2(250, 250), 1.5, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.18.0 link-limited zygote failed")
+		instance.queue_free(); return false
+	for _step in range(30):
+		_v0180_feed_energy(cells, 2.0, org_id)
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	if int(cells.call("size")) != base + 2 or (cells.get("link_cell_a") as PackedInt32Array).is_empty():
+		push_error("SmokeTest: link_division_limit=1 must stop after the first linked pair")
+		instance.queue_free(); return false
+	instance.queue_free()
+
+	# 5) 端粒：每次母子同减，归零死亡；schema v5 保存新字段并兼容旧快照。
+	var mortal: RefCounted = _v0180_mode_genome(genome_script, -1, 5, -1, false)
+	instance = scene.instantiate()
+	instance.set("create_demo_organism", false)
+	root.add_child(instance)
+	await process_frame
+	context = _v0180_prepare_manager(instance)
+	manager = context["manager"]
+	var env: Node = context["env"]
+	var tick_core: Node = context["tick"]
+	cells = context["cells"]
+	org_id = int(manager.call("register_zygote", 83, 83, -1, mortal, Vector2(250, 250), 1.5, 0))
+	if org_id < 0:
+		push_error("SmokeTest: v0.18.0 mortal zygote failed")
+		instance.queue_free(); return false
+	var telomeres: PackedInt32Array = cells.get("cell_telomere") as PackedInt32Array
+	if telomeres.is_empty() or int(telomeres[base]) != 5:
+		push_error("SmokeTest: initial cell must inherit mode telomere")
+		instance.queue_free(); return false
+	for _step in range(40):
+		_v0180_feed_energy(cells, 2.0, org_id)
+		manager.call("advance_physics_tick", 1.0 / 60.0)
+	var alive_flags: PackedByteArray = cells.get("cell_alive") as PackedByteArray
+	telomeres = cells.get("cell_telomere") as PackedInt32Array
+	var telomere_death: bool = false
+	for i in range(telomeres.size()):
+		if int(telomeres[i]) == 0 and int(alive_flags[i]) == 0:
+			telomere_death = true
+			break
+	if not telomere_death:
+		push_error("SmokeTest: exhausted telomere must kill the cell")
+		instance.queue_free(); return false
+
+	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
+	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
+	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
+	if int(snapshot.get("schema_version", -1)) != 5 \
+		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere"):
+		push_error("SmokeTest: schema v5 must persist telomere arrays")
+		instance.queue_free(); return false
+	var legacy: Dictionary = snapshot.duplicate(true)
+	(legacy.get("cells", {}) as Dictionary).erase("cell_telomere")
+	for record in legacy.get("genomes", []):
+		(record as Dictionary).erase("max_cells_per_organism")
+	if not bool(save_script.call("restore", legacy, manager, env, tick_core)):
+		push_error("SmokeTest: legacy snapshot restore failed for v0.18.0 fields")
+		instance.queue_free(); return false
+	var restored_telomeres: PackedInt32Array = cells.get("cell_telomere") as PackedInt32Array
+	if restored_telomeres.is_empty() or int(restored_telomeres[0]) != -1:
+		push_error("SmokeTest: legacy telomere must default to unlimited")
+		instance.queue_free(); return false
+	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
+	if stored == null or int(stored.get("max_cells_per_organism")) != int(stored.get("max_divisions")) + 1:
+		push_error("SmokeTest: legacy payload must fall back to max_divisions+1")
+		instance.queue_free(); return false
+
+	# CommandBus payload：新字段经 genome_gene 进入运行时；旧 payload 仍回退旧行为。
+	var command: Dictionary = {
+		"genome_bytes": codec_script.call("encode", mortal),
+		"genome_gene": {"modes": mortal.get("modes"), "max_divisions": 3, "max_cells_per_organism": 7},
+	}
+	var decoded: RefCounted = manager.call("_genome_from_command", command) as RefCounted
+	if decoded == null or int(decoded.get("max_cells_per_organism")) != 7:
+		push_error("SmokeTest: v0.18.0 command payload did not carry cell cap")
+		instance.queue_free(); return false
+	(command["genome_gene"] as Dictionary).erase("max_cells_per_organism")
+	decoded = manager.call("_genome_from_command", command) as RefCounted
+	if decoded == null or int(decoded.get("max_cells_per_organism")) != 4:
+		push_error("SmokeTest: legacy command payload must fall back to 4")
+		instance.queue_free(); return false
+	instance.queue_free()
+
+	# 6) 编辑器：顶层上限与逐模式限制可在同一页设置、切换模式不丢，hash 边界保持。
+	var dev_scene: PackedScene = load("res://scenes/ui/DevEditorPanel.tscn") as PackedScene
+	var dev: Node = dev_scene.instantiate()
+	root.add_child(dev)
+	await process_frame
+	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	if int(draft_ref.get("max_cells_per_organism")) != -1:
+		push_error("SmokeTest: editor default cell cap must be unlimited")
+		dev.queue_free(); return false
+	dev.call("_on_macro_value_changed", 12.0, "max_cells_per_organism")
+	dev.call("_on_macro_value_changed", 5.0, "telomere")
+	dev.call("_on_macro_value_changed", 3.0, "link_division_limit")
+	dev.call("select_mode", 1)
+	dev.call("select_mode", 0)
+	var edited_mode: Dictionary = (dev.call("get_modes") as Array)[0] as Dictionary
+	if int(draft_ref.get("max_cells_per_organism")) != 12 \
+		or int(edited_mode.get("telomere", -1)) != 5 \
+		or int(edited_mode.get("link_division_limit", -1)) != 3:
+		push_error("SmokeTest: editor v0.18.0 values must persist across mode switch")
+		dev.queue_free(); return false
+	var controls: Dictionary = dev.get("_macro_controls") as Dictionary
+	var cap_control: Dictionary = controls.get("max_cells_per_organism", {})
+	if cap_control.has("slider") and absf((cap_control["slider"] as HSlider).get_value() - 12.0) > 0.01:
+		push_error("SmokeTest: editor cell cap slider did not refresh")
+		dev.queue_free(); return false
+	dev.queue_free()
+
+	var gene_flag: int = int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+	var plain: RefCounted = genome_script.new() as RefCounted
+	var capped_hash: RefCounted = genome_script.new() as RefCounted
+	plain.set("flags", gene_flag)
+	capped_hash.set("flags", gene_flag)
+	capped_hash.set("max_cells_per_organism", 32)
+	if int(plain.call("hash")) != int(capped_hash.call("hash")):
+		push_error("SmokeTest: empty modes must keep v0.17 hash boundary")
+		return false
+	var modes_a: RefCounted = genome_script.new() as RefCounted
+	var modes_b: RefCounted = genome_script.new() as RefCounted
+	modes_a.set("flags", gene_flag)
+	modes_b.set("flags", gene_flag)
+	modes_a.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	modes_b.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
+	var hash_mode: Array = [genome_script.call("normalized_mode", {"name": "M1_Hash"}, 0)]
+	modes_a.call("set_modes", hash_mode)
+	modes_b.call("set_modes", hash_mode)
+	modes_b.set("max_cells_per_organism", 32)
+	if int(modes_a.call("hash")) == int(modes_b.call("hash")):
+		push_error("SmokeTest: cell cap must affect gene-mode hash when modes exist")
+		return false
+
+	print("SmokeTest: OK v0.18.0 unlimited organisms / global capacity / link limit / telomere / schema v5 / editor")
 	return true

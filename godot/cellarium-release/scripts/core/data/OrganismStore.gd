@@ -12,6 +12,8 @@ const DEATH_STARVATION: int = 1
 const DEATH_TOXICITY: int = 2
 const DEATH_PREDATION: int = 3
 const DEATH_INTERVENTION: int = 4
+## v0.18.0：端粒归零，对应 Cell Lab Gene.B[6] 的分裂次数耗尽。
+const DEATH_TELOMERE: int = 5
 
 var org_alive: PackedByteArray = PackedByteArray()
 var org_genome_id: PackedInt32Array = PackedInt32Array()

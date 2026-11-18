@@ -4,6 +4,34 @@
 
 ---
 
+## 0.18.0 — 2026-11-18
+
+**类型**：玩法机制版本化追加（取消个体 8 细胞硬上限 / 全局容量保护 / 连接数抑制分裂 / 端粒；GNP1 二进制、tick 顺序、单帧 12 tick 上限不动）
+**触发**：用户设计「单模式光合细胞持续分裂成粘连长带」时只长到 4 个细胞；查证 Cell Lab 静态证据后确认 Cell Lab 没有显式 per-organism max cell count，只有全局 `Cell[]` 池、每细胞连接上限、`P <= Gene.u[9]` 与端粒 `T ∈ {-1,5,10,20,40,80}`。用户授权不再把 8 细胞当硬基线，并要求把规模限制做进细胞编辑。
+
+### 证据边界与规格先行
+
+- 已解析证据只支持「Cell Lab 无显式个体最大细胞数字段，个体是 `Link` 连通分量」；`levels.xml` 的 `user-cells / place-cells / level-cells` 是关卡预算，不是生物学上限。
+- 能量尺度上限查证结论本版不改：`Cell.w <= 0.36`、`< 0.072` 死亡、`LIPOCYTE.S <= 1.8`、连接流 `±0.1`。
+- 规格先行：`analysis/CellLab_细胞物理与外观_代码级分析.md` §28、v1.1 合并稿新增版本化说明、`docs/Godot项目技术设计文档.md` §0.3 与 §11 风险表已先修订再落地代码。
+
+### 实现
+
+- `Genome.gd` 新增 `max_cells_per_organism = -1`（无限）与逐模式 `link_division_limit = -1 / telomere = -1`；端粒只允许 `-1/5/10/20/40/80`，非法值取最近档；校验、`distance`、`duplicate_genome` 同步；仅 `modes` 非空时混入 hash，空 modes / flags 清零保持旧 hash。
+- `CellArray.gd` 新增 `max_cell_capacity = 8000` 全局容量，拒绝超额 `append_cell` / `divide_cell`；新增 `cell_telomere` 与递减 API。
+- `OrganismManager`：个体上限改读 `max_cells_per_organism`，旧 payload/缺字段回退 `max_divisions+1`；逐模式连接数达到阈值即抑制分裂；端粒每次分裂母子同减，归零按 `DEATH_TELOMERE` 死亡；`autonomous_max_cells_per_organism` 默认改为 -1。
+- `SaveManager` 升 `schema_version=5` 保存 `cell_telomere / max_cells_per_organism`；schema 1–4 旧快照端粒填 -1、个体上限回退 `max_divisions+1`。
+- `DevEditorPanel` 新增 “SCALE · 个体规模 / 谱系限制” 三个控件，均可在细胞编辑页设置；`GameHUD` 经 `CommandBus genome_gene` payload 传新字段，GNP1 不变。
+- `Main.gd` 默认演示体显式设置 `max_cells_per_organism = 4`，保持 v0.17 的 4 细胞 / 3 连接快照。
+- `StatisticsSystem` 死因表新增 `5 = 端粒耗尽`。
+
+### 验证 / 同步
+
+- 新增 SmokeTest：无限光合带突破 8 细胞、显式个体上限、全局容量拒绝、连接数抑制、端粒递减死亡、schema v5 与旧档回退、指令 payload 新旧路径、编辑器控件写入与 hash 边界。
+- 发布工程与 D 盘运行工程分别 `SCRIPTS=51 FAILURES=0 EXITCODE=0`；D 盘同步 10 个脚本，保留 autoload / `.uid` / 场景 `unique_id`。
+
+---
+
 ## 0.17.1 — 2026-11-18
 
 **类型**：崩溃修复（模式槽删除）
