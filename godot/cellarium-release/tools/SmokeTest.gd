@@ -64,6 +64,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/MetabolismBreakdownProbe.gd",
 	"res://tools/MetabolismHotspotsParityProbe.gd",
 	"res://tools/PhysicsStepParityProbe.gd",
+	"res://tools/BehaviorSignalParityProbe.gd",
+	"res://tools/RenderCacheParityProbe.gd",
 	"res://tools/DenseClusterProbe.gd",
 ]
 

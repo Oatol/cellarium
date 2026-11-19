@@ -18,17 +18,19 @@ const CELL_SCENE_RENDERER: RefCounted = preload("res://scripts/rendering/CellSce
 var organism_manager: Node = null
 var tick_core: Node = null
 var command_bus: Node = null
-var _polygons: Array[PackedVector2Array] = []
-var _outlines: Array[PackedVector2Array] = []
-var _centers: Array[Vector2] = []
-var _radii: Array[float] = []
-var _body_colors: Array[Color] = []
-var _outline_colors: Array[Color] = []
-var _nucleus_colors: Array[Color] = []
+var _polygons: Array = []
+var _outlines: Array = []
+var _centers: PackedVector2Array = PackedVector2Array()
+var _radii: PackedFloat32Array = PackedFloat32Array()
+var _body_colors: PackedColorArray = PackedColorArray()
+var _outline_colors: PackedColorArray = PackedColorArray()
+var _nucleus_colors: PackedColorArray = PackedColorArray()
 var _links: PackedVector2Array = PackedVector2Array()
 var _dirty: bool = true
 var _active_count: int = 0
 var _last_chord_count: int = 0
+var _native_render_cache: RefCounted = null
+var _native_render_cache_checked: bool = false
 
 func _ready() -> void:
 	organism_manager = get_node_or_null(organism_manager_path)
@@ -80,6 +82,60 @@ func _draw() -> void:
 		draw_circle(_centers[cell_index], maxf(1.0, _radii[cell_index] * 0.15), _nucleus_colors[cell_index])
 
 func _rebuild_cache() -> void:
+	var native_cache: RefCounted = _get_native_render_cache()
+	if native_cache != null:
+		if _rebuild_cache_native(native_cache):
+			return
+	_rebuild_cache_gdscript()
+
+func _get_native_render_cache() -> RefCounted:
+	if not _native_render_cache_checked:
+		_native_render_cache_checked = true
+		if ClassDB.class_exists("CellRenderCache"):
+			_native_render_cache = ClassDB.instantiate("CellRenderCache") as RefCounted
+	return _native_render_cache
+
+func _rebuild_cache_native(native_cache: RefCounted) -> bool:
+	if organism_manager == null:
+		return false
+	var cells: RefCounted = organism_manager.get("cells") as RefCounted
+	if cells == null:
+		return false
+	var radius: float = SHAPE.REST_RADIUS
+	var radius_value: Variant = organism_manager.get("cell_radius")
+	if radius_value != null:
+		radius = maxf(1.0, float(radius_value))
+	var dish_center: Vector2 = Vector2(250.0, 250.0)
+	var dish_radius: float = 240.0
+	var center_value: Variant = organism_manager.get("dish_center")
+	if center_value != null:
+		dish_center = center_value
+	var dish_radius_value: Variant = organism_manager.get("dish_radius")
+	if dish_radius_value != null:
+		dish_radius = maxf(1.0, float(dish_radius_value))
+	var cell_size: float = float(CELL_PHYSICS.get_script_constant_map().get("SPATIAL_HASH_CELL_SIZE", 64.0))
+	var result: Dictionary = native_cache.call("rebuild",
+		cells.get("cell_alive"), cells.get("cell_pos_x"), cells.get("cell_pos_y"),
+		cells.get("cell_radius_scale"), cells.get("cell_type"), cells.get("cell_org_id"),
+		cells.get("cell_color_r"), cells.get("cell_color_g"), cells.get("cell_color_b"),
+		cells.get("cell_energy"), cells.get("link_cell_a"), cells.get("link_cell_b"),
+		radius, dish_center.x, dish_center.y, dish_radius, cell_size,
+		clampi(outline_segments, 12, 48), max_cells) as Dictionary
+	if result.is_empty() or not result.has("polygons"):
+		return false
+	_polygons = result["polygons"]
+	_outlines = result["outlines"]
+	_centers = result["centers"]
+	_radii = result["radii"]
+	_body_colors = result["body_colors"]
+	_outline_colors = result["outline_colors"]
+	_nucleus_colors = result["nucleus_colors"]
+	_links = result["links"]
+	_active_count = int(result.get("active_count", 0))
+	_last_chord_count = int(result.get("chord_count", 0))
+	return true
+
+func _rebuild_cache_gdscript() -> void:
 	_polygons.clear()
 	_outlines.clear()
 	_centers.clear()

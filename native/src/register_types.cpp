@@ -9,6 +9,7 @@
 #include "cell_neural.h"
 #include "cell_spatial.h"
 #include "cell_metabolism.h"
+#include "cell_render_cache.h"
 
 using namespace godot;
 
@@ -21,6 +22,7 @@ void initialize_gdextension_types(ModuleInitializationLevel p_level)
         GDREGISTER_CLASS(CellNeural);
         GDREGISTER_CLASS(CellSpatial);
         GDREGISTER_CLASS(CellMetabolism);
+        GDREGISTER_CLASS(CellRenderCache);
 }
 
 void uninitialize_gdextension_types(ModuleInitializationLevel p_level) {

@@ -1348,3 +1348,44 @@ GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 1
 | 3000 | 240.9 → **27.9 ms** | 64.7 → 9.7 ms | false |
 
 3000 档从 v0.33 的 43.9ms 再降到 27.9ms（含机器负载差异，按本轮 A/B 看为 8.64×）；**仍未达到 8ms，不表述达标**。
+
+---
+
+## 40. v0.35.0：行为输出/信号批处理下沉与拖拽视野卡顿根因
+
+### 40.1 用户问题与调查路径
+
+用户要求优先下沉 `CellBehavior.apply_outputs_flat()` 与 signal 分泌批处理，并追问「拖拽视野卡卡的，细胞多起来更明显」的原因。本轮先按用户既有纪律做程序化定位，而不是凭直觉改代码。
+
+### 40.2 拖拽卡顿根因（新增 `tools/ViewDragCostProbe.gd`）
+
+独立量化四条路径，1024 细胞（512 个体 M1 自分裂后的规模）：
+
+| 路径 | GDScript | native | 说明 |
+| --- | --- | --- | --- |
+| `CameraController.pan_screen()` | 0.99 µs/次 | 0.98 µs/次 | `view_changed` 无监听者；**相机平移本身不是瓶颈** |
+| `CellPolygonBatchRenderer._rebuild_cache()` | 43.4 ms/次 | 1.03 ms/次 | 每 tick 后 `_process()` 触发；纯 GDScript 视图计算，与 native 开关无关 |
+| `advance_physics_tick()` | 148 ms/tick | 25.4 ms/tick | 主线程 tick |
+| 组合帧（tick+rebuild+pan） | 250 ms | 19.9 ms | — |
+
+结论：拖拽卡顿是「主线程 tick 占用 + 每 tick 后 43ms 批渲染缓存重建」叠加。细胞越多，两者都随规模增长，用户输入/相机变换被推迟，主观即「拖拽卡、细胞多更明显」。`PostprocessLayer` 是不随相机变换的 UI 层固定全屏成本，非拖拽特有主因；`view_changed` 无订阅者。
+
+### 40.3 `apply_outputs_flat()` 完整下沉被逐位探针否决（不采纳）
+
+- 初版 C++ `apply_outputs_flat()` 复制 outputs + 推进位移，`BehaviorSignalParityProbe` 出现 46 项 1 ULP 差异：`cpp=-17.015920639 ref=-17.015922546`。
+- 改用 `std::cos(double)` 仍大量差异；改用 `Math::cos(float)` / `Vector2.rotated` 等价式后剩 1 项：`cppmx=-1.20989167690277100`，对照 `rotx=-0.69186300039291382` / `cosd=-0.69186310097072301` / `cosf=-0.69186311960220337`。
+- 根因：Godot 引擎内置 `Vector2.rotated()` 的三角结果与 godot-cpp 编译出的 `std::cos` / `Math::cos(float)` 在极少数角度不逐位一致。冻结 state hash 边界下**不整体下沉位移**。
+- 采纳的替代方案：`CellNeural.copy_outputs_to_intents()` 只批量写回 6 个 outputs 到 `behavior_intents`，位移继续由 GDScript `apply_cached_intents()` 执行；4808 项对照全等。
+
+### 40.4 采纳的实现
+
+- `CellNeural.collect_signal_sources()`：批量筛出非零分泌源，返回升序索引 + double amount；环境写入副作用留 GDScript。
+- `CellRenderCache.rebuild()`：批渲染缓存整体下沉 C++。复现空间哈希、圆-圆共享弦、`clip_keep_origin` 半平面裁剪、单位圆与逐细胞配色；视图数据不进 state hash，float32 可接受。`CellPolygonBatchRenderer` 优先 native，缺失回退 GDScript，并缓存实例避免每帧 `ClassDB.instantiate()`。
+- 冻结边界未动：GNP1、tick 阶段顺序、1/60 步长、单帧 12 tick 上限、CommandBus、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 40.5 验证与实测
+
+- 逐位/容差闸门：`BehaviorSignalParityProbe` 4808 项、`RenderCacheParityProbe` 10353 项、`MetabolismHotspotsParityProbe` 1905 项、`PhysicsStepParityProbe` 2000 项，全部 `failures=0`。
+- `NativeParityProbe` legacy 240 tick 检查点 1356695503；M1 700 tick tick 2/302/602 细胞 8→16→32→64，GD/CPP hash 逐位一致；双工程 `SmokeTest: SCRIPTS=64 FAILURES=0`。
+- M1 场景（1024 细胞 40 tick）native 全 tick 16.3ms：behavior 5.57 / physics 3.81 / metabolism 5.30 / signal 0.64 ms；固定 3000 细胞 26.3ms（`budget_met=false`）；批渲染缓存重建 43.4→1.03ms。**≤8ms/tick 仍未达标，不表述达标。**
+- v0.35.0 入库 DLL SHA-256：`5F22B56BE53A72FF673FD7A0449283A7A508CDF0D821FD364E1D072ACEDD2082`。

@@ -359,7 +359,19 @@ func advance_physics_tick(dt: float) -> void:
 				inputs_flat, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
 		else:
 			CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
-		CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
+		var applied_outputs: bool = false
+		var apply_native: RefCounted = _get_native_neural()
+		if apply_native != null and apply_native.has_method("copy_outputs_to_intents"):
+			# v0.35.0：批量写回 6 个输出；Vector2.rotated 的位移仍由 GDScript 执行，
+			# 因为引擎内置三角与 godot-cpp std::cos 有 1 ULP 差异，会破坏 state hash。
+			var copied_intents: PackedFloat32Array = apply_native.call("copy_outputs_to_intents",
+				cells.get("cell_alive"), cells.get("behavior_intents"), _behavior_outputs_flat) as PackedFloat32Array
+			if copied_intents.size() == cell_count * 6:
+				cells.set("behavior_intents", copied_intents)
+				CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
+				applied_outputs = true
+		if not applied_outputs:
+			CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
 	else:
 		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
 	perf_probe.call("end", "behavior")
@@ -972,6 +984,18 @@ func _apply_signal_secretion(dt: float) -> void:
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var native_neural: RefCounted = _get_native_neural()
+	if native_neural != null and native_neural.has_method("collect_signal_sources"):
+		# v0.35.0：只筛出非零分泌源，amount 用 double 返回；环境写入仍在原 cell index 顺序。
+		var sources: Dictionary = native_neural.call("collect_signal_sources",
+			alive, cells.get("behavior_intents"), pos_x, pos_y, dt)
+		var indices: PackedInt32Array = sources["indices"]
+		var amounts: PackedFloat64Array = sources["amounts"]
+		for source_index in range(indices.size()):
+			var cell_index: int = int(indices[source_index])
+			environment_manager.call("add_signal_source",
+				Vector2(pos_x[cell_index], pos_y[cell_index]), float(amounts[source_index]))
+		return
 	for cell_index in range(alive.size()):
 		if alive[cell_index] == 0:
 			continue

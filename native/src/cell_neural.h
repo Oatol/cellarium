@@ -1,8 +1,11 @@
 #pragma once
 
 #include "godot_cpp/classes/ref_counted.hpp"
+#include "godot_cpp/variant/dictionary.hpp"
 #include "godot_cpp/variant/packed_float32_array.hpp"
+#include "godot_cpp/variant/packed_float64_array.hpp"
 #include "godot_cpp/variant/packed_byte_array.hpp"
+#include "godot_cpp/variant/packed_int32_array.hpp"
 
 using namespace godot;
 
@@ -34,4 +37,18 @@ public:
 	PackedFloat32Array evaluate_batch(const PackedFloat32Array &inputs_flat,
 			const PackedFloat32Array &weights, const PackedByteArray &alive,
 			int first, int last);
+
+	// v0.35.0: pure output-buffer copy used before CellBehavior.apply_cached_intents.
+	// The actual movement stays in GDScript on purpose: Godot's Vector2.rotated
+	// uses engine-internal float math that differs by 1 ULP from godot-cpp's
+	// std::cos in a small number of angles, so moving it would drift state hash.
+	PackedFloat32Array copy_outputs_to_intents(const PackedByteArray &alive,
+			const PackedFloat32Array &intents, const PackedFloat32Array &outputs);
+
+	// v0.35.0: pure candidate scan for OrganismManager._apply_signal_secretion.
+	// Returns ascending cell indices and double secretion amounts; environment
+	// add_signal_source side effects remain in GDScript.
+	Dictionary collect_signal_sources(const PackedByteArray &alive,
+			const PackedFloat32Array &intents, const PackedFloat32Array &pos_x,
+			const PackedFloat32Array &pos_y, double dt);
 };

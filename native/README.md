@@ -30,7 +30,7 @@
 
 - Godot `4.7.2.stable.official.ed1daf0bf`；godot-cpp 官方无 4.7 tag，使用 master commit `24b9df7a88d40bcaf1f157703d4220185cb71fbf`。
 - `extension_api.json` 由 `godot --headless --dump-extension-api` 导出，**不入库**（6.9 MB 引擎产物），v0.32.0 时点 SHA-256：`d0e4c08c03b165156dabe6bfb6a906baf0069189f62035341230a246c86d6986`。重建时重新导出，引擎版本不符会导致绑定错位。
-- v0.34.0 入库 DLL SHA-256：`86449DB2A3A65E9AC73F7B8BA08D7D83FC9434ECBF2C9ACCBC3DD8953240A9BF`（新增 transfer-rate / radius / lifecycle 候选筛选 / Verlet+link 约束下沉）。v0.33.0 为 `aba57d3102a93236f7457a068ab7e86c6e80e97b51bc49ffbaa8a5b641f02e8e`。每次发布新 DLL 时更新此值，便于回溯。
+- v0.35.0 入库 DLL SHA-256：`5F22B56BE53A72FF673FD7A0449283A7A508CDF0D821FD364E1D072ACEDD2082`（新增 `CellRenderCache.rebuild()` 批渲染缓存原生化，`CellNeural.copy_outputs_to_intents()` / `collect_signal_sources()`；视图数据不进 state hash）。v0.34.0 为 `86449DB2A3A65E9AC73F7B8BA08D7D83FC9434ECBF2C9ACCBC3DD8953240A9BF`（transfer-rate / radius / lifecycle / Verlet+link 下沉），v0.33.0 为 `aba57d3102a93236f7457a068ab7e86c6e80e97b51bc49ffbaa8a5b641f02e8e`。每次发布新 DLL 时更新此值，便于回溯。
 - 构建命令（在含 `godot-cpp/` 的构建工作区根目录）：
 
 ```powershell

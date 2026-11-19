@@ -4,6 +4,44 @@
 
 ---
 
+## 0.35.0 — 2026-11-20
+
+**类型**：A 路线继续下沉（行为输出批量复制 + 信号源批处理 + 批渲染缓存原生化）+ 拖拽视野卡顿根因定位。**M1 场景 native 全 tick 15.4ms（behavior 5.57 / physics 3.81 / metabolism 5.30 / signal 0.64）；批渲染缓存重建 43.4→1.03ms（约 42×）。≤8ms/tick 仍未达标，如实记录。**
+
+### 拖拽视野卡顿根因（程序化探针定位）
+
+- 新增 `tools/ViewDragCostProbe.gd`：独立量化 pan、批渲染缓存重建、tick、组合帧四条路径。
+- 结论：`CameraController.pan_screen()` 每次约 **1 微秒**，且 `view_changed` 无监听者，**相机平移本身不是瓶颈**。真正随细胞数放大的是每 tick 后 `CellPolygonBatchRenderer._rebuild_cache()`：1024 细胞时每次 **43.4ms**，与 native 开关无关（纯 GDScript 视图计算）。它与主线程 tick 叠加，直接造成拖拽掉帧、细胞多时更明显。`view_changed` 无监听、`PostprocessLayer` 为不随相机变换的 UI 层固定成本，均非拖拽特有主因。
+- 修复：把 `_rebuild_cache()` 整体下沉 C++，重建耗时 43.4→1.03ms；GDScript 保留回退。
+
+### 实现
+
+- 新增 C++ `CellRenderCache.rebuild()`（纯视图数据，不进 state hash，float32 精度即可）：复现空间哈希、共享弦求交、Sutherland-Hodgman 半平面裁剪、单位圆与逐细胞配色；`CellPolygonBatchRenderer` 优先走 native，缺失/未注册回退原 GDScript。缓存实例避免每帧 `ClassDB.instantiate()`。
+- 新增 C++ `CellNeural.copy_outputs_to_intents()`：**只批量写回 6 个行为输出**，位移继续由 GDScript `apply_cached_intents()` 执行。完整下沉 `apply_outputs_flat()` 被逐位探针否决——`Vector2.rotated()` 的引擎内三角与 godot-cpp `std::cos` 在极少数角度差 1 ULP，会破坏 state hash。冻结边界下不悄悄改 hash。
+- 新增 C++ `CellNeural.collect_signal_sources()`：批量筛出非零信号分泌源，返回升序 cell index 与 double amount；环境 `add_signal_source` 副作用仍在 GDScript 按原顺序执行。
+- 新增 `tools/BehaviorSignalParityProbe.gd`（4808 项）、`tools/RenderCacheParityProbe.gd`（10353 项）、`tools/ViewDragCostProbe.gd`，并登记 manifest（脚本 62→64）。
+- 冻结边界全部不动：GNP1、tick 阶段顺序、1/60 步长、单帧 12 tick 上限、CommandBus、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 验证（程序化无头，双工程）
+
+- `BehaviorSignalParityProbe` 4808 项、`RenderCacheParityProbe` 10353 项、`MetabolismHotspotsParityProbe` 1905 项、`PhysicsStepParityProbe` 2000 项逐位/容差对照全部 `failures=0`。
+- `NativeParityProbe` legacy 240 tick 检查点仍为 1356695503；M1 700 tick tick 2/302/602 细胞 8→16→32→64，GD/CPP hash 逐位一致，`failures=0`。
+- 双工程 `SmokeTest: SCRIPTS=64 FAILURES=0`。
+
+### 实测与诚实结论
+
+| 口径（512 个体→1024 细胞，40 tick） | GD | native |
+| --- | --- | --- |
+| 全 tick | 141.5 ms | **16.3 ms** |
+| stage behavior | 21.0 ms | 5.57 ms |
+| stage physics | 39.3 ms | 3.81 ms |
+| stage metabolism | 78.6 ms | 5.30 ms |
+| stage signal | 1.56 ms | 0.64 ms |
+
+拖拽路径 A/B（1024 细胞）：`pan_screen` GD 0.99µs / native 0.98µs；`rebuild_cache` GD 43.4ms → **native 1.03ms**；组合帧 250ms → 19.9ms。固定细胞数 `BenchTest`：300 档 2.7ms、1000 档 9.0ms、3000 档 **26.3ms**（`budget_met=false`）。剩余大头为 behavior 约 5.5ms（位移循环受 Vector2 逐位约束未下沉）、physics 约 3.8ms、metabolism 约 5.3ms、场 tick 1.3ms；**均未达 ≤8ms/tick，不表述达标**。DLL SHA-256：`5F22B56BE53A72FF673FD7A0449283A7A508CDF0D821FD364E1D072ACEDD2082`。
+
+---
+
 ## 0.34.0 — 2026-11-20
 
 **类型**：A 路线继续下沉（M1 自分裂场景诊断 + 代谢剩余热点 + Verlet/连接约束）。**1024 细胞同会话 A/B 全 tick 126.1→15.8ms（后续复跑 143.7→18.7ms），8ms 目标仍未达标**，如实记录。
