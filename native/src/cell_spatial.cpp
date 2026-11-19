@@ -207,6 +207,50 @@ PackedFloat32Array CellSpatial::collect_inputs_batch(const PackedFloat32Array &e
 	return inputs;
 }
 
+PackedFloat32Array CellSpatial::collect_inputs_grid(const PackedFloat32Array &pos_x,
+		const PackedFloat32Array &pos_y, const PackedFloat32Array &energies,
+		const PackedByteArray &alive, const PackedByteArray &types,
+		const PackedFloat32Array &fields_flat, const PackedInt32Array &sample_indices,
+		double cell_size, double energy_max) {
+	const int count = alive.size();
+	PackedFloat32Array inputs;
+	inputs.resize(count * 8);
+	const bool use_flat = fields_flat.size() > 0 && sample_indices.size() > 0;
+	const double emax = std::max(energy_max, 0.000001);
+	const GridBuckets grid = GridBuckets::build(pos_x, pos_y, alive, count, cell_size);
+	for (int cell_index = 0; cell_index < count; ++cell_index) {
+		const int out = cell_index * 8;
+		for (int c = 0; c < 8; ++c) inputs.set(out + c, 0.0f);
+		if (alive[cell_index] == 0) continue;
+		int sample_index = -1;
+		if (use_flat && cell_index < sample_indices.size()) {
+			sample_index = static_cast<int>(sample_indices[cell_index]);
+		}
+		if (use_flat && sample_index >= 0) {
+			const int flat_offset = sample_index * 5;
+			for (int channel = 0; channel < 5; ++channel) {
+				if (flat_offset + channel < fields_flat.size()) {
+					inputs.set(out + channel,
+							static_cast<float>(clampd(static_cast<double>(fields_flat[flat_offset + channel]), -1.0, 1.0)));
+				}
+			}
+		}
+		int same_count = 0;
+		int other_count = 0;
+		const int64_t cx = cell_coord(pos_x[cell_index], cell_size);
+		const int64_t cy = cell_coord(pos_y[cell_index], cell_size);
+		const uint8_t self_type = types[cell_index];
+		grid.for_each_neighbor(cx, cy, [&](int32_t neighbor) {
+			if (neighbor == cell_index || neighbor < 0 || neighbor >= count || alive[neighbor] == 0) return;
+			if (types[neighbor] == self_type) ++same_count; else ++other_count;
+		});
+		inputs.set(out + 5, static_cast<float>(std::min(static_cast<double>(same_count) / 8.0, 1.0)));
+		inputs.set(out + 6, static_cast<float>(std::min(static_cast<double>(other_count) / 8.0, 1.0)));
+		inputs.set(out + 7, static_cast<float>(clampd(static_cast<double>(energies[cell_index]) / emax, 0.0, 1.0)));
+	}
+	return inputs;
+}
+
 Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 		const PackedFloat32Array &pos_y_in, const PackedByteArray &alive,
 		const PackedFloat32Array &radius_scales,
@@ -352,6 +396,8 @@ void CellSpatial::_bind_methods() {
 			&CellSpatial::build_neighbor_csr);
 	ClassDB::bind_method(D_METHOD("collect_inputs_batch", "energies", "alive", "types", "fields_flat", "sample_indices", "neighbor_offsets", "neighbor_values", "energy_max"),
 			&CellSpatial::collect_inputs_batch);
+	ClassDB::bind_method(D_METHOD("collect_inputs_grid", "pos_x", "pos_y", "energies", "alive", "types", "fields_flat", "sample_indices", "cell_size", "energy_max"),
+			&CellSpatial::collect_inputs_grid);
 	ClassDB::bind_method(D_METHOD("resolve_collisions", "pos_x", "pos_y", "alive", "radius_scales", "stiffnesses", "cell_radius", "cell_size", "iterations"),
 			&CellSpatial::resolve_collisions);
 	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "damping", "constraint_iterations"),

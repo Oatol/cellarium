@@ -28,6 +28,16 @@ public:
 			const PackedInt32Array &neighbor_offsets, const PackedInt32Array &neighbor_values,
 			double energy_max);
 
+	// v0.36.0: fused path — builds the grid once and counts same/other neighbors inline,
+	// avoiding the per-tick CSR materialization that dominated behavior. Produces the
+	// exact same 8-channel inputs as collect_inputs_batch; bit-identical by construction
+	// since only integer neighbor counts are involved and no sort is required.
+	PackedFloat32Array collect_inputs_grid(const PackedFloat32Array &pos_x,
+			const PackedFloat32Array &pos_y, const PackedFloat32Array &energies,
+			const PackedByteArray &alive, const PackedByteArray &types,
+			const PackedFloat32Array &fields_flat, const PackedInt32Array &sample_indices,
+			double cell_size, double energy_max);
+
 	// alive added so dead cells are excluded exactly as in GDScript build_collision_pairs_flat.
 	Dictionary resolve_collisions(const PackedFloat32Array &pos_x,
 			const PackedFloat32Array &pos_y, const PackedByteArray &alive,

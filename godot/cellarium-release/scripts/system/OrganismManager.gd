@@ -339,26 +339,45 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("begin", "behavior")
 	if update_neural:
 		var cell_count: int = int(cells.call("size"))
-		var environment: Dictionary = _build_behavior_environment()
 		var needed: int = cell_count * 6
 		if _behavior_outputs_flat.size() != needed:
 			_behavior_outputs_flat.resize(needed)
 		var native_neural: RefCounted = _get_native_neural()
 		var native_spatial: RefCounted = _get_native_spatial()
-		if native_neural != null and native_spatial != null:
-			# v0.32.0：C++ 批量输入收集 + 神经推理。逐位等价由 spatial_parity /
-			# neural_parity 微探针与 NativeParityProbe 的 240 tick state hash 共同保证。
-			var inputs_flat: PackedFloat32Array = native_spatial.call("collect_inputs_batch",
-				cells.get("cell_energy"), cells.get("cell_alive"), cells.get("cell_type"),
-				environment.get("fields_flat", PackedFloat32Array()),
-				environment.get("field_sample_indices", PackedInt32Array()),
-				environment.get("neighbor_offsets", PackedInt32Array()),
-				environment.get("neighbor_values", PackedInt32Array()),
-				float(environment.get("energy_max", 1.0)))
+		var used_grid_path: bool = false
+		# v0.36.0：融合路径——C++ 内建一次网格并直接统计邻居，省掉每 tick 8ms 级 CSR 物化。
+		# 输出 8 通道与旧 collect_inputs_batch 逐位一致（整数计数，无浮点累加），由
+		# CollectInputsGridParityProbe 与 NativeParityProbe state hash 双重保证。
+		if native_neural != null and native_spatial != null \
+			and native_spatial.has_method("collect_inputs_grid"):
+			var fields_flat: PackedFloat32Array = PackedFloat32Array()
+			var sample_indices: PackedInt32Array = PackedInt32Array()
+			if environment_manager != null:
+				fields_flat = environment_manager.call("get_field_samples_flat") as PackedFloat32Array
+				sample_indices = environment_manager.call("get_field_sample_index_array", cell_count) as PackedInt32Array
+			var inputs_grid: PackedFloat32Array = native_spatial.call("collect_inputs_grid",
+				cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_energy"),
+				cells.get("cell_alive"), cells.get("cell_type"),
+				fields_flat, sample_indices, 64.0, 1.0) as PackedFloat32Array
 			_behavior_outputs_flat = native_neural.call("evaluate_batch",
-				inputs_flat, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
-		else:
-			CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
+				inputs_grid, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
+			used_grid_path = true
+		if not used_grid_path:
+			var environment: Dictionary = _build_behavior_environment()
+			if native_neural != null and native_spatial != null:
+				# v0.32.0：C++ 批量输入收集 + 神经推理。逐位等价由 spatial_parity /
+				# neural_parity 微探针与 NativeParityProbe 的 240 tick state hash 共同保证。
+				var inputs_flat: PackedFloat32Array = native_spatial.call("collect_inputs_batch",
+					cells.get("cell_energy"), cells.get("cell_alive"), cells.get("cell_type"),
+					environment.get("fields_flat", PackedFloat32Array()),
+					environment.get("field_sample_indices", PackedInt32Array()),
+					environment.get("neighbor_offsets", PackedInt32Array()),
+					environment.get("neighbor_values", PackedInt32Array()),
+					float(environment.get("energy_max", 1.0)))
+				_behavior_outputs_flat = native_neural.call("evaluate_batch",
+					inputs_flat, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
+			else:
+				CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
 		var applied_outputs: bool = false
 		var apply_native: RefCounted = _get_native_neural()
 		if apply_native != null and apply_native.has_method("copy_outputs_to_intents"):

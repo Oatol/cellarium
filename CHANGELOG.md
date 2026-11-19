@@ -4,6 +4,36 @@
 
 ---
 
+## 0.36.0 — 2026-11-20
+
+**类型**：A 路线继续下沉（邻域输入收集融合，消除每 tick CSR 物化）。**behavior 从 5.57→1.27ms（4.4×），M1 场景全 tick 15.4→11.2ms，固定 3000 细胞 26.3→20.1ms。≤8ms/tick 仍未达标，如实记录。**
+
+### 实现
+
+- 新增 C++ `CellSpatial.collect_inputs_grid()`：一次建网格后逐细胞直接统计同类/异类邻居并组装 8 通道输入，跳过旧的 `build_neighbor_csr`（每 tick 对全细胞建 vector + sort + `PackedInt32Array.append`，实测 1490 细胞时单项 8.58ms）物化步骤。
+- `OrganismManager.advance_physics_tick()` 的 native 分支优先走融合路径，DLL 缺失/类未注册回退旧 `build_neighbor_csr + collect_inputs_batch`；`_build_behavior_environment()` 保留作为回退与诊断路径。
+- 逐位安全：邻居同/异类统计是整数累加，与遍历顺序无关，故融合路径无需 sort 即可与旧 CSR 逐位一致；场通道/能量通道完全照抄旧逻辑。硬编码 `cell_size=64`、`energy_max=1.0` 与旧 `_build_behavior_environment()` 返回值一致。
+- 新增 `tools/CollectInputsGridParityProbe.gd`（41112 项 8 通道逐位对照）、`tools/BehaviorStageProbe.gd` / `tools/BehaviorPhysicsBreakdownProbe.gd`（一次性热点诊断，不登记 manifest）。脚本清单 64→65。
+
+### 验证（程序化无头，双工程）
+
+- `CollectInputsGridParityProbe` 41112 项 `failures=0`；`BehaviorSignalParityProbe` 4808、`RenderCacheParityProbe` 10353、`MetabolismHotspotsParityProbe` 1905、`PhysicsStepParityProbe` 2000 项全过。
+- 双工程 `NativeParityProbe`：legacy 240 tick 检查点仍为 1356695503；M1 700 tick tick 2/302/602 细胞 8→16→32→64，GD/CPP hash 逐位一致，`failures=0`。
+- 双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`。
+
+### 实测与诚实结论
+
+| 口径 | v0.35 | v0.36 |
+| --- | --- | --- |
+| M1 全 tick（1024 细胞） | 15.4 ms | **11.2 ms** |
+| M1 stage behavior | 5.57 ms | **1.27 ms** |
+| 固定 3000 细胞全 tick | 26.3 ms | **20.1 ms** |
+| 固定 1000 细胞全 tick | 9.0 ms | **7.2 ms** |
+
+剩余大头转为 metabolism（M1 5.3ms / 3000 档 10ms，主体已 C++ 化，`metab_env` 后处理循环含 ledger/consume/死亡副作用需保序）、physics（约 3.9ms，Verlet/link/碰撞已 C++ 化）、场 tick（约 1.3ms）。**3000 档 `budget_met=false`，未达 ≤8ms/tick，不表述达标**。DLL SHA-256：`36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
+
+---
+
 ## 0.35.0 — 2026-11-20
 
 **类型**：A 路线继续下沉（行为输出批量复制 + 信号源批处理 + 批渲染缓存原生化）+ 拖拽视野卡顿根因定位。**M1 场景 native 全 tick 15.4ms（behavior 5.57 / physics 3.81 / metabolism 5.30 / signal 0.64）；批渲染缓存重建 43.4→1.03ms（约 42×）。≤8ms/tick 仍未达标，如实记录。**

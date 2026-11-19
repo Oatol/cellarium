@@ -1389,3 +1389,37 @@ GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 1
 - `NativeParityProbe` legacy 240 tick 检查点 1356695503；M1 700 tick tick 2/302/602 细胞 8→16→32→64，GD/CPP hash 逐位一致；双工程 `SmokeTest: SCRIPTS=64 FAILURES=0`。
 - M1 场景（1024 细胞 40 tick）native 全 tick 16.3ms：behavior 5.57 / physics 3.81 / metabolism 5.30 / signal 0.64 ms；固定 3000 细胞 26.3ms（`budget_met=false`）；批渲染缓存重建 43.4→1.03ms。**≤8ms/tick 仍未达标，不表述达标。**
 - v0.35.0 入库 DLL SHA-256：`5F22B56BE53A72FF673FD7A0449283A7A508CDF0D821FD364E1D072ACEDD2082`。
+
+---
+
+## 41. v0.36.0：邻域输入收集融合（消除每 tick CSR 物化）
+
+### 41.1 热点细分方法
+
+按用户「程序化验证、不靠猜」的纪律，新增 `tools/BehaviorStageProbe.gd` 与 `tools/BehaviorPhysicsBreakdownProbe.gd`，对 behavior/physics 阶段逐子调用独立计时（1490 细胞、native 开启）：
+
+| 子调用 | 耗时 |
+| --- | --- |
+| `build_neighbor_csr`（C++） | **8584 µs** |
+| `collect_inputs_batch`（C++） | 3203 µs |
+| `field_sample_positions` | 490 µs |
+| `begin_field_sampling` | 499 µs |
+| `evaluate_batch`（C++） | 424 µs |
+| `project_to_dish` | 147 µs |
+| `apply_cached_intents` | 267 µs |
+
+结论：behavior 的真正大头不是位移循环（仅 0.27ms，受 Vector2 逐位约束无法下沉），而是每 tick 的 CSR 物化——`build_neighbor_csr` 对全细胞建临时 vector、9 格收集、`std::sort`、`PackedInt32Array.append`。
+
+### 41.2 融合方案与逐位安全
+
+观察到 CSR 只被 `collect_inputs_batch` 消费，且后者仅用邻居统计同类/异类计数（`min(count/8,1)`）。新增 `CellSpatial.collect_inputs_grid()`：一次建 `GridBuckets`，逐细胞在 9 格里直接累加 same/other，跳过整个 CSR 物化与排序。
+
+逐位安全依据：same/other 是整数累加，与邻居遍历顺序无关，故融合路径无需 sort 即与旧 CSR 路径产出相同的通道 5/6；场通道（0–4）与能量通道（7）完全照抄旧逻辑。`cell_size=64`、`energy_max=1.0` 与旧 `_build_behavior_environment()` 一致。DLL 缺失或类未注册时回退旧路径。
+
+### 41.3 验证与实测
+
+- `CollectInputsGridParityProbe`：5 tick、多规模，41112 项 8 通道逐位对照 `failures=0`（容差仅用于打印，判定用 `!=` 且阈值 1e-7）。
+- `NativeParityProbe`：legacy 240 tick 检查点 1356695503；M1 700 tick tick 2/302/602 细胞 8→16→32→64，GD/CPP hash 逐位一致；双工程全过。
+- 双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`。
+
+同会话 A/B（native）：M1 1024 细胞 behavior 5.57→1.27ms（4.4×）、全 tick 15.4→11.2ms；固定 3000 细胞 26.3→20.1ms、1000 细胞 9.0→7.2ms。**仍未达 ≤8ms/tick，不表述达标。** 剩余大头：metabolism（M1 5.3ms / 3000 档 10ms，主体已 C++，`metab_env` 后处理含 ledger/consume/死亡副作用需保序）、physics 约 3.9ms（Verlet/link/碰撞已 C++ 化）、场 tick 约 1.3ms。v0.36.0 入库 DLL SHA-256：`36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
