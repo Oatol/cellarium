@@ -1123,3 +1123,69 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - **中途踩坑（已回退）**：在 GDScript 中对 `PackedInt32Array` 手写插入排序构建 CSR 邻域，3000 细胞 tick 反从 211ms 劣化到 473ms——GDScript 解释层的插入排序远慢于原生 `Array.sort()`；已回退为 `query_neighbors_flat()` + append。碰撞候选若只保留当前真实接触对，会破坏「原本不接触、被邻胞推动后才接触」的连锁分离语义（SmokeTest `chained overlap` 失败）；改为只过滤距离 > 2×接触距离的远邻后恢复。
 - **批渲染**：新增 `CellPolygonBatchRenderer.gd`，>512 细胞时用单 `CanvasItem` 批量绘制共享弦切平膜 + 外轮廓 + 核点 + 连接线，保留 Cell Lab 膜外观而非 MultiMesh 纯色块。`BatchRenderProbe.gd` 600 细胞功能断言全过、状态 hash 不变；但重建仍约 158–167ms/600 细胞（初版全量 `_build_shared_chords` 约 901ms，跳过 O(k²) 遮挡与 `clip_unit_circle` 去重后降到 ~167ms）。**功能正确但重建成本仍高**，属于下一步优化点。
 - **下一步（超出本版范围）**：要真正逼近 3000 细胞流畅，需把热点循环（神经推理、碰撞、场采样、共享弦构建）下沉到 GDExtension/C++ 或计算着色器，而非继续在 GDScript 解释层挤压；同时批渲染改走 `RenderingServer` 直接提交顶点。两者都涉及底层实现替换，须另立专项并守住冻结边界。
+
+## 34. Cell Lab 空间分区与碰撞优化算法全清单（用户追问，2026-11-19）
+
+用户问：Cell Lab 里有没有用到空间分区算法或其他碰撞优化算法。答：**有，是一套组合拳**，全部来自固定池 SoA 的前提。以下均为全量反编译源码逐行证据（`decompiled_zh/com_saterskog_cell_lab_CellWorld.java`，官方版；Macro `SimulationWorld.java` 同构）。
+
+### 34.1 主算法：均匀网格空间哈希（uniform grid spatial hashing）
+
+不是四叉树/BVH/sweep-and-prune，是最朴素的**固定分辨率均匀网格 + 桶数组**，但配了四个关键设计使其 O(n) 且常数极小：
+
+| 优化点 | 源码证据 | 机制 | 为什么快 |
+| --- | --- | --- | --- |
+| 格边长由场地尺寸定，格数封顶 | `:146-147`、`:187` `Z = (min(206, (int)(k/0.03 - 0.1))/2)*2` | 格边长约 0.03（细胞直径量级），格数 Z 取偶数且 ≤206 | 格数固定上限 → 桶数组一次性分配，运行期零增长；细胞半径小，每格邻域候选恒定 |
+| 桶数组 + 容量硬上限 | `:219` `aV[i]=new int[203]`；`:401/413/425/436` `if (aW[cell.K/L/M/N] < 203)` | 每格最多存 203 个细胞索引，超出打日志 `gridnMAX exhausted` 并**丢弃** | 防止病态长链把单格撑爆退化成 O(n²)；代价是极端密集时会漏检，但正常场景不会触发 |
+| 每细胞写 4 格（包围盒覆盖） | `:399-443` `cell.K/L/M/N = f(位置±半径d)`，重复格置 -1 | 细胞按 (x±d, y±d) 覆盖的 2×2 格各写一次索引；4 个角相同则去重 | 保证任何相交对至少共享一格；去重避免同格重复写 |
+| 唯一配对 + 跨格去重 | `:1305-1319` `for i17 < aW[i16] ... if (i18 > i) ... K[] 去重` | 只处理索引大于自己者（`i18 > i`），每对只算一次；再用 `K[]` 暂存本细胞候选，索引写 4 格带来的重复候选被去重 | 配对唯一化，从 O(n²/2) 降到 O(n·k)，k=局部邻居数 |
+
+补充：还有一张**气味/信息素网格** `ba/bb/bc`（`:226-228`，格数 `bd`，容量 404，`bb` 是 `short` 存类型标记），同一 tick 的 `g()` 里一次填充（`:353-398`），SECROCYTE 分泌细胞按 `u[4]` 类型写入负值编码（`(-1)-i4`）。这就是 Cell Lab 的"化学信号"空间索引——但注意它**不是**本项目已否决的全局浓度场/PDE，只是分泌源的邻域查询桶。
+
+### 34.2 配套优化（与空间哈希同等重要，缺一不可）
+
+1. **固定池 + 零分配**：构造期一次性分配 `Cell[x]` / `Food[A]` / `Link` / `aV[]` / `ba[]` / `FloatBuffer`（`:146-230`）；运行期无 `new`（除极少数），池满即拒绝（`:447-449` `if (z >= d) return false`）。消除 GC 抖动——这是长链不卡的隐藏前提。
+2. **SoA 并行数组**：位置/半径/质量/朝向拆成 `cell.b/c/d/w/k` 标量字段遍历，连接拆成 `Link.b/c/d/k/l`；遍历只碰连续字段，缓存命中高。
+3. **宽相裁剪 + 距离平方早退**：只有共享格、且 `i18 > i` 的候选才进入接触判定；接触循环里先比较平方距离（如 `:1538-1541` 捕食按 `cell.w - 0.036` 限幅），不满足直接跳过，避免 `sqrt` 和三角函数。
+4. **物理渲染共享数据**：接触循环 `d(int)` 算力的同时把圆-圆相交弦端点写进 `cell.A[]`（`:1096` 附近），渲染阶段只读不重算——**共享弦不是渲染期算法，是物理副产物**，这既省算又保证贴合。
+5. **格饱和即截断**：`aW[]<203` 的硬闸门（34.1）确保最坏情况有界，这是"3000 细胞也不会卡死"的关键——不是算法更聪明，是**最坏情况被显式限制**。
+6. **按需渲染**：`RENDERMODE_WHEN_DIRTY`，无变化不重绘。
+
+### 34.3 对 v0.31.0 的落地映射（A 路线：GDExtension/C++）
+
+| Cell Lab 机制 | 本项目 v0.30 现状 | v0.31 下沉到 C++ 后 |
+| --- | --- | --- |
+| 均匀网格 + 203 上限 | `CellPhysics.build_spatial_hash_flat` 是 Dictionary + PackedInt32Array，GDScript 解释层建格 | 用 C++ 定长 `int[203]` 桶 + 无 Dictionary，建格从 N 个 Dictionary 键操作降到纯数组写 |
+| 唯一配对 + K[] 去重 | `build_collision_pairs_flat` 已实现 `j>i` 唯一配对 | 直接移植同一逻辑到 C++，配 std::vector<int> 复用避免每 tick 分配 |
+| 每细胞写 4 格 | `query_neighbors_flat` 查 3×3 格 | C++ 侧保留，格边长常数与 Z 上限与 Cell Lab 对齐（需与本项目 dish 尺寸重新标定，不照抄 0.03） |
+| 固定池零分配 | GDScript 每 tick 仍有临时 Dictionary/Array | C++ 侧预分配工作区（邻域缓冲、pairs 缓冲、场采样缓冲），热路径零分配 |
+| 距离平方早退 | 已用 `distance_squared` 早退 | C++ 内联 + SIMD 友好布局，进一步降常数 |
+| 共享弦物理副产物 | `CellPolygonBatchRenderer` 渲染期另算弦（158ms/600胞） | C++ 接触阶段一并写弦端点，渲染只读——这是批渲染提速的正解（对应 C 路线的 RenderingServer 直提，留作 A 未达标时的升级） |
+
+**结论**：Cell Lab 没有用比均匀网格更高级的分区结构；它的流畅来自「均匀网格 + 硬容量上限 + 唯一配对 + 固定池零分配 + SoA + 物理渲染共享弦」这套组合，每个都在本项目 v0.31 的下沉清单里。冻结边界不变：格参数重标定需保持状态 hash 逐位一致，否则按版本化处理并找用户确认。
+
+## 35. v0.31.0 P0 工具链验证结论（A 路线 GDExtension 可行性，2026-11-19）
+
+用户拍板：先走 A（GDExtension/C++ 下沉热点），C（混合/GPU）留作 A 未达标时的升级；验收口径 3000 细胞 ≤8ms/tick。P0 目标是消除「godot-cpp 与 Godot 4.7.2 版本对齐」这一最大风险。结论：**全链路打通，风险解除**。
+
+### 35.1 环境事实（本机实测）
+
+- Godot：`4.7.2.stable.official.ed1daf0bf`（`--version` 实测，确认是官方版非改号）。
+- **godot-cpp 官方仓库没有 4.7 的 tag 或分支**：tags 最高 `godot-4.5-stable`，branches 最高 `4.5` 与 `master`。按 tag 对齐的路走不通。
+- C++ 工具链：VS2022 BuildTools 含 MSVC 14.44.35207 + Windows SDK 10，`cl.exe` 在但不在 PATH；**SCons 能自动通过注册表/vswhere 探测到 MSVC**，无需手动 vcvars。Python 3.9 + `pip install scons` 成功。
+
+### 35.2 打通路径（关键：引擎自导出 API，不依赖 tag）
+
+1. Godot 自导出 API：`godot --headless --dump-extension-api`（**注意不是 `--generate-extensions-json`，那参数不存在会挂起**），在当前目录产出 `extension_api.json`（4.7.2 实测 6,965,057 字节）。
+2. godot-cpp 用 `master`（已独立版本化 v10，支持 `api_version` 与自定义 API）：
+   - `SConstruct` 改为 `SConscript("godot-cpp/SConstruct", {"api_version": 4.7, "custom_api_file": "extension_api.json", ...})`
+   - 官方 README 明确支持 `scons custom_api_file=extension_api.json` 用自导出 API 生成绑定。
+3. 编译：`scons target=template_debug platform=windows dev_build=no -j 4`（PowerShell 直接跑，SCons 自动探测 MSVC）。**MSVC 上禁止用 `cmd /c vcvars64.bat && ...`（PowerShell 工具安全策略禁止调 cmd.exe）**，直接跑即可。
+4. `.gdextension` 配置：模板默认列 20+ 平台路径，headless 编辑器校验时会崩溃（0xC0000005）；**精简为只留 `windows.x86_64 = "res://bin/windows/....dll"` 后正常**。`compatibility_minimum = "4.7"`。
+5. GDScript 调用：GDExtension 注册的类**不进 GDScript 全局符号表**（直接写 `ExampleClass.new()` 报 `Identifier not declared`），必须用 `ClassDB.class_exists("X")` + `ClassDB.instantiate("X")` + `obj.call("method", ...)`。`RefCounted` 派生类不能手动 `free()`。
+
+### 35.3 验证结果
+
+- 编译：`scons ... -j 4` → `Linking Shared Library ...EXTENSION-NAME.windows.template_debug.x86_64.dll`，BUILD_EXIT=0。
+- 运行：4.7.2 headless 加载扩展，`ClassDB.instantiate("ExampleClass")` 成功，C++ `print_type(42)` / `print_type("hello")` 输出 `Type: 2` / `Type: 4`，探针 `P0_PROBE: OK` EXIT=0。
+- 工作区：`D:\Tools\Godot_v4.7.2\gdext_work\`（godot-cpp + template，含 junction 与自定义 API JSON），**本地开发用，不入库**（二进制/第三方源码不进版本库，符合仓库约定）。
+- 下一步：把真正的热点（神经推理起步）写成 C++ 类，按 P1→P2→P3 下沉；每阶段做 native-vs-GDScript 状态 hash 逐位对照；DLL 分发加进双工程同步流程。

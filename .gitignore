@@ -42,3 +42,9 @@ Thumbs.db
 .DS_Store
 *.swp
 *~
+
+# GDExtension build artifacts (v0.31+): never publish compiled binaries / third-party sources
+*.dll
+*.gdextension
+godot/cellarium-release/bin/
+godot/cellarium-release/addons/*/bin/
