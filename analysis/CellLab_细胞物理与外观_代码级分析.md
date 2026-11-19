@@ -1189,3 +1189,16 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 运行：4.7.2 headless 加载扩展，`ClassDB.instantiate("ExampleClass")` 成功，C++ `print_type(42)` / `print_type("hello")` 输出 `Type: 2` / `Type: 4`，探针 `P0_PROBE: OK` EXIT=0。
 - 工作区：`D:\Tools\Godot_v4.7.2\gdext_work\`（godot-cpp + template，含 junction 与自定义 API JSON），**本地开发用，不入库**（二进制/第三方源码不进版本库，符合仓库约定）。
 - 下一步：把真正的热点（神经推理起步）写成 C++ 类，按 P1→P2→P3 下沉；每阶段做 native-vs-GDScript 状态 hash 逐位对照；DLL 分发加进双工程同步流程。
+
+### 35.4 P1/P2 C++ 原型逐位等价与加速比（未接入发布工程）
+
+**P1 神经推理（`CellNeural`）**：
+- `evaluate_into`/`evaluate_batch`。确定性关键：GDScript `float`=double、`PackedFloat32Array` 元素=float32 → C++ 用 double 累加 + `std::tanh(double)` + 存回 float32 才逐位一致。
+- 逐位对照（`neural_parity_probe.gd`，2000 组随机 × 6 输出 = 12000 float32）：`max_abs_diff=0`、`failures=0`。
+- 微基准（纯推理 3000 细胞）：GDScript 9.25ms → C++ 0.85ms（10.88×）。但纯推理只占 behavior 阶段约 1/9，端到端收益有限，暂不接入。
+
+**P2 三热点（`CellSpatial`）**：`build_neighbor_csr` / `collect_inputs_batch` / `resolve_collisions`。
+- 确定性要点：① 邻域 CSR —— GDScript `query_neighbors_flat` 收集 3×3 格后 `sort()`，最终按 cell_index 升序，与桶遍历顺序无关，C++ 直接收集后 `std::sort` 等价；② 碰撞对 —— **不排序**，按「a 升序→9 格偏移(offset_y 外/offset_x 内)→格内插入顺序」，`b>a` + 距离 >2×接触距离过滤，C++ 用 `unordered_map<key,vector<int>>` 按键查找（不遍历 map，故哈希迭代序无关）精确复现；③ 浮点 —— 位置 float32、GDScript 运算 double、写回才转 float32。
+- 逐位对照（`spatial_parity_probe.gd`，N=1500 密集重叠）：邻域 CSR 657,380 索引全等；collect_inputs 12,000 float32 全等；碰撞 73,620 次修正、全部位置逐位相等。`SPATIAL_PARITY: OK`。
+- 微基准（`spatial_bench.gd`，N=3000 极端密集、30 次）：邻域 CSR 105.8→45.4ms（2.33×）、碰撞 846.6→85.9ms（9.86×）、collect_inputs 351.8→28.4ms（12.38×）。
+- **诚实评估**：上述是孤立极端场景微基准，不等于端到端 tick 收益；邻域 CSR 仅 2.33×（瓶颈 `unordered_map`+逐细胞 `std::sort`，可再优化）。**接入发布工程前必须跑完整 `BenchTest` 全 tick 与 state hash 对照**，不可据此宣称达标。原型与探针都在 D 盘工具区，未改发布工程、未接 DLL。
