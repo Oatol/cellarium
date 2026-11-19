@@ -72,6 +72,25 @@ var _native_neural: RefCounted = null
 var _native_neural_checked: bool = false
 var _native_metabolism: RefCounted = null
 var _native_metabolism_checked: bool = false
+## v0.34.0 原生代谢缓存：每 tick 只按个体重建一次，避免逐细胞调用 Genome.get_mode。
+## 只在 native_spatial_enabled=true 且 CellMetabolism 已注册时使用；CPU 路径完全不变。
+var _native_metabolism_cache_tick: int = -1
+var _native_cache_generation: int = 0
+var _native_cache_generation_seen: int = -1
+var _native_cache_org_count: int = -1
+var _native_mode_stride: int = 40
+var _native_org_gene_mode: PackedByteArray = PackedByteArray()
+var _native_org_has_modes: PackedByteArray = PackedByteArray()
+var _native_org_genome_present: PackedByteArray = PackedByteArray()
+var _native_org_mode_counts: PackedInt32Array = PackedInt32Array()
+var _native_org_max_cells: PackedInt32Array = PackedInt32Array()
+var _native_org_default_threshold: PackedFloat32Array = PackedFloat32Array()
+var _native_org_default_rate: PackedFloat32Array = PackedFloat32Array()
+var _native_org_default_division_mass: PackedFloat32Array = PackedFloat32Array()
+var _native_org_mode_rates: PackedFloat32Array = PackedFloat32Array()
+var _native_org_mode_thresholds: PackedFloat32Array = PackedFloat32Array()
+var _native_org_mode_link_limits: PackedInt32Array = PackedInt32Array()
+var _native_mode_dicts: Array[Dictionary] = []
 
 func _get_native_spatial() -> RefCounted:
 	if not native_spatial_enabled:
@@ -99,6 +118,101 @@ func _get_native_metabolism() -> RefCounted:
 		if ClassDB.class_exists("CellMetabolism"):
 			_native_metabolism = ClassDB.instantiate("CellMetabolism") as RefCounted
 	return _native_metabolism
+
+## v0.34.0：返回原生代谢对象，并保证缓存与当前 sim tick 对齐。
+## 缓存只读派生，不进 hash / 存档；同一 tick 内多次调用共享同一份。
+func _native_metabolism_for_hotspots() -> RefCounted:
+	var native_metabolism: RefCounted = _get_native_metabolism()
+	if native_metabolism == null:
+		return null
+	var org_count: int = int(organisms.get("org_alive").size())
+	if _native_cache_generation_seen != _native_cache_generation \
+		or _native_cache_org_count != org_count:
+		_rebuild_native_metabolism_cache()
+		_native_cache_generation_seen = _native_cache_generation
+		_native_cache_org_count = org_count
+	_native_metabolism_cache_tick = _sim_tick
+	return native_metabolism
+
+func _invalidate_native_metabolism_cache() -> void:
+	## 只在基因组被写入/替换时调用；缓存是只读派生，不参与状态 hash 或存档。
+	_native_cache_generation += 1
+
+func _rebuild_native_metabolism_cache() -> void:
+	var org_count: int = int(organisms.get("org_alive").size())
+	var stride: int = int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENOME_MODES", 40))
+	var unlimited_cells: int = int(GENOME_SCRIPT.get_script_constant_map().get("UNLIMITED_CELLS", -1))
+	_native_mode_stride = stride
+	_native_org_gene_mode.resize(org_count)
+	_native_org_has_modes.resize(org_count)
+	_native_org_genome_present.resize(org_count)
+	_native_org_mode_counts.resize(org_count)
+	_native_org_max_cells.resize(org_count)
+	_native_org_default_threshold.resize(org_count)
+	_native_org_default_rate.resize(org_count)
+	_native_org_default_division_mass.resize(org_count)
+	var flat_count: int = org_count * stride
+	_native_org_mode_rates.resize(flat_count)
+	_native_org_mode_thresholds.resize(flat_count)
+	_native_org_mode_link_limits.resize(flat_count)
+	_native_org_mode_rates.fill(0.0)
+	_native_org_mode_thresholds.fill(0.0)
+	_native_org_mode_link_limits.fill(-1)
+	_native_mode_dicts.clear()
+	_native_mode_dicts.resize(flat_count)
+	for org_id in range(org_count):
+		_native_org_gene_mode[org_id] = 0
+		_native_org_has_modes[org_id] = 0
+		_native_org_genome_present[org_id] = 0
+		_native_org_mode_counts[org_id] = 0
+		_native_org_max_cells[org_id] = -1
+		_native_org_default_threshold[org_id] = autonomous_division_energy
+		_native_org_default_rate[org_id] = 0.0
+		_native_org_default_division_mass[org_id] = 0.05
+		if not genomes.has(org_id):
+			continue
+		var genome: RefCounted = genomes[org_id] as RefCounted
+		if genome == null:
+			continue
+		_native_org_genome_present[org_id] = 1
+		var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
+		_native_org_gene_mode[org_id] = 1 if gene_mode else 0
+		var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
+		_native_org_has_modes[org_id] = 1 if has_modes else 0
+		if gene_mode:
+			var raw_cap: Variant = genome.get("max_cells_per_organism")
+			var cap: int = int(genome.get("max_divisions")) + 1 if raw_cap == null else int(raw_cap)
+			if cap == unlimited_cells or cap < 2:
+				_native_org_max_cells[org_id] = -1
+			else:
+				_native_org_max_cells[org_id] = mini(cap, maxi(1, global_cell_capacity))
+			_native_org_default_division_mass[org_id] = maxf(0.05, float(genome.get("division_mass")))
+			_native_org_default_threshold[org_id] = _native_org_default_division_mass[org_id]
+		else:
+			_native_org_max_cells[org_id] = int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome))
+			_native_org_default_rate[org_id] = default_transfer_rate
+		if not has_modes:
+			continue
+		var modes: Array = genome.get("modes") as Array
+		var mode_count: int = mini(modes.size(), stride)
+		_native_org_mode_counts[org_id] = mode_count
+		for mode_id in range(mode_count):
+			var mode: Dictionary = GENOME_SCRIPT.call("get_mode", genome, mode_id)
+			var flat: int = org_id * stride + mode_id
+			_native_mode_dicts[flat] = mode
+			_native_org_mode_rates[flat] = clampf(float(mode.get("transfer_rate", 0.0)), 0.0, 1.0)
+			_native_org_mode_thresholds[flat] = maxf(0.05, float(mode.get("division_mass", 0.05)))
+			_native_org_mode_link_limits[flat] = clampi(int(mode.get("link_division_limit", -1)), -1, 16)
+
+func _native_mode_for_cell(org_id: int, mode_index: int) -> Dictionary:
+	var mode_count: int = int(_native_org_mode_counts[org_id])
+	if mode_count <= 0:
+		return {}
+	var slot: int = clampi(mode_index, 0, mode_count - 1)
+	var flat: int = org_id * _native_mode_stride + slot
+	if flat < 0 or flat >= _native_mode_dicts.size():
+		return {}
+	return _native_mode_dicts[flat]
 
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
@@ -250,8 +364,21 @@ func advance_physics_tick(dt: float) -> void:
 		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
-	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 	var native_spatial: RefCounted = _get_native_spatial()
+	if native_spatial != null and dt > 0.0:
+		var physics_constants: Dictionary = CELL_PHYSICS_SCRIPT.get_script_constant_map()
+		var stepped: Dictionary = native_spatial.call("step_verlet_and_links",
+			cells.get("cell_pos_x"), cells.get("cell_pos_y"),
+			cells.get("cell_prev_x"), cells.get("cell_prev_y"), cells.get("cell_alive"),
+			cells.get("link_cell_a"), cells.get("link_cell_b"), cells.get("link_rest_length"),
+			float(physics_constants.get("DAMPING", 0.98)),
+			int(physics_constants.get("CONSTRAINT_ITERATIONS", 2)))
+		cells.set("cell_pos_x", stepped["pos_x"])
+		cells.set("cell_pos_y", stepped["pos_y"])
+		cells.set("cell_prev_x", stepped["prev_x"])
+		cells.set("cell_prev_y", stepped["prev_y"])
+	else:
+		CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 	if native_spatial != null:
 		# v0.31.0：C++ 碰撞求解，逐位等价已由 spatial_parity_probe 验证（SPATIAL_HASH_CELL_SIZE=64）。
 		var coll: Dictionary = native_spatial.call("resolve_collisions",
@@ -331,6 +458,12 @@ func _field_sample_cell_indices() -> Array[int]:
 ## v0.17.0：连接传递率真相源。新多模式基因组逐模式配置；旧基因组保持 v0.14–v0.16 行为。
 func _build_transfer_rates() -> PackedFloat32Array:
 	var count: int = int(cells.call("size"))
+	var native_metabolism: RefCounted = _native_metabolism_for_hotspots()
+	if native_metabolism != null:
+		return native_metabolism.call("compute_transfer_rates",
+			cells.get("cell_alive"), cells.get("cell_org_id"), cells.get("cell_mode"),
+			_native_org_gene_mode, _native_org_has_modes, _native_org_mode_counts,
+			_native_org_default_rate, _native_org_mode_rates) as PackedFloat32Array
 	var rates: PackedFloat32Array = PackedFloat32Array()
 	rates.resize(count)
 	rates.fill(0.0)
@@ -559,46 +692,77 @@ func _apply_autonomous_lifecycle() -> void:
 	var mode_ids: PackedByteArray = cells.get("cell_mode")
 	var mode_depths: PackedByteArray = cells.get("cell_mode_depth")
 	var candidates: Array[Dictionary] = []
-	for cell_index in range(energies.size()):
-		if alive[cell_index] == 0:
-			continue
-		var org_id: int = org_ids[cell_index]
-		if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or org_state[org_id] != mature_state:
-			continue
-		if not genomes.has(org_id):
-			continue
-		var genome: RefCounted = genomes[org_id] as RefCounted
-		var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
-		var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
-		var threshold: float = maxf(0.05, float(genome.get("division_mass"))) if gene_mode else autonomous_division_energy
-		var max_cells: int = _resolve_max_cells(genome)
-		var mode_data: Dictionary = {}
-		var mode_index: int = 0
-		var depth: int = 0
-		if has_modes:
-			mode_index = 0 if cell_index >= mode_ids.size() else int(mode_ids[cell_index])
-			depth = 0 if cell_index >= mode_depths.size() else int(mode_depths[cell_index])
-			mode_data = GENOME_SCRIPT.call("get_mode", genome, mode_index)
-			threshold = maxf(0.05, float(mode_data.get("division_mass", threshold)))
-			# v0.22.0：去掉 mode depth/max_divisions 分裂闸门，对齐 Cell Lab e(double)。
-			# Cell Lab 无「同模式分裂 N 代后锁死」机制；分裂次数由端粒 T 控制（-1 无限），
-			# 本项目 cell_telomere 已承担该角色。depth 字段保留仅为兼容存档/预览莫斯，不再限制分裂。
-			if _is_link_division_blocked(genome, cell_index):
+	var native_metabolism: RefCounted = _native_metabolism_for_hotspots()
+	if native_metabolism != null:
+		# v0.34.0：候选筛选是纯读；真正分裂与死亡副作用仍在 GDScript 原顺序执行。
+		var selection: Dictionary = native_metabolism.call("select_lifecycle_candidates",
+			alive, energies, org_ids, org_alive, org_state, mode_ids,
+			cells.get("cell_division_tick"), cells.get("cell_telomere"), cells.get("cell_link_count"),
+			_native_org_genome_present, _native_org_gene_mode, _native_org_has_modes,
+			_native_org_max_cells, cell_counts, _native_org_default_threshold,
+			_native_org_mode_counts, _native_org_mode_thresholds, _native_org_mode_link_limits,
+			_sim_tick, autonomous_division_cooldown, mature_state)
+		var grace_indices: PackedInt32Array = selection["grace"]
+		var selected: PackedInt32Array = selection["candidates"]
+		for cell_index in grace_indices:
+			cells.call("set_division_tick", int(cell_index), -1)
+		for cell_index_variant in selected:
+			var cell_index: int = int(cell_index_variant)
+			var org_id: int = int(org_ids[cell_index])
+			var genome: RefCounted = genomes[org_id] as RefCounted
+			var gene_mode: bool = bool(_native_org_gene_mode[org_id] != 0)
+			var has_modes: bool = bool(_native_org_has_modes[org_id] != 0)
+			var max_cells: int = int(_native_org_max_cells[org_id])
+			var mode_data: Dictionary = {}
+			var mode_index: int = 0
+			var depth: int = 0
+			if has_modes:
+				mode_index = 0 if cell_index >= mode_ids.size() else int(mode_ids[cell_index])
+				depth = 0 if cell_index >= mode_depths.size() else int(mode_depths[cell_index])
+				mode_data = _native_mode_for_cell(org_id, mode_index)
+			candidates.append({"cell": cell_index, "org": org_id, "genome": genome, "gene": gene_mode,
+				"modes": has_modes, "mode": mode_data, "mode_index": mode_index, "depth": depth})
+	else:
+		for cell_index in range(energies.size()):
+			if alive[cell_index] == 0:
 				continue
-		if int(cells.call("get_telomere", cell_index)) == 0:
-			continue
-		if energies[cell_index] < threshold or (max_cells >= 0 and int(cell_counts[org_id]) >= max_cells):
-			continue
-		# v0.20.0：逐细胞 cooldown。首次具备资格记录宽限（-2 → -1）并跳过本 tick，
-		# 保持旧版「成熟当 tick 不立刻分裂」的节奏；此后每个细胞独立计时，不再按个体串行。
-		var division_tick: int = int(cells.call("get_division_tick", cell_index))
-		if division_tick == -2:
-			cells.call("set_division_tick", cell_index, -1)
-			continue
-		if division_tick >= 0 and _sim_tick - division_tick < autonomous_division_cooldown:
-			continue
-		candidates.append({"cell": cell_index, "org": org_id, "genome": genome, "gene": gene_mode,
-			"modes": has_modes, "mode": mode_data, "mode_index": mode_index, "depth": depth})
+			var org_id: int = org_ids[cell_index]
+			if org_id < 0 or org_id >= org_alive.size() or org_alive[org_id] == 0 or org_state[org_id] != mature_state:
+				continue
+			if not genomes.has(org_id):
+				continue
+			var genome: RefCounted = genomes[org_id] as RefCounted
+			var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
+			var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
+			var threshold: float = maxf(0.05, float(genome.get("division_mass"))) if gene_mode else autonomous_division_energy
+			var max_cells: int = _resolve_max_cells(genome)
+			var mode_data: Dictionary = {}
+			var mode_index: int = 0
+			var depth: int = 0
+			if has_modes:
+				mode_index = 0 if cell_index >= mode_ids.size() else int(mode_ids[cell_index])
+				depth = 0 if cell_index >= mode_depths.size() else int(mode_depths[cell_index])
+				mode_data = GENOME_SCRIPT.call("get_mode", genome, mode_index)
+				threshold = maxf(0.05, float(mode_data.get("division_mass", threshold)))
+				# v0.22.0：去掉 mode depth/max_divisions 分裂闸门，对齐 Cell Lab e(double)。
+				# Cell Lab 无「同模式分裂 N 代后锁死」机制；分裂次数由端粒 T 控制（-1 无限），
+				# 本项目 cell_telomere 已承担该角色。depth 字段保留仅为兼容存档/预览莫斯，不再限制分裂。
+				if _is_link_division_blocked(genome, cell_index):
+					continue
+			if int(cells.call("get_telomere", cell_index)) == 0:
+				continue
+			if energies[cell_index] < threshold or (max_cells >= 0 and int(cell_counts[org_id]) >= max_cells):
+				continue
+			# v0.20.0：逐细胞 cooldown。首次具备资格记录宽限（-2 → -1）并跳过本 tick，
+			# 保持旧版「成熟当 tick 不立刻分裂」的节奏；此后每个细胞独立计时，不再按个体串行。
+			var division_tick: int = int(cells.call("get_division_tick", cell_index))
+			if division_tick == -2:
+				cells.call("set_division_tick", cell_index, -1)
+				continue
+			if division_tick >= 0 and _sim_tick - division_tick < autonomous_division_cooldown:
+				continue
+			candidates.append({"cell": cell_index, "org": org_id, "genome": genome, "gene": gene_mode,
+				"modes": has_modes, "mode": mode_data, "mode_index": mode_index, "depth": depth})
 	for candidate in candidates:
 		var cell_index: int = int(candidate["cell"])
 		var org_id: int = int(candidate["org"])
@@ -746,6 +910,19 @@ func _apply_energy_radius_relaxation(dt: float) -> void:
 	min_power *= min_power
 	var max_power: float = maxf(min_power, energy_radius_max_scale)
 	max_power *= max_power
+	var native_metabolism: RefCounted = _native_metabolism_for_hotspots()
+	if native_metabolism != null:
+		# v0.34.0：低通与 CellArray.set_energy_radius_scale 的 clamp/写回都在 C++ 完成，
+		# 返回 float32 最终值；纯 CPU 路径保留原实现。
+		var batch: Dictionary = native_metabolism.call("compute_energy_radius_scales",
+			cells.get("cell_alive"), energies, org_ids, mode_ids,
+			cells.get("cell_energy_scale"), cells.get("cell_radius_baseline"),
+			_native_org_gene_mode, _native_org_has_modes, _native_org_mode_counts,
+			_native_org_default_division_mass, _native_org_mode_thresholds,
+			dt, energy_radius_relax_rate, energy_radius_min_scale, energy_radius_max_scale)
+		cells.set("cell_energy_scale", batch["energy_scales"])
+		cells.set("cell_radius_scale", batch["radius_scales"])
+		return
 	for cell_index in range(count):
 		if alive[cell_index] == 0:
 			continue
@@ -841,6 +1018,7 @@ func register_zygote(genome_id: int, species_id: int, parent_id: int, genome: Re
 	stored_genome.set("species_id", species_id)
 	stored_genome.set("lineage_id", int((species_system.call("get_species", species_id) as Dictionary).get("lineage_id", -1)))
 	genomes[org_id] = stored_genome
+	_invalidate_native_metabolism_cache()
 	if bool(GENOME_SCRIPT.call("has_modes", stored_genome)):
 		_apply_cell_mode(stored_genome, cell_index, 0, 0)
 	else:
@@ -907,6 +1085,7 @@ func _apply_gene_payload(genome: RefCounted, payload: Variant) -> void:
 	var gene: Dictionary = payload as Dictionary
 	if gene.is_empty():
 		return
+	_invalidate_native_metabolism_cache()
 	genome.set("division_mass", clampf(float(gene.get("division_mass", 1.0)), 0.05, 100.0))
 	genome.set("split_ratio", clampf(float(gene.get("split_ratio", 0.5)), 0.05, 0.95))
 	genome.set("max_divisions", clampi(int(gene.get("max_divisions", 3)), 0, 8))
@@ -1289,6 +1468,7 @@ func _apply_tool_command(command: Dictionary) -> int:
 			var species_id: int = int(species_system.call("classify", injected, int(previous.get("species_id")), _sim_tick))
 			injected.set("species_id", species_id)
 			genomes[target_org] = injected
+			_invalidate_native_metabolism_cache()
 			var species_ids: PackedInt32Array = organisms.get("org_species_id")
 			if target_org < species_ids.size():
 				species_ids[target_org] = species_id
@@ -1510,6 +1690,7 @@ func _dev_force_mutate(args: Dictionary) -> int:
 	var mutated: RefCounted = MUTATION_SCRIPT.call("mutate", genome, _next_genome_id, org_id, _sim_tick, 1.0)
 	_next_genome_id += 1
 	genomes[org_id] = mutated
+	_invalidate_native_metabolism_cache()
 	return int(mutated.call("hash"))
 
 func _dev_force_speciate(args: Dictionary) -> int:

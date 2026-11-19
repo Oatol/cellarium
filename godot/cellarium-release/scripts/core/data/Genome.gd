@@ -61,8 +61,32 @@ static func has_modes(genome: RefCounted) -> bool:
 	var modes: Variant = genome.get("modes")
 	return modes is Array and not (modes as Array).is_empty()
 
+## v0.34.0：默认编辑模式 = M1 光合自分裂，保黏附、无分裂次数限制。
+## 光合 cell_type=4；两个子代模式都指向自身（0），因此每个 M1 都分裂成两个 M1；
+## telomere=-1（无限谱系）、link_division_limit=-1（连接数不抑制）、division_mass=0.05。
+## 这是归一化默认值，供编辑器「+ 模式」与新建草案使用；不改变旧存档（旧档自行带原值）。
 static func default_mode(index: int = 0) -> Dictionary:
-	return normalized_mode({}, index)
+	var base: Dictionary = normalized_mode({}, index)
+	base["name"] = "M1_Photo"
+	base["cell_type"] = 4
+	base["child1_type"] = 4
+	base["child2_type"] = 4
+	base["child1_mode"] = 0
+	base["child2_mode"] = 0
+	base["child1_glue"] = true
+	base["child2_glue"] = true
+	base["make_glue"] = true
+	base["division_mass"] = 0.05
+	base["max_divisions"] = MAX_GENE_DIVISIONS
+	base["link_division_limit"] = -1
+	base["telomere"] = UNLIMITED_TELOMERE
+	return base
+
+## v0.34.0：标准测试/演示基因组模式表——单模式 M1 光合自分裂集群。
+## 与 default_mode(0) 完全同构；测试探针 (BenchTest/DenseClusterProbe) 用它跑
+## 「无分裂次数限制 + 保黏附」的光合链，逼近 Cell Lab 的持续倍增场景。
+static func solo_photo_modes() -> Array[Dictionary]:
+	return [default_mode(0)]
 
 ## v0.18.0：端粒只允许 Cell Lab Gene.B[6] 的离散档；非法值取最近的有限档。
 static func normalize_telomere(value: Variant) -> int:

@@ -290,6 +290,63 @@ Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 	return result;
 }
 
+Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
+		const PackedFloat32Array &pos_y, const PackedFloat32Array &prev_x,
+		const PackedFloat32Array &prev_y, const PackedByteArray &alive,
+		const PackedInt32Array &link_a, const PackedInt32Array &link_b,
+		const PackedFloat32Array &rest_lengths, double damping,
+		int constraint_iterations) {
+	PackedFloat32Array next_pos_x = pos_x;
+	PackedFloat32Array next_pos_y = pos_y;
+	PackedFloat32Array next_prev_x = prev_x;
+	PackedFloat32Array next_prev_y = prev_y;
+	const int count = alive.size();
+	for (int i = 0; i < count; ++i) {
+		if (alive[i] == 0) continue;
+		const double x = static_cast<double>(next_pos_x[i]);
+		const double y = static_cast<double>(next_pos_y[i]);
+		const double vx = x - static_cast<double>(next_prev_x[i]);
+		const double vy = y - static_cast<double>(next_prev_y[i]);
+		next_prev_x.set(i, static_cast<float>(x));
+		next_prev_y.set(i, static_cast<float>(y));
+		next_pos_x.set(i, static_cast<float>(x + vx * damping));
+		next_pos_y.set(i, static_cast<float>(y + vy * damping));
+	}
+	for (int iteration = 0; iteration < constraint_iterations; ++iteration) {
+		for (int link_index = 0; link_index < link_a.size(); ++link_index) {
+			const int a = link_a[link_index];
+			const int b = link_b[link_index];
+			if (a < 0 || b < 0 || a >= count || b >= count ||
+					alive[a] == 0 || alive[b] == 0) {
+				continue;
+			}
+			const double dx = static_cast<double>(next_pos_x[b]) -
+					static_cast<double>(next_pos_x[a]);
+			const double dy = static_cast<double>(next_pos_y[b]) -
+					static_cast<double>(next_pos_y[a]);
+			const double distance = std::sqrt(dx * dx + dy * dy);
+			if (distance <= 0.000001) continue;
+			const double correction = (distance -
+					static_cast<double>(rest_lengths[link_index])) / distance;
+			const double half = correction * 0.5;
+			const double ax = static_cast<double>(next_pos_x[a]) + dx * half;
+			const double ay = static_cast<double>(next_pos_y[a]) + dy * half;
+			const double bx = static_cast<double>(next_pos_x[b]) - dx * half;
+			const double by = static_cast<double>(next_pos_y[b]) - dy * half;
+			next_pos_x.set(a, static_cast<float>(ax));
+			next_pos_y.set(a, static_cast<float>(ay));
+			next_pos_x.set(b, static_cast<float>(bx));
+			next_pos_y.set(b, static_cast<float>(by));
+		}
+	}
+	Dictionary result;
+	result["pos_x"] = next_pos_x;
+	result["pos_y"] = next_pos_y;
+	result["prev_x"] = next_prev_x;
+	result["prev_y"] = next_prev_y;
+	return result;
+}
+
 void CellSpatial::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_neighbor_csr", "pos_x", "pos_y", "alive", "cell_size"),
 			&CellSpatial::build_neighbor_csr);
@@ -297,4 +354,6 @@ void CellSpatial::_bind_methods() {
 			&CellSpatial::collect_inputs_batch);
 	ClassDB::bind_method(D_METHOD("resolve_collisions", "pos_x", "pos_y", "alive", "radius_scales", "stiffnesses", "cell_radius", "cell_size", "iterations"),
 			&CellSpatial::resolve_collisions);
+	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "damping", "constraint_iterations"),
+			&CellSpatial::step_verlet_and_links);
 }

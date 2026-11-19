@@ -4,6 +4,41 @@
 
 ---
 
+## 0.34.0 — 2026-11-20
+
+**类型**：A 路线继续下沉（M1 自分裂场景诊断 + 代谢剩余热点 + Verlet/连接约束）。**1024 细胞同会话 A/B 全 tick 126.1→15.8ms（后续复跑 143.7→18.7ms），8ms 目标仍未达标**，如实记录。
+
+### 默认测试口径变更
+
+- 按用户要求，测试与默认演示改为 **M1 光合自分裂、保黏附、无分裂次数限制**：`Genome.default_mode()` / `Genome.solo_photo_modes()`，`Main.gd`、`DevEditorPanel` 新建草案与新增模式同步。
+- 旧存档/旧 5 模式 demo genome 不受影响；SmokeTest 中多细胞协作断言显式构造旧 demo genome 保持回归覆盖。
+
+### 实现
+
+- 新增 C++ `CellMetabolism.compute_transfer_rates()` / `compute_energy_radius_scales()` / `select_lifecycle_candidates()`：把逐细胞 transfer_rate 构建、能量-半径低通、生命周期候选筛选下沉。genome 派生值改为每 tick 按个体缓存一次，基因组写入/替换时显式失效。
+- 新增 C++ `CellSpatial.step_verlet_and_links()`：下沉 `CellPhysics.step()` 与 2 轮 `_solve_links()`；Verlet/约束中间值保持 double，写回 `PackedFloat32Array`。
+- 副作用边界不动：分裂动作、连接重分配、死亡、账本、场消耗、环境写入仍在 GDScript 原顺序执行；DLL 缺失或类未注册逐段回退。
+- 新增 `tools/MetabolismHotspotsParityProbe.gd`、`tools/PhysicsStepParityProbe.gd`、`tools/DenseClusterProbe.gd` 并登记 manifest（脚本 59→62）。
+- 冻结边界全部不动：GNP1、tick 阶段顺序、1/60 步长、单帧 12 tick 上限、CommandBus 单写者、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 验证（程序化无头，双工程）
+
+- `MetabolismHotspotsParityProbe`：1905 项逐位对照 `failures=0`；`PhysicsStepParityProbe`：2000 项逐位对照 `failures=0`。
+- `NativeParityProbe` 扩展为 legacy + M1 自分裂两场景：legacy 240 tick 5 检查点 hash 仍为 1356695503；M1 场景 700 tick，tick 2/302/602 实际细胞数 8→16→32→64，GD/CPP hash 与细胞数全部逐位一致。
+- `SmokeTest: SCRIPTS=62 FAILURES=0`。
+
+### 实测与诚实结论
+
+| 口径（512 个体→1024 细胞，40 tick） | 全 tick GD→CPP | metabolism GD→CPP |
+| --- | --- | --- |
+| v0.34 下沉前 | 126.1 → 77.6 ms | 69.9 → 66.0 ms |
+| 代谢热点下沉后 | 125.5 → **15.8 ms** | 69.7 → **4.9 ms** |
+| 物理下沉后复跑 | 143.7 → **18.7 ms** | 81.2 → 5.9 ms |
+
+`metab_rates` 14.5→0.04ms、`metab_radius` 14.4→0.08ms、`metab_lifecycle` 33.6→0.08ms；behavior/physics 已原生化，剩余大头转为 behavior 5–7ms、physics 4ms、signal 1–2ms、场 tick 1–2ms。**仍未达到 ≤8ms/tick，不表述达标**。固定细胞数 `BenchTest` 同会话 A/B：300 档 15.5→3.0ms、1000 档 59.1→9.7ms（`budget_met=true`）、3000 档 240.9→**27.9ms**（metabolism 64.7→9.7ms，`budget_met=false`）。DLL SHA-256：`86449DB2A3A65E9AC73F7B8BA08D7D83FC9434ECBF2C9ACCBC3DD8953240A9BF`。
+
+---
+
 ## 0.33.0 — 2026-11-19
 
 **类型**：A 路线继续下沉（环境代谢计算）+ C++ 源码与 DLL 入库（用户决策：可回溯）。**3000 细胞全 tick 230.2→43.9ms（5.25×），8ms 目标仍未达标**，如实记录。

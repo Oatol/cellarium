@@ -62,6 +62,9 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/BatchRenderProbe.gd",
 	"res://tools/NativeParityProbe.gd",
 	"res://tools/MetabolismBreakdownProbe.gd",
+	"res://tools/MetabolismHotspotsParityProbe.gd",
+	"res://tools/PhysicsStepParityProbe.gd",
+	"res://tools/DenseClusterProbe.gd",
 ]
 
 func _initialize() -> void:
@@ -2635,6 +2638,27 @@ func _check_multicellular_cooperation() -> bool:
 	var tick_core: Node = instance.get_node("Simulation/TickCore")
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
 	var cells: RefCounted = manager.get("cells") as RefCounted
+	# v0.34.0：默认演示已改为 M1 光合自分裂；本项专门验证 5 模式分化协作渲染，
+	# 因此显式把 org 0 的基因组换成旧的 5 模式演示体（Genome.demo_modes 原样保留）。
+	var gs: Script = load("res://scripts/core/data/Genome.gd") as Script
+	var demo_genome: RefCounted = gs.new() as RefCounted
+	demo_genome.set("flags", int(gs.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+		| int(gs.get_script_constant_map().get("FLAG_GLUE_LINKS", 1)))
+	demo_genome.set("division_mass", 0.05)
+	demo_genome.set("max_divisions", 3)
+	demo_genome.set("max_cells_per_organism", 4)
+	demo_genome.set("child_types", PackedByteArray([2, 4, 5, 10]))
+	demo_genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
+	var demo_modes_fixed: Array[Dictionary] = []
+	for mode_variant in gs.call("demo_modes"):
+		var mode: Dictionary = (mode_variant as Dictionary).duplicate(true)
+		mode["make_glue"] = true
+		mode["child1_glue"] = true
+		mode["child2_glue"] = true
+		mode["max_connections"] = 8
+		demo_modes_fixed.append(mode)
+	demo_genome.call("set_modes", demo_modes_fixed)
+	manager.get("genomes")[0] = demo_genome
 	tick_core.set("running", true)
 	tick_core.call("clear_carry")
 	# v0.17.0 演示体改为多模式基因驱动：无头快验临时把分裂 cooldown 降为 1 tick。
@@ -2653,6 +2677,7 @@ func _check_multicellular_cooperation() -> bool:
 			continue
 		alive_count += 1
 		type_set[int(cell_type[cell_index])] = true
+	print("SmokeTest: demo development alive=%d links=%d types=%s" % [alive_count, link_a.size(), str(type_set)])
 	if alive_count != 4 or link_a.size() != 3:
 		push_error("SmokeTest: demo multicellular organism did not develop 4 cells / 3 links")
 		instance.queue_free(); return false
@@ -2944,7 +2969,8 @@ func _check_multicell_editor() -> bool:
 	if (int(draft_ref.get("flags")) & gene_flag) == 0 or (int(draft_ref.get("flags")) & glue_flag) == 0:
 		push_error("SmokeTest: default draft must be gene mode with adhesin")
 		instance.queue_free(); return false
-	if absf(float(draft_ref.get("division_mass")) - 1.0) > 0.001 or int(draft_ref.get("max_divisions")) != 3:
+	# v0.34.0：默认草案改为 M1 光合（division_mass=0.05，真实能量上限下可分裂）。
+	if absf(float(draft_ref.get("division_mass")) - 0.05) > 0.001 or int(draft_ref.get("max_divisions")) != 3:
 		push_error("SmokeTest: default division mass / max divisions wrong")
 		instance.queue_free(); return false
 	editor.call("_on_macro_value_changed", 2.5, "division_mass")
@@ -4032,9 +4058,13 @@ func _check_v0170_mode_editor_and_preview() -> bool:
 	root.add_child(dev)
 	await process_frame
 	var draft_ref: RefCounted = dev.get("draft") as RefCounted
+	# v0.34.0：默认草案已是单模式 M1 光合自分裂；本项测多模式切换，显式加载 5 模式演示体。
+	dev.set("_modes", (load("res://scripts/core/data/Genome.gd") as Script).call("demo_modes"))
+	dev.call("select_mode", 0)
+	await process_frame
 	var modes: Array = dev.call("get_modes") as Array
 	if modes.size() < 2:
-		push_error("SmokeTest: default genome must contain multiple modes")
+		push_error("SmokeTest: demo genome must contain multiple modes")
 		dev.queue_free(); return false
 	var first: Dictionary = modes[0] as Dictionary
 	if int(first.get("child1_mode", -1)) < 0 or int(first.get("child2_mode", -1)) < 0 \
@@ -4112,6 +4142,9 @@ func _check_v0170_mode_remove() -> bool:
 	var dev: Node = dev_scene.instantiate()
 	root.add_child(dev)
 	await process_frame
+	# v0.34.0：默认单模式；本项测多槽删除，先补到 5 模式再逐次删。
+	while (dev.call("get_modes") as Array).size() < 5:
+		dev.call("_on_add_mode")
 	var before: int = (dev.call("get_modes") as Array).size()
 	if before <= 1:
 		push_error("SmokeTest: remove-mode check needs multiple modes")

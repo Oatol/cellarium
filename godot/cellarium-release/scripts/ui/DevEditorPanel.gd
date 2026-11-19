@@ -114,24 +114,25 @@ func _reset_draft() -> void:
 	draft.set("loci", PackedByteArray())
 	draft.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
 	draft.call("set_development_program", default_dev_program())
-	# v0.17.0：默认 5 模式链接体；顶层字段仍保留，供 v0.14–v0.16 旧存档/命令兼容。
-	_modes = GENOME_SCRIPT.call("demo_modes") as Array[Dictionary]
+	# v0.34.0：默认草案 = M1 光合自分裂单模式（保黏附、无分裂次数限制）。
+	# 旧的 5 模式分化演示体仍保留在 Genome.demo_modes()，供回归测试与手动对比使用。
+	_modes = GENOME_SCRIPT.call("solo_photo_modes") as Array[Dictionary]
 	_selected_mode = 0
 	_macro_draft = default_macro_draft()
 	_sync_macro_to_draft()
 	_selected_instruction = 0
 
 static func default_macro_draft() -> Dictionary:
-	var modes: Array = GENOME_SCRIPT.call("demo_modes") as Array
+	var modes: Array = GENOME_SCRIPT.call("solo_photo_modes") as Array
 	var draft_value: Dictionary = (modes[0] as Dictionary).duplicate(true)
 	# 顶层 max_divisions 是个体细胞数上限；每个模式的层数用 mode_max_divisions 单独编辑。
 	draft_value["max_divisions"] = 3
-	draft_value["division_mass"] = 1.0
-	draft_value["mode_max_divisions"] = int(draft_value.get("max_divisions", 1))
-	# v0.18.0：新草案默认无限个体规模；连接阈值按 Cell Lab Gene.u[9] 风格默认 4；端粒无限。
+	# v0.34.0：M1 光合自分裂——保黏附、无连接抑制、无限端粒、0.05 分裂质量。
 	draft_value["max_cells_per_organism"] = -1
-	draft_value["link_division_limit"] = 4
+	draft_value["link_division_limit"] = -1
 	draft_value["telomere"] = -1
+	draft_value["division_mass"] = 0.05
+	draft_value["mode_max_divisions"] = int(GENOME_SCRIPT.get_script_constant_map().get("MAX_GENE_DIVISIONS", 8))
 	draft_value["child3"] = 4
 	draft_value["child4"] = 10
 	draft_value["child3_angle"] = 0.5
@@ -147,7 +148,7 @@ static func default_dev_program() -> Array[Dictionary]:
 static func gene_help_text() -> String:
 	return (
 		"基因驱动发育（模仿 Cell Lab Macro，无指令序列）\n"
-		+ "① 一个基因组由多个「模式」组成（左栏列表，默认 5 个）。每个模式独立保存细胞类型、行为、两个子代、连接/镜像/角度、分裂质量与特殊控制。\n"
+		+ "① 一个基因组由多个「模式」组成（左栏列表，默认 1 个 M1 光合自分裂模式）。每个模式独立保存细胞类型、行为、两个子代、连接/镜像/角度、分裂质量与特殊控制。\n"
 		+ "② 分裂即分化：母细胞变成一个子代模式，新细胞是另一子代模式；每个模式只选择「子代 1 / 子代 2」。\n"
 		+ "③ 发育预览里的细胞可点击，直接跳到它所属模式继续编辑。\n"
 		+ "④ 连接由逐模式的黏附素与保留黏附素决定；连接传递率让相连细胞按能量差守恒转移，生态报告会显示转出/转入。\n"
@@ -685,9 +686,8 @@ func _on_add_mode() -> void:
 	if _modes.size() >= maximum:
 		return
 	_commit_current_mode()
-	var created: Dictionary = GENOME_SCRIPT.call("normalized_mode", {}, _modes.size())
-	created["link_division_limit"] = 4
-	created["telomere"] = -1
+	var created: Dictionary = GENOME_SCRIPT.call("default_mode", _modes.size())
+	created["name"] = "M%d_Photo" % (_modes.size() + 1)
 	_modes.append(created)
 	_load_mode(_modes.size() - 1, false)
 	_set_macro_status("mode")

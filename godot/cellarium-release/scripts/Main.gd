@@ -58,15 +58,14 @@ func _ready() -> void:
 		var genome_script: Script = load("res://scripts/core/data/Genome.gd") as Script
 		var genome: RefCounted = genome_script.new() as RefCounted
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))
-		# v0.17.0 默认演示：5 个模式槽按「分裂即分化」生成 4 细胞/3 黏附连接，
-		# 不再使用旧的 9 条 dev_program；每个模式自带两子代与连接传递率。
-		genome.set("flags", int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2)))
+		# v0.34.0 默认演示：M1 光合自分裂集群——保黏附、无分裂次数限制。
+		# 旧的 5 模式分化演示体仍在 Genome.demo_modes() 供回归测试/手动对比。
+		genome.set("flags", int(genome_script.get_script_constant_map().get("FLAG_GENE_MODE", 2))
+			| int(genome_script.get_script_constant_map().get("FLAG_GLUE_LINKS", 1)))
 		genome.set("division_mass", 0.05)
-		genome.set("max_divisions", 3)
-		genome.set("max_cells_per_organism", 4)
-		genome.set("child_types", PackedByteArray([2, 4, 5, 10]))
-		genome.set("split_angles", PackedByteArray([0, 64, 128, 192]))
-		genome.call("set_modes", genome_script.call("demo_modes"))
+		genome.set("max_divisions", int(genome_script.get_script_constant_map().get("MAX_GENE_DIVISIONS", 8)))
+		genome.set("max_cells_per_organism", int(genome_script.get_script_constant_map().get("UNLIMITED_CELLS", -1)))
+		genome.call("set_modes", genome_script.call("solo_photo_modes"))
 		var org_id: int = int(organism_manager.call("register_zygote", 0, 0, -1, genome, Vector2(250, 250), 0.8, 0))
 		if org_id >= 0 and status_label != null:
 			status_label.text = "cellarium | tick 0 | demo multicellular organism"

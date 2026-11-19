@@ -1298,3 +1298,53 @@ GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 1
 3000 细胞 5.25× 全 tick；`metab_env` 20.42→5.60ms（3.64×）。双工程 240 tick state hash 仍与 v0.31/v0.32 逐位相同（1356695503）。新分布里 `metab_lifecycle` 7.15ms（34.9%）升为第一大头，`metab_env` 5.60ms（27.4%）次之。
 
 **43.9ms 仍远高于 8ms 目标，`cpu_budget_met=false`（3000 档），不表述达标**。1000 档首次达到预算。用户本轮另明确要求把 C++ 源码与 DLL 入库以便回溯，见 `native/README.md`：撤销「二进制不入库」约定，第三方 godot-cpp 与引擎导出的 `extension_api.json` 仍不入库，但记录 master commit 与 API JSON SHA-256 保证可复现。
+
+## 39. v0.34.0 M1 自分裂场景诊断与代谢/物理剩余热点下沉（2026-11-20）
+
+### 39.1 用户截图「512 个体、一倍速 TPS 6」的真实根因
+
+先把测试口径改为用户指定的 **M1 光合自分裂、保黏附、无分裂次数限制**（`Genome.solo_photo_modes()` / `default_mode()`，默认编辑器草案与启动演示体同步）。`tools/DenseClusterProbe.gd` 复现结果：
+
+- 512 个初始个体在 40 tick 内增殖到 **1024 细胞**。
+- 40 tick 均值：GDScript 全 tick **126.1ms**，native **77.6ms**；与截图 TPS 6 同量级。
+- native 已把 behavior 18.3→5.3ms、physics 35.5→3.9ms 降下来，但 metabolism 仍 **69.9→66.0ms**。
+- metabolism 内部：`metab_lifecycle` 33.2ms、`metab_radius` 15.1ms、`metab_rates` 14.4ms 几乎不受既有 native 覆盖影响。
+
+**结论**：不是「GDScript 天生慢」一句话可以解释，而是三个因素叠加——用户场景每 300 tick 细胞翻倍；既有 native 只覆盖 behavior/physics；metabolism 的 lifecycle/radius/rates 仍在逐细胞调用 `Genome.get_mode()` 与脚本函数。Cell Lab 同量级流畅的原因之一正是这些路径都已是固定数组上的原生循环。
+
+### 39.2 新增下沉边界
+
+- `CellMetabolism.compute_transfer_rates()`：按每 tick 一次的 per-organism genome cache 展开逐细胞 transfer_rate，替代逐细胞 `Genome.get_mode()`。
+- `CellMetabolism.compute_energy_radius_scales()`：完整复刻 `_apply_energy_radius_relaxation()` 与 `CellArray.set_energy_radius_scale()` 的 double 运算、clamp 与 float32 写回；返回最终 `energy_scales` / `radius_scales`。
+- `CellMetabolism.select_lifecycle_candidates()`：只做纯读筛选，输出升序 `candidates` / `grace` 索引；真正分裂、死亡、连接重分配、账本副作用仍在 GDScript 原顺序执行。
+- `CellSpatial.step_verlet_and_links()`：复刻 `CellPhysics.step()` + `_solve_links()`，Verlet 与 2 轮连接约束全部 double 中间值、写回 float32。
+- genome cache 是只读派生，不进 hash/存档；`_apply_gene_payload()`、`register_zygote()`、INJECT_GENOME、DEV_FORCE_MUTATE 处显式失效。
+
+### 39.3 逐位闸门
+
+- `tools/MetabolismHotspotsParityProbe.gd`：1905 项直接对照（rates / energy_scales / radius_scales / candidates / grace），`failures=0`。
+- `tools/PhysicsStepParityProbe.gd`：2000 项位置/旧位置对照，`failures=0`。
+- `tools/NativeParityProbe.gd` 扩展两场景：legacy 240 tick 与 **M1 自分裂 700 tick（tick 2/302/602 实际发生 8→16→32→64 细胞倍增）**，所有检查点 GD/CPP state hash 与细胞数逐位一致；legacy tick=240 仍为 **1356695503**。
+- `SmokeTest: SCRIPTS=62 FAILURES=0`；冻结边界（GNP1、tick 阶段顺序、1/60 步长、单帧 12 tick 上限、CommandBus、五通道场 schema、存档 schema v8、状态 hash 算法）全部未改。
+
+### 39.4 实测与诚实结论
+
+同会话 A/B（1024 细胞，40 tick 均值；机器负载导致两轮绝对值不同，只比较同轮内部）：
+
+| 版本 / 场景 | 全 tick GD→CPP | metabolism GD→CPP | 关键子项 native |
+| --- | --- | --- | --- |
+| v0.34 下沉前 | 126.1 → 77.6 ms | 69.9 → 66.0 ms | rates 14.5 / radius 14.4 / lifecycle 33.6 ms |
+| v0.34 代谢下沉后 | 125.5 → 15.8 ms | 69.7 → 4.9 ms | rates 0.04 / radius 0.08 / lifecycle 0.08 ms |
+| v0.34 物理下沉后复跑 | 143.7 → **18.7 ms** | 81.2 → 5.9 ms | behavior 6.7 / physics 4.3 / signal 1.7 / field 1.4 ms |
+
+**metabolism 本体已从 66ms 降到约 5–6ms，三项热点均降两个数量级；M1 自分裂场景全 tick 约 16–19ms，仍高于 8ms 目标，不表述达标。** 下一瓶颈转为 behavior 5–7ms、physics 4ms、signal 1–2ms、字段 tick 1–2ms 及框架开销；后续若继续 A 路线，应优先做 behavior `apply_outputs_flat` / signal 分泌批处理的逐位下沉，再决定是否上 C 路线（RenderingServer/GPU）。
+
+固定细胞数基准同时复跑（同会话 A/B，120 tick）：
+
+| 档位 | 全 tick GD→CPP | metabolism GD→CPP | budget |
+| --- | --- | --- | --- |
+| 300 | 15.5 → 3.0 ms | 3.8 → 1.2 ms | true |
+| 1000 | 59.1 → 9.7 ms | 15.0 → 3.8 ms | true |
+| 3000 | 240.9 → **27.9 ms** | 64.7 → 9.7 ms | false |
+
+3000 档从 v0.33 的 43.9ms 再降到 27.9ms（含机器负载差异，按本轮 A/B 看为 8.64×）；**仍未达到 8ms，不表述达标**。

@@ -34,4 +34,13 @@ public:
 			const PackedFloat32Array &radius_scales,
 			const PackedFloat32Array &stiffnesses, double cell_radius,
 			double cell_size, int iterations);
+
+	// v0.34.0: exact port of CellPhysics.step() Verlet integration plus
+	// _solve_links() constraint iterations. Side-effect-free; returns new arrays.
+	Dictionary step_verlet_and_links(const PackedFloat32Array &pos_x,
+			const PackedFloat32Array &pos_y, const PackedFloat32Array &prev_x,
+			const PackedFloat32Array &prev_y, const PackedByteArray &alive,
+			const PackedInt32Array &link_a, const PackedInt32Array &link_b,
+			const PackedFloat32Array &rest_lengths, double damping,
+			int constraint_iterations);
 };
