@@ -23,6 +23,8 @@ func _initialize() -> void:
 		manager.environment_manager = environment
 		manager.dish_center = Vector2.ZERO
 		manager.dish_radius = 4000.0
+		# v0.31.0：CELLARIUM_NATIVE=1 时走 C++ 碰撞，用于同口径对比端到端收益。
+		manager.native_spatial_enabled = OS.get_environment("CELLARIUM_NATIVE") == "1"
 		manager._ready()
 		var genome: RefCounted = genome_script.new() as RefCounted
 		genome.set("traits", PackedByteArray([0, 0, 0, 0, 0, 0, 0, 0]))

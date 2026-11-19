@@ -62,6 +62,22 @@ const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT"
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
 var _sim_tick: int = 0
+## v0.31.0 原生加速开关（GDExtension CellSpatial）。默认 false = 纯 GDScript，
+## 与 v0.30.0 状态 hash 逐位一致；置 true 走 C++ 碰撞/邻域，需先通过 state hash 对照。
+## DLL 缺失或类未注册时自动回退 GDScript，不会导致启动失败。
+@export var native_spatial_enabled: bool = false
+var _native_spatial: RefCounted = null
+var _native_spatial_checked: bool = false
+
+func _get_native_spatial() -> RefCounted:
+	if not native_spatial_enabled:
+		return null
+	if not _native_spatial_checked:
+		_native_spatial_checked = true
+		if ClassDB.class_exists("CellSpatial"):
+			_native_spatial = ClassDB.instantiate("CellSpatial") as RefCounted
+	return _native_spatial
+
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
 ## v0.20.0：分裂调度改为逐细胞 CellArray.cell_division_tick；旧的按个体串行字典已移除，
@@ -197,7 +213,17 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
 	CELL_PHYSICS_SCRIPT.call("step", cells, dt)
-	CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius, cells.get("cell_radius_scale"), cells.get("cell_stiffness"))
+	var native_spatial: RefCounted = _get_native_spatial()
+	if native_spatial != null:
+		# v0.31.0：C++ 碰撞求解，逐位等价已由 spatial_parity_probe 验证（SPATIAL_HASH_CELL_SIZE=64）。
+		var coll: Dictionary = native_spatial.call("resolve_collisions",
+			cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"),
+			cells.get("cell_radius_scale"), cells.get("cell_stiffness"),
+			cell_radius, 64.0, 6)
+		cells.set("cell_pos_x", coll["pos_x"])
+		cells.set("cell_pos_y", coll["pos_y"])
+	else:
+		CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius, cells.get("cell_radius_scale"), cells.get("cell_stiffness"))
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping, cells.get("cell_radius_scale"), cell_radius)
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")

@@ -1202,3 +1202,30 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 - 逐位对照（`spatial_parity_probe.gd`，N=1500 密集重叠）：邻域 CSR 657,380 索引全等；collect_inputs 12,000 float32 全等；碰撞 73,620 次修正、全部位置逐位相等。`SPATIAL_PARITY: OK`。
 - 微基准（`spatial_bench.gd`，N=3000 极端密集、30 次）：邻域 CSR 105.8→45.4ms（2.33×）、碰撞 846.6→85.9ms（9.86×）、collect_inputs 351.8→28.4ms（12.38×）。
 - **诚实评估**：上述是孤立极端场景微基准，不等于端到端 tick 收益；邻域 CSR 仅 2.33×（瓶颈 `unordered_map`+逐细胞 `std::sort`，可再优化）。**接入发布工程前必须跑完整 `BenchTest` 全 tick 与 state hash 对照**，不可据此宣称达标。原型与探针都在 D 盘工具区，未改发布工程、未接 DLL。
+
+## 36. v0.31.0 碰撞下沉接入发布工程：端到端验证（2026-11-19）
+
+### 36.1 固定桶数组优化（学 Cell Lab，但不照抄截断）
+
+把 `CellSpatial` 的空间哈希从 `unordered_map` 换成 Cell Lab 式**固定桶数组 + CSR**（先扫描坐标边界定网格 W×H，一次遍历填 counts、前缀和 offsets、二次遍历填 data；网格过大时回退 map 防病态）。桶内保持插入序（cell_index 升序）。**关键差异**：不加 Cell Lab 的 203 容量上限——那会截断邻居、破坏与 GDScript 的逐位等价；本项目约束是「机制同构但结果与旧路径逐位一致」。固定桶版逐位等价仍全过（`SPATIAL_PARITY: OK`）。邻域 CSR 加速比 2.33×→2.26× 基本不变，证明瓶颈是每细胞 `std::sort(found)`（极端密集场景 438 邻居/细胞），不是哈希；保留固定桶因其内存更可控、无每 tick 哈希分配。
+
+### 36.2 接入边界与开关
+
+- `OrganismManager.native_spatial_enabled`（`@export`，默认 **false**）：false = 纯 GDScript（v0.30 逐位一致）；true = C++ 碰撞。DLL 缺失或 `ClassDB.class_exists("CellSpatial")` 为假时自动回退，不导致启动失败。
+- `bin/cellarium_native.gdextension` + `bin/windows/cellarium_native.windows.template_debug.x86_64.dll` 放双工程；`.godot/extension_list.cfg` 由 `--editor --quit` 扫描生成（不入库）。
+- `BenchTest.gd` 读 `CELLARIUM_NATIVE=1` 环境变量切换，同口径 A/B 对比。
+- 首个下沉对象只选碰撞（收益最大 9.4×、最独立、风险最低）；神经/CSR/collect_inputs 原型保留待后续。
+
+### 36.3 端到端验证结果
+
+- **state hash 逐位对照**（`NativeParityProbe.gd`，40 个密集合子、240 tick、检查点 1/10/60/120/240）：发布工程与 D 盘工程均 `NATIVE_E2E: OK`，两条路径 `get_state_hash()` 逐位相同（tick=240 时同为 1356695503），organism 数一致。证明 C++ 碰撞下沉后完整模拟确定性不变。
+- 双工程 `SmokeTest: SCRIPTS=57 FAILURES=0`、`PreviewReplica`/`DivisionAlignment`/`BatchRender` 三探针 `FAILURES=0`。新增探针已登记 manifest。
+- **端到端基准**（同会话 A/B，`BenchTest.gd`）：
+
+| 档位 | physics gd→cpp | 全 tick gd→cpp |
+| --- | --- | --- |
+| 300 | 5.26 → 0.50 ms | 12.8 → 7.9 ms（budget_met=true） |
+| 1000 | 18.6 → 1.84 ms | 45.0 → 27.6 ms |
+| 3000 | 54.9 → 5.81 ms | 128.0 → **84.9 ms** |
+
+- **诚实结论**：碰撞阶段实打实 9.4×，3000 细胞全 tick 1.5×（128→84.9ms）。physics 不再是瓶颈（5.8ms），behavior(43ms) + metabolism(31ms) 成新大头。**84.9ms 仍远未达 8ms 目标，`cpu_budget_met=false`，不表述为达标**。下一步收益在 collect_inputs（12.4× 已验证）与环境构建，需在守住 state hash 对照的前提下继续下沉；此前机器负载波动使 GDScript 基线在 128–204ms 间浮动，故所有结论以同会话 A/B 对比为准。

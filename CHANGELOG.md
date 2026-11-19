@@ -4,6 +4,35 @@
 
 ---
 
+## 0.31.0 — 2026-11-19
+
+**类型**：物理性能专项第二阶段 — GDExtension/C++ 碰撞下沉（Cell Lab 固定桶同构，目标 3000 细胞流畅）
+**触发**：用户专项「学 Cell Lab 用固定桶数组 + DLL 接入发布工程跑端到端验证」。**碰撞阶段 9.4×、全 tick 1.5×，8ms 目标仍未达标**，如实记录。
+
+### 工具链（无 godot-cpp 4.7 tag 的破解）
+
+- Godot `4.7.2.stable.official.ed1daf0bf` 用 `godot --headless --dump-extension-api` 自导出 `extension_api.json`（6.9MB）；godot-cpp master 用 `scons custom_api_file=extension_api.json` + `api_version=4.7` 生成绑定，不依赖官方 tag。MSVC14.44 + SCons 自动探测编译 DLL。`.gdextension` 精简为单 `windows.x86_64`，避免 20+ 平台路径致 headless 校验崩溃。
+- DLL 与 `.gdextension` 放 `bin/` 并 gitignore（二进制/第三方源码不入库）；`.godot/extension_list.cfg` 由 `--editor --quit` 扫描生成，不入库。
+
+### 实现
+
+- 新增 C++ `CellSpatial`（`evaluate` 之外）：`build_neighbor_csr` / `collect_inputs_batch` / `resolve_collisions`。固定桶数组（CSR offsets+data）+ 前缀和，替代 `unordered_map`；**不加 Cell Lab 203 容量上限**（会截断邻居、破坏逐位等价）。碰撞对遍历顺序、浮点语义（GDScript float=double、数组 float32）逐位复现。
+- `OrganismManager.native_spatial_enabled`（`@export`，默认 false）：false = 纯 GDScript（v0.30 逐位一致），true = C++ 碰撞；DLL 缺失自动回退。`BenchTest` 用 `CELLARIUM_NATIVE=1` 同口径 A/B。
+- 冻结边界全部不动：GNP1、tick 顺序、1/60、单帧 12 tick、CommandBus、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 验证（程序化无头，双工程）
+
+- 逐位等价：`neural_parity_probe`（12000 float32 全等）、`spatial_parity_probe`（邻域 657380 索引 / collect_inputs 12000 float32 / 碰撞 73620 次修正全等）。
+- 端到端 `NativeParityProbe.gd`（40 密集合子、240 tick、5 检查点）：双工程 state hash 逐位一致（tick=240 同为 1356695503）。已登记 manifest。
+- 双工程 `SCRIPTS=57 FAILURES=0`，三探针 `FAILURES=0`。
+
+### 实测与诚实结论
+
+- 同会话 A/B 基准：3000 细胞 physics 54.9→5.81ms（9.4×）、全 tick 128.0→84.9ms（1.5×）；300 细胞全 tick 12.8→7.9ms（budget_met=true）。
+- **未达标**：84.9ms 远低于 8ms 目标，`cpu_budget_met=false`（3000 档）。physics 已非瓶颈，behavior(43ms)+metabolism(31ms) 成新大头；下一步下沉 collect_inputs（12.4× 已验证）与环境构建。不把该数字表述为达标。
+
+---
+
 ## 0.30.0 — 2026-11-19
 
 **类型**：物理性能专项 — SoA 计算路径 + 单 CanvasItem 批渲染对齐 Cell Lab（目标 3000 细胞流畅）

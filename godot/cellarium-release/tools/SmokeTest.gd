@@ -60,6 +60,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/DivisionAlignmentProbe.gd",
 	"res://tools/PerfBreakdownProbe.gd",
 	"res://tools/BatchRenderProbe.gd",
+	"res://tools/NativeParityProbe.gd",
 ]
 
 func _initialize() -> void:
