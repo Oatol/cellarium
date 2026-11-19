@@ -1261,3 +1261,40 @@ v0.31 §35.4 的三段 C++ 原型已逐位验证但未接入。本版把其中�
 GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 120 tick；表内为单 tick 均值，口径一致。
 
 **结论**：behavior 5.77×、physics 14.9×，全 tick 3.38×；但 **68.6ms 仍远高于 8ms 目标，`cpu_budget_met=false`，不表述为达标**。排序已翻转：metabolism 43.0ms 成第一大头（未下沉），其次 behavior 11.8ms、signal 7.2ms。按用户「先攻 collect_inputs + 环境构建 + 碰撞，根据结果再考虑」的口径，此处停下汇报结果，代谢下沉是否启动由用户决定。机器负载波动使 GDScript 基线在 128–232ms 间浮动，所有收益结论一律取同会话 A/B。
+
+## 38. v0.33.0 代谢热点下沉与源码入库（2026-11-19）
+
+### 38.1 热点定位（不靠猜）
+
+`tools/MetabolismBreakdownProbe.gd` 在 3000 细胞 / native 路径下把 metabolism 43ms 细分为 7 段（`PerfProbe` 自定义 label，仅诊断、不进 hash 也不进 STAGES 汇总）：
+
+| 子阶段 | GDScript | 占比 |
+| --- | --- | --- |
+| `metab_env` | 20.42 ms | 47.1% |
+| `metab_lifecycle` | 11.31 ms | 26.1% |
+| `metab_fields` | 3.25 ms | 7.5% |
+| `metab_rates` | 3.08 ms | 7.1% |
+| `metab_radius` | 3.08 ms | 7.1% |
+| `metab_base` | 1.90 ms | 4.4% |
+| `metab_links` | 0.24 ms | 0.5% |
+
+下沉目标取 `metab_env`：占比最大，且内部是纯确定性算术（`RespirationRules.evaluate` 的分支、三类细胞摄食增益、运动能耗、毒性标志），可以整段搬走而保留 GDScript 侧的场消耗/账本/死亡副作用顺序。
+
+### 38.2 C++ 实现与逐位等价
+
+- 新增 `CellMetabolism.compute_environment_batch()`（工作区 `native/src/cell_metabolism.cpp`）：按 `OrganismManager._apply_environment_metabolism_ranges()` 原运算顺序复现，全部用 double；`RespirationRules.evaluate` 的四个常量与分支（厌氧/需氧/兼性、氧阈值 0.08、效率 1.0/3.0/0.5/2.0、合法性区间）内联复刻，避免 GDExtension 依赖 GDScript 资源。
+- **中间值传回用 `PackedFloat64Array`**：`food_gains` / `movement_costs` 必须是 double 数组；若用 `PackedFloat32Array`，GDScript 续算 `consume_nutrient(requested)` 时就会多一次 float32 舍入，state hash 必漂移。`toxic_flags` 用 `PackedByteArray`。
+- 副作用仍留在 GDScript 原位置：`consume_nutrient` / `consume_signal`、`energy_flow` 记账、`energy_ledger.record`、毒性伤害与个体死亡判定，顺序与旧路径逐字相同。
+- `metabolism_parity_probe.gd`：1354 活细胞随机对照（含非法 respiration、死细胞、`sample_index=-1`、四种 cell type），`food_gain` / `movement_cost` / `toxic` 全等，`max_abs_diff=0`。
+
+### 38.3 实测与诚实结论
+
+| 档位 | 全 tick gd→cpp | metabolism gd→cpp | budget |
+| --- | --- | --- | --- |
+| 300 | 11.8 → 3.9 ms | 2.8 → 2.1 ms | true |
+| 1000 | 40.8 → 13.9 ms | 9.7 → 7.7 ms | **true** |
+| 3000 | 230.2 → **43.9 ms** | 61.7 → 23.4 ms | false |
+
+3000 细胞 5.25× 全 tick；`metab_env` 20.42→5.60ms（3.64×）。双工程 240 tick state hash 仍与 v0.31/v0.32 逐位相同（1356695503）。新分布里 `metab_lifecycle` 7.15ms（34.9%）升为第一大头，`metab_env` 5.60ms（27.4%）次之。
+
+**43.9ms 仍远高于 8ms 目标，`cpu_budget_met=false`（3000 档），不表述达标**。1000 档首次达到预算。用户本轮另明确要求把 C++ 源码与 DLL 入库以便回溯，见 `native/README.md`：撤销「二进制不入库」约定，第三方 godot-cpp 与引擎导出的 `extension_api.json` 仍不入库，但记录 master commit 与 API JSON SHA-256 保证可复现。

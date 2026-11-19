@@ -43,8 +43,16 @@ Thumbs.db
 *.swp
 *~
 
-# GDExtension build artifacts (v0.31+): never publish compiled binaries / third-party sources
+# GDExtension: version C++ source, config and shipped DLL for traceability;
+# keep only compiler intermediates / third-party checkout local.
 *.dll
+!godot/cellarium-release/bin/windows/cellarium_native.windows.template_debug.x86_64.dll
 *.gdextension
-godot/cellarium-release/bin/
+!godot/cellarium-release/bin/cellarium_native.gdextension
+*.obj
+*.exp
+*.lib
+.sconsign.dblite
+native/godot-cpp/
+native/build/
 godot/cellarium-release/addons/*/bin/

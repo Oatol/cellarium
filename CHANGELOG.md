@@ -4,6 +4,43 @@
 
 ---
 
+## 0.33.0 — 2026-11-19
+
+**类型**：A 路线继续下沉（环境代谢计算）+ C++ 源码与 DLL 入库（用户决策：可回溯）。**3000 细胞全 tick 230.2→43.9ms（5.25×），8ms 目标仍未达标**，如实记录。
+
+### 入库决策变更（撤销 v0.31 约定）
+
+- 用户明确：「C++ 源码与 DLL 应该入库啊，不然以后修改后怎么回溯版本」。撤销 v0.31/v0.32「二进制不入库」约定。
+- 新增 `native/`：`src/`（C++ 源码）、`project/`（逐位探针与微基准）、`SConstruct` / `methods.py`、`README.md`（构建步骤、工具链锚点、逐位闸门、确定性铁律）。
+- 入库运行产物：`godot/cellarium-release/bin/cellarium_native.gdextension` 与 `bin/windows/cellarium_native.windows.template_debug.x86_64.dll`。`.gitignore` 改为只排除编译中间产物（`*.obj` / `*.exp` / `*.lib` / `.sconsign.dblite`）与本地 `native/godot-cpp/`，DLL 与配置走白名单放行。
+- 第三方 godot-cpp 源码与 6.9 MB `extension_api.json` 仍不入库；`native/README.md` 记录 master commit `24b9df7a88d40bcaf1f157703d4220185cb71fbf`、API JSON SHA-256 与导出命令，保证可复现。
+
+### 实现
+
+- 新增 C++ `CellMetabolism.compute_environment_batch()`：把环境代谢的纯计算段（呼吸规则、三类摄食增益、运动能耗、毒性标志）整段下沉。中间值用 `PackedFloat64Array` 返回，避免多一次 float32 舍入破坏 state hash；副作用（场消耗、`energy_ledger.record`、毒性伤害、死亡判定）仍在 GDScript 按原顺序执行。
+- `OrganismManager` 新增 `_get_native_metabolism()` 与 `_apply_environment_metabolism_ranges()` 的 native 分支，DLL 缺失/类未注册回退原 GDScript 循环。
+- 新增 `tools/MetabolismBreakdownProbe.gd`（把 metabolism 细分为 7 个子阶段，仅埋点不写状态），登记 manifest（脚本 58→59）。
+- 冻结边界全部不动：GNP1、tick 阶段顺序、1/60 步长、单帧 12 tick 上限、CommandBus、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 验证（程序化无头，双工程）
+
+- `metabolism_parity_probe.gd`：1354 个活细胞逐位对照，`food_gain` / `movement_cost`（double）/`toxic` 全等，`max_abs_diff=0`；`neural_parity` / `spatial_parity` 回归全过。
+- 双工程 `NativeParityProbe` 240 tick / 5 检查点 `get_state_hash()` 逐位一致，tick=240 同为 **1356695503**（与 v0.31 / v0.32 逐位相同）。
+- 双工程 `SmokeTest: SCRIPTS=59 FAILURES=0`；`PreviewReplica` / `DivisionAlignment` / `BatchRender` / `NativeParity` 四探针全 `FAILURES=0`。
+
+### 实测与诚实结论
+
+| 档位 | 全 tick gd→cpp | metabolism gd→cpp | budget |
+| --- | --- | --- | --- |
+| 300 | 11.8 → 3.9 ms | 2.8 → 2.1 ms | true |
+| 1000 | 40.8 → 13.9 ms | 9.7 → 7.7 ms | **true** |
+| 3000 | 230.2 → **43.9 ms** | 61.7 → 23.4 ms | false |
+
+- 3000 细胞代谢子阶段（native）：`metab_lifecycle` 7.15ms（34.9%）、`metab_env` 5.60ms（27.4%，下沉前 20.4ms / 47.1%）、`metab_fields` 2.30ms、`metab_rates` 2.03ms、`metab_radius` 1.88ms、`metab_base` 1.36ms。
+- **未达标**：43.9ms 仍远高于 8ms 目标，`cpu_budget_met=false`（3000 档）。1000 档首次达到预算。新瓶颈为 `metab_lifecycle`（生命周期/分裂判定，7.15ms）与 behavior 9.9ms。不把该数字表述为达标。
+
+---
+
 ## 0.32.0 — 2026-11-19
 
 **类型**：物理性能专项第三阶段 — behavior 热路径原生下沉（邻域 CSR / 输入收集 / 神经推理）。**3000 细胞全 tick 232.0→68.6ms（3.38×），8ms 目标仍未达标**，如实记录。

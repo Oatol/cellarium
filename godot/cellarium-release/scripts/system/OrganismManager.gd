@@ -70,6 +70,8 @@ var _native_spatial: RefCounted = null
 var _native_spatial_checked: bool = false
 var _native_neural: RefCounted = null
 var _native_neural_checked: bool = false
+var _native_metabolism: RefCounted = null
+var _native_metabolism_checked: bool = false
 
 func _get_native_spatial() -> RefCounted:
 	if not native_spatial_enabled:
@@ -88,6 +90,15 @@ func _get_native_neural() -> RefCounted:
 		if ClassDB.class_exists("CellNeural"):
 			_native_neural = ClassDB.instantiate("CellNeural") as RefCounted
 	return _native_neural
+
+func _get_native_metabolism() -> RefCounted:
+	if not native_spatial_enabled:
+		return null
+	if not _native_metabolism_checked:
+		_native_metabolism_checked = true
+		if ClassDB.class_exists("CellMetabolism"):
+			_native_metabolism = ClassDB.instantiate("CellMetabolism") as RefCounted
+	return _native_metabolism
 
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
@@ -254,16 +265,31 @@ func advance_physics_tick(dt: float) -> void:
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping, cells.get("cell_radius_scale"), cell_radius)
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
+	# v0.33.0 诊断子阶段：仅埋点，不进 STAGES 汇总与状态 hash，用于定位下沉目标。
+	perf_probe.call("begin", "metab_fields")
 	if environment_manager != null:
 		environment_manager.call("begin_field_sampling_indexed", _field_sample_positions(), _field_sample_cell_indices())
+	perf_probe.call("end", "metab_fields")
 	# v0.17.0：按细胞所属模式的 transfer_rate 派生传递率；无 modes 的旧基因组保持 0，
 	# 因此 v0.14–v0.16 的确定性能量账本不被悄悄改写。
+	perf_probe.call("begin", "metab_rates")
 	var rates: PackedFloat32Array = _build_transfer_rates()
+	perf_probe.call("end", "metab_rates")
+	perf_probe.call("begin", "metab_links")
 	CELL_METABOLISM_SCRIPT.call("redistribute_link_energy", cells, rates, dt, _energy_flow)
+	perf_probe.call("end", "metab_links")
+	perf_probe.call("begin", "metab_base")
 	_apply_base_metabolism(dt)
+	perf_probe.call("end", "metab_base")
+	perf_probe.call("begin", "metab_env")
 	_apply_environment_metabolism(dt)
+	perf_probe.call("end", "metab_env")
+	perf_probe.call("begin", "metab_radius")
 	_apply_energy_radius_relaxation(dt)
+	perf_probe.call("end", "metab_radius")
+	perf_probe.call("begin", "metab_lifecycle")
 	_apply_autonomous_lifecycle()
+	perf_probe.call("end", "metab_lifecycle")
 	perf_probe.call("end", "metabolism")
 	perf_probe.call("begin", "predation")
 	_apply_predation(dt)
@@ -441,41 +467,74 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 	for org_id in genomes:
 		respiration_values[int(org_id)] = int(genomes[org_id].get("respiration"))
 		priority_values[int(org_id)] = clampf(float(genomes[org_id].get("nutrition_priority")), 0.0, 1.0)
-	for cell_index in range(energies.size()):
-		if alive[cell_index] == 0:
-			continue
-		var org_id: int = org_ids[cell_index]
-		var sample_index: int = int(sample_indices[cell_index]) if cell_index < sample_indices.size() else -1
-		var field_offset: int = sample_index * 5
-		var has_fields: bool = sample_index >= 0 and field_offset + 5 <= field_samples.size()
-		var oxygen: float = clampf(float(field_samples[field_offset + 2]), 0.0, 1.0) if has_fields else 0.0
-		var respiration: Dictionary = RESPIRATION_RULES_SCRIPT.call("evaluate", int(respiration_values[org_id]), oxygen, facultative_aerobic_efficiency)
-		var feeding_factor: float = 0.25 + 1.5 * float(priority_values[org_id])
-		var light_factor: float = 1.75 - 1.5 * float(priority_values[org_id])
-		var food_gain: float = 0.0
-		if types[cell_index] == CELL_TYPE_ZYGOTE:
-			food_gain = maxf(0.0, float(field_samples[field_offset])) * heterotrophic_intake_rate * feeding_factor * float(respiration.get("efficiency", 0.0)) * dt if has_fields else 0.0
-		elif types[cell_index] == CELL_TYPE_PHOTOCYTE:
-			food_gain = maxf(0.0, float(field_samples[field_offset + 3])) * photosynthetic_intake_rate * light_factor * dt if has_fields else 0.0
-		elif types[cell_index] == CELL_TYPE_NITROCYTE:
-			food_gain = maxf(0.0, float(field_samples[field_offset + 4])) * chemotrophic_intake_rate * feeding_factor * dt if has_fields else 0.0
-		if food_gain > 0.0:
-			var consumed: float = food_gain
+	var native_metabolism: RefCounted = _get_native_metabolism()
+	if native_metabolism != null:
+		# v0.33.0：纯计算段下沉 C++；副作用（consume / ledger / 死亡）顺序与 GDScript 原路径完全一致。
+		# 中间值用 PackedFloat64Array 保留 double，避免多一次 float32 舍入破坏 state hash。
+		var batch: Dictionary = native_metabolism.call("compute_environment_batch",
+			alive, types, org_ids, field_samples, sample_indices,
+			respiration_values, priority_values, cells.get("behavior_intents"),
+			dt, heterotrophic_intake_rate, photosynthetic_intake_rate,
+			chemotrophic_intake_rate, movement_energy_cost, facultative_aerobic_efficiency)
+		var food_gains: PackedFloat64Array = batch["food_gains"]
+		var movement_costs: PackedFloat64Array = batch["movement_costs"]
+		var toxic_flags: PackedByteArray = batch["toxic_flags"]
+		for cell_index in range(energies.size()):
+			if alive[cell_index] == 0:
+				continue
+			var org_id: int = org_ids[cell_index]
+			var food_gain: float = float(food_gains[cell_index])
+			if food_gain > 0.0:
+				var consumed: float = food_gain
+				if types[cell_index] == CELL_TYPE_ZYGOTE:
+					consumed = float(environment_manager.call("consume_nutrient", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
+				elif types[cell_index] == CELL_TYPE_NITROCYTE:
+					consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
+				energies[cell_index] += consumed
+				_energy_flow_add("production", cell_index, consumed)
+				if consumed > 0.0:
+					energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_ENV_TO_BIO, "E_env", "E_bio", consumed, "intake_type_%d" % int(types[cell_index]))
+			var movement_cost: float = float(movement_costs[cell_index])
+			energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
+			_energy_flow_add("self_cost", cell_index, movement_cost)
+			if toxic_flags[cell_index] != 0:
+				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
+	else:
+		for cell_index in range(energies.size()):
+			if alive[cell_index] == 0:
+				continue
+			var org_id: int = org_ids[cell_index]
+			var sample_index: int = int(sample_indices[cell_index]) if cell_index < sample_indices.size() else -1
+			var field_offset: int = sample_index * 5
+			var has_fields: bool = sample_index >= 0 and field_offset + 5 <= field_samples.size()
+			var oxygen: float = clampf(float(field_samples[field_offset + 2]), 0.0, 1.0) if has_fields else 0.0
+			var respiration: Dictionary = RESPIRATION_RULES_SCRIPT.call("evaluate", int(respiration_values[org_id]), oxygen, facultative_aerobic_efficiency)
+			var feeding_factor: float = 0.25 + 1.5 * float(priority_values[org_id])
+			var light_factor: float = 1.75 - 1.5 * float(priority_values[org_id])
+			var food_gain: float = 0.0
 			if types[cell_index] == CELL_TYPE_ZYGOTE:
-				consumed = float(environment_manager.call("consume_nutrient", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
+				food_gain = maxf(0.0, float(field_samples[field_offset])) * heterotrophic_intake_rate * feeding_factor * float(respiration.get("efficiency", 0.0)) * dt if has_fields else 0.0
+			elif types[cell_index] == CELL_TYPE_PHOTOCYTE:
+				food_gain = maxf(0.0, float(field_samples[field_offset + 3])) * photosynthetic_intake_rate * light_factor * dt if has_fields else 0.0
 			elif types[cell_index] == CELL_TYPE_NITROCYTE:
-				consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
-			energies[cell_index] += consumed
-			_energy_flow_add("production", cell_index, consumed)
-			if consumed > 0.0:
-				energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_ENV_TO_BIO, "E_env", "E_bio", consumed, "intake_type_%d" % int(types[cell_index]))
-		var intents: PackedFloat32Array = CELL_BEHAVIOR_SCRIPT.call("get_intents", cells, cell_index)
-		var movement: float = absf(float(intents[0]))
-		var movement_cost: float = movement_energy_cost * movement * movement * dt
-		energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
-		_energy_flow_add("self_cost", cell_index, movement_cost)
-		if bool(respiration.get("toxic", false)):
-			health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
+				food_gain = maxf(0.0, float(field_samples[field_offset + 4])) * chemotrophic_intake_rate * feeding_factor * dt if has_fields else 0.0
+			if food_gain > 0.0:
+				var consumed: float = food_gain
+				if types[cell_index] == CELL_TYPE_ZYGOTE:
+					consumed = float(environment_manager.call("consume_nutrient", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
+				elif types[cell_index] == CELL_TYPE_NITROCYTE:
+					consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
+				energies[cell_index] += consumed
+				_energy_flow_add("production", cell_index, consumed)
+				if consumed > 0.0:
+					energy_ledger.call("record", ENERGY_LEDGER_SCRIPT.ACTION_ENV_TO_BIO, "E_env", "E_bio", consumed, "intake_type_%d" % int(types[cell_index]))
+			var intents: PackedFloat32Array = CELL_BEHAVIOR_SCRIPT.call("get_intents", cells, cell_index)
+			var movement: float = absf(float(intents[0]))
+			var movement_cost: float = movement_energy_cost * movement * movement * dt
+			energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
+			_energy_flow_add("self_cost", cell_index, movement_cost)
+			if bool(respiration.get("toxic", false)):
+				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
 	organisms.set("org_health", health)
 	cells.set("cell_energy", energies)
 	for org_id in range(health.size() - 1, -1, -1):

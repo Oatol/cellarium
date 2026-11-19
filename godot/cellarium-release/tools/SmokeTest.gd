@@ -61,6 +61,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/PerfBreakdownProbe.gd",
 	"res://tools/BatchRenderProbe.gd",
 	"res://tools/NativeParityProbe.gd",
+	"res://tools/MetabolismBreakdownProbe.gd",
 ]
 
 func _initialize() -> void:
