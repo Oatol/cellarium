@@ -62,12 +62,14 @@ const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT"
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
 var _sim_tick: int = 0
-## v0.31.0 原生加速开关（GDExtension CellSpatial）。默认 false = 纯 GDScript，
-## 与 v0.30.0 状态 hash 逐位一致；置 true 走 C++ 碰撞/邻域，需先通过 state hash 对照。
-## DLL 缺失或类未注册时自动回退 GDScript，不会导致启动失败。
+## v0.31.0 原生加速开关（GDExtension CellSpatial / CellNeural）。默认 false = 纯 GDScript，
+## 与 v0.30.0 状态 hash 逐位一致；置 true 走 C++ 碰撞/邻域/输入收集/神经推理，
+## 需先通过 state hash 对照。DLL 缺失或类未注册时自动回退 GDScript，不会导致启动失败。
 @export var native_spatial_enabled: bool = false
 var _native_spatial: RefCounted = null
 var _native_spatial_checked: bool = false
+var _native_neural: RefCounted = null
+var _native_neural_checked: bool = false
 
 func _get_native_spatial() -> RefCounted:
 	if not native_spatial_enabled:
@@ -77,6 +79,15 @@ func _get_native_spatial() -> RefCounted:
 		if ClassDB.class_exists("CellSpatial"):
 			_native_spatial = ClassDB.instantiate("CellSpatial") as RefCounted
 	return _native_spatial
+
+func _get_native_neural() -> RefCounted:
+	if not native_spatial_enabled:
+		return null
+	if not _native_neural_checked:
+		_native_neural_checked = true
+		if ClassDB.class_exists("CellNeural"):
+			_native_neural = ClassDB.instantiate("CellNeural") as RefCounted
+	return _native_neural
 
 ## 行为热路径复用缓冲：避免每 tick 为每枚细胞分配输出数组（性能深化，不改变数学与顺序）。
 var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
@@ -202,11 +213,27 @@ func advance_physics_tick(dt: float) -> void:
 	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
 	perf_probe.call("begin", "behavior")
 	if update_neural:
+		var cell_count: int = int(cells.call("size"))
 		var environment: Dictionary = _build_behavior_environment()
-		var needed: int = int(cells.call("size")) * 6
+		var needed: int = cell_count * 6
 		if _behavior_outputs_flat.size() != needed:
 			_behavior_outputs_flat.resize(needed)
-		CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
+		var native_neural: RefCounted = _get_native_neural()
+		var native_spatial: RefCounted = _get_native_spatial()
+		if native_neural != null and native_spatial != null:
+			# v0.32.0：C++ 批量输入收集 + 神经推理。逐位等价由 spatial_parity /
+			# neural_parity 微探针与 NativeParityProbe 的 240 tick state hash 共同保证。
+			var inputs_flat: PackedFloat32Array = native_spatial.call("collect_inputs_batch",
+				cells.get("cell_energy"), cells.get("cell_alive"), cells.get("cell_type"),
+				environment.get("fields_flat", PackedFloat32Array()),
+				environment.get("field_sample_indices", PackedInt32Array()),
+				environment.get("neighbor_offsets", PackedInt32Array()),
+				environment.get("neighbor_values", PackedInt32Array()),
+				float(environment.get("energy_max", 1.0)))
+			_behavior_outputs_flat = native_neural.call("evaluate_batch",
+				inputs_flat, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
+		else:
+			CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
 		CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
 	else:
 		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
@@ -303,19 +330,36 @@ func _build_behavior_environment() -> Dictionary:
 	## v0.30.0：扁平空间哈希 + CSR 邻域。旧的每细胞 Array[int] 与 Vector2i 桶键
 	## 在 3000 细胞下占 behavior 阶段一半以上；这里保持 sorted 邻居顺序与旧路径一致。
 	var cell_count: int = int(cells.call("size"))
-	var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash_flat", cells)
 	var neighbor_offsets: PackedInt32Array = PackedInt32Array()
-	neighbor_offsets.resize(cell_count + 1)
 	var neighbor_values: PackedInt32Array = PackedInt32Array()
-	var alive: PackedByteArray = cells.get("cell_alive")
-	for cell_index in range(cell_count):
-		neighbor_offsets[cell_index] = neighbor_values.size()
-		if alive[cell_index] == 0:
-			continue
-		var found: PackedInt32Array = CELL_PHYSICS_SCRIPT.call("query_neighbors_flat", cells, cell_index, buckets)
-		for neighbor in found:
-			neighbor_values.append(neighbor)
-	neighbor_offsets[cell_count] = neighbor_values.size()
+	var native_spatial: RefCounted = _get_native_spatial()
+	if native_spatial != null:
+		# v0.32.0：C++ 固定桶 + 9 格偏移 + 排序，顺序与 query_neighbors_flat 逐位一致。
+		var csr: Dictionary = native_spatial.call("build_neighbor_csr",
+			cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"), 64.0)
+		var offsets_variant: Variant = csr.get("offsets", null)
+		var values_variant: Variant = csr.get("values", null)
+		if offsets_variant is PackedInt32Array and values_variant is PackedInt32Array:
+			var native_offsets: PackedInt32Array = offsets_variant
+			var native_values: PackedInt32Array = values_variant
+			if native_offsets.size() == cell_count + 1:
+				neighbor_offsets = native_offsets
+				neighbor_values = native_values
+	if neighbor_offsets.size() != cell_count + 1:
+		# 回退：DLL 缺失 / 类未注册 / CSR 尺寸不一致，保持 v0.30 GDScript 路径不变。
+		var buckets: Dictionary = CELL_PHYSICS_SCRIPT.call("build_spatial_hash_flat", cells)
+		neighbor_offsets = PackedInt32Array()
+		neighbor_offsets.resize(cell_count + 1)
+		neighbor_values = PackedInt32Array()
+		var alive: PackedByteArray = cells.get("cell_alive")
+		for cell_index in range(cell_count):
+			neighbor_offsets[cell_index] = neighbor_values.size()
+			if alive[cell_index] == 0:
+				continue
+			var found: PackedInt32Array = CELL_PHYSICS_SCRIPT.call("query_neighbors_flat", cells, cell_index, buckets)
+			for neighbor in found:
+				neighbor_values.append(neighbor)
+		neighbor_offsets[cell_count] = neighbor_values.size()
 	var fields_flat: PackedFloat32Array = PackedFloat32Array()
 	var sample_indices: PackedInt32Array = PackedInt32Array()
 	if environment_manager != null:

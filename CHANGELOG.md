@@ -4,6 +4,39 @@
 
 ---
 
+## 0.32.0 — 2026-11-19
+
+**类型**：物理性能专项第三阶段 — behavior 热路径原生下沉（邻域 CSR / 输入收集 / 神经推理）。**3000 细胞全 tick 232.0→68.6ms（3.38×），8ms 目标仍未达标**，如实记录。
+
+### 实现
+
+- `OrganismManager.gd` 在 v0.31 的 `native_spatial_enabled` 开关上扩展：新增 `_get_native_neural()`（`ClassDB.class_exists("CellNeural")` 检查），DLL 缺失/类未注册自动回退 GDScript。
+- `_build_behavior_environment()`：native 开启时用 `CellSpatial.build_neighbor_csr()` 直接产出 (offsets, values) CSR；尺寸不符或类缺失回退 `CellPhysics.build_spatial_hash_flat/query_neighbors_flat`。固定桶 + 9 格偏移 + 排序，遍历顺序与 GDScript 逐位一致，不加 Cell Lab 203 截断。
+- `advance_physics_tick()` 的 neural 分支：用 `CellSpatial.collect_inputs_batch()` + `CellNeural.evaluate_batch()` 替换 `CellBehavior.compute_outputs_flat()`；`apply_outputs_flat()` 与运动意图落地仍走 GDScript。死细胞 `sample_indices=-1`、批次输出置零，语义与旧路径一致。
+- C++ 源码/DLL 未改（三段原型 v0.31 已编译进同一 DLL），仅修改发布工程 `OrganismManager.gd` 一个脚本并同步 D 盘工程。
+- 冻结边界全部不动：GNP1、tick 阶段顺序、1/60 固定步长、单帧 12 tick 上限、CommandBus 单写者、五通道场 schema、存档 schema v8、状态 hash 算法。
+
+### 验证（程序化无头，双工程）
+
+- 微基准复跑（D 盘工具区，N=3000）：邻域 CSR 2.30×（107.5→46.7ms）、碰撞 9.67×（857.4→88.7ms）、collect_inputs 12.63×（349.0→27.6ms）；神经纯推理 10.70×（9.11→0.85ms）。
+- 端到端 `NativeParityProbe.gd`：双工程 40 密集合子、240 tick、5 检查点 `get_state_hash()` 全部逐位一致，tick=240 同为 1356695503（与 v0.31 逐位相同）。
+- 双工程 `SmokeTest: SCRIPTS=58 FAILURES=0`；`PreviewReplica` / `DivisionAlignment` / `BatchRender` / `NativeParity` 四探针 `FAILURES=0`。
+
+### 实测与诚实结论
+
+- 同会话 A/B 基准（`CELLARIUM_NATIVE` 0/1）：
+
+| 档位 | 全 tick gd→cpp | behavior | physics | metabolism |
+| --- | --- | --- | --- | --- |
+| 300 | 12.2 → 4.8 ms（budget true） | 3.9 → 0.9 ms | 4.9 → 0.5 ms | 2.9 → 2.9 ms |
+| 1000 | 41.3 → 15.7 ms | 12.8 → 2.9 ms | 17.2 → 1.5 ms | 9.7 → 9.7 ms |
+| 3000 | 232.0 → **68.6 ms** | 68.1 → 11.8 ms | 91.8 → 6.2 ms | 61.3 → 43.0 ms |
+
+- GDScript 3000 档仅执行 63 tick（BenchTest 15 秒墙钟硬上限保护），Native 档跑满 120 tick；`avg_tick_us` 为单 tick 均值，口径一致。
+- **未达标**：68.6ms 仍远高于 8ms 目标，`cpu_budget_met=false`（3000 档）。behavior 已从最大项降为次要项；**metabolism 43.0ms 成新瓶颈**，其下一次是 signal 7.2ms。不把该数字表述为达标，下一专项按用户「根据结果再考虑」决定。
+
+---
+
 ## 0.31.0 — 2026-11-19
 
 **类型**：物理性能专项第二阶段 — GDExtension/C++ 碰撞下沉（Cell Lab 固定桶同构，目标 3000 细胞流畅）

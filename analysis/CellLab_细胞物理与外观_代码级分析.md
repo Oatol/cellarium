@@ -1229,3 +1229,35 @@ Cell Lab `e(double)` 触发条件（§4/§28、协作规格 §3.2）无 mode dep
 | 3000 | 54.9 → 5.81 ms | 128.0 → **84.9 ms** |
 
 - **诚实结论**：碰撞阶段实打实 9.4×，3000 细胞全 tick 1.5×（128→84.9ms）。physics 不再是瓶颈（5.8ms），behavior(43ms) + metabolism(31ms) 成新大头。**84.9ms 仍远未达 8ms 目标，`cpu_budget_met=false`，不表述为达标**。下一步收益在 collect_inputs（12.4× 已验证）与环境构建，需在守住 state hash 对照的前提下继续下沉；此前机器负载波动使 GDScript 基线在 128–204ms 间浮动，故所有结论以同会话 A/B 对比为准。
+
+## 37. v0.32.0 行为热路径接入：从原型到端到端（2026-11-19）
+
+### 37.1 接入依据与范围
+
+v0.31 §35.4 的三段 C++ 原型已逐位验证但未接入。本版把其中三段接入发布工程 behavior 阶段，仍不引入新机制：
+
+1. `CellSpatial.build_neighbor_csr()`：固定桶 + 9 格偏移 `(offset_y, offset_x)` + `std::sort`，替代 `_build_behavior_environment()` 中 `build_spatial_hash_flat()` + 逐细胞 `query_neighbors_flat()` + `append` 的 GDScript 循环。顺序与 `query_neighbors_flat()` 的「3×3 邻域 + `sort()`」逐位一致。
+2. `CellSpatial.collect_inputs_batch()`：替代 `CellBehavior.collect_inputs_into()` 的逐细胞输入收集（5 通道场 clamp、同类/异类邻居计数除 8 clamp、能量除 `energy_max` clamp）。死细胞 sample_indices=-1 与 GDScript 的 `use_flat` 判定一致。
+3. `CellNeural.evaluate_batch()`：替代 `CellBehavior.compute_outputs_flat()` 的 8→4→6 推理。沿用确定性铁律：double 累加 + `std::tanh(double)` + 写回转 float32；死细胞输出行置零，与 GDScript `compute_outputs_flat_range()` 一致。
+
+回退链保持完整：`native_spatial_enabled=false` → 全 GDScript；native 开启但 `ClassDB` 无对应类 / CSR 尺寸不符 → 逐段回退 GDScript。C++ 源码与 DLL 未改动，仅发布工程 `OrganismManager.gd` 一个脚本变化并同步 D 盘。
+
+### 37.2 端到端验证
+
+- 微基准复跑（N=3000）：邻域 CSR 2.30×（107.5→46.7ms）、碰撞 9.67×（857.4→88.7ms）、collect_inputs 12.63×（349.0→27.6ms）、神经纯推理 10.70×（9.11→0.85ms）。注意这是极端密集孤立基准，不等于端到端收益。
+- `NativeParityProbe.gd` 双工程各跑 40 密集合子 × 240 tick × 5 检查点：`get_state_hash()` 逐位一致，tick=240 同为 **1356695503**，与 v0.31 逐位相同 —— 三段接入没有改变任何模拟状态。
+- 双工程 `SmokeTest: SCRIPTS=58 FAILURES=0`；`PreviewReplica` / `DivisionAlignment` / `BatchRender` / `NativeParity` 四探针全 `FAILURES=0`。
+
+### 37.3 实测与诚实结论
+
+同会话 A/B（`CELLARIUM_NATIVE` 0/1，`BenchTest.gd`）：
+
+| 档位 | 全 tick gd→cpp | behavior | physics | metabolism | signal |
+| --- | --- | --- | --- | --- | --- |
+| 300 | 12.2 → 4.8 ms | 3.9 → 0.9 ms | 4.9 → 0.5 ms | 2.9 → 2.9 ms | 0.4 → 0.4 ms |
+| 1000 | 41.3 → 15.7 ms | 12.8 → 2.9 ms | 17.2 → 1.5 ms | 9.7 → 9.7 ms | 1.4 → 1.5 ms |
+| 3000 | 232.0 → **68.6 ms** | 68.1 → 11.8 ms | 91.8 → 6.2 ms | 61.3 → **43.0 ms** | 10.3 → 7.2 ms |
+
+GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 120 tick；表内为单 tick 均值，口径一致。
+
+**结论**：behavior 5.77×、physics 14.9×，全 tick 3.38×；但 **68.6ms 仍远高于 8ms 目标，`cpu_budget_met=false`，不表述为达标**。排序已翻转：metabolism 43.0ms 成第一大头（未下沉），其次 behavior 11.8ms、signal 7.2ms。按用户「先攻 collect_inputs + 环境构建 + 碰撞，根据结果再考虑」的口径，此处停下汇报结果，代谢下沉是否启动由用户决定。机器负载波动使 GDScript 基线在 128–232ms 间浮动，所有收益结论一律取同会话 A/B。
