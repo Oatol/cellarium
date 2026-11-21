@@ -1423,3 +1423,37 @@ GDScript 3000 档受 15 秒墙钟硬上限只执行 63 tick，Native 档跑满 1
 - 双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`。
 
 同会话 A/B（native）：M1 1024 细胞 behavior 5.57→1.27ms（4.4×）、全 tick 15.4→11.2ms；固定 3000 细胞 26.3→20.1ms、1000 细胞 9.0→7.2ms。**仍未达 ≤8ms/tick，不表述达标。** 剩余大头：metabolism（M1 5.3ms / 3000 档 10ms，主体已 C++，`metab_env` 后处理含 ledger/consume/死亡副作用需保序）、physics 约 3.9ms（Verlet/link/碰撞已 C++ 化）、场 tick 约 1.3ms。v0.36.0 入库 DLL SHA-256：`36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
+
+---
+
+## 42. v0.37.0：真实体验验证 —— 原生优化从未被启用的根因
+
+### 42.1 问题
+
+用户选择「先验证真实体验」而非继续钻 headless 剩余热点。核心疑问：v0.31–v0.36 把主要热点都下沉了 C++，但用户实际运行时 TPS 仍低，是否值得继续优化。
+
+### 42.2 程序化验证（`tools/RealWorldTpsProbe.gd`）
+
+模拟真实 1 倍速单帧 = 完整 tick 链（physics+development+nutrient+food+field）+ 批渲染缓存重建，测 CPU 侧可达 TPS（headless，未含 GPU 合成）：
+
+| 配置 | 细胞 | 帧成本 | 可达 TPS |
+| --- | --- | --- | --- |
+| native=false | 512→1024 | 161 ms | **6.2** |
+| native=true | 1024 | 16–19 ms | **54–62** |
+
+native=false 的 6.2 TPS 与用户截图的「512 个体 TPS 6」完全吻合。
+
+### 42.3 根因
+
+`OrganismManager.native_spatial_enabled` 默认 `false`，Main.gd 与 main.tscn / sandbox.tscn 均未开启。因此真实运行一直走纯 GDScript 回退路径；v0.31–v0.36 六个版本的 C++ 优化（约 9×）从未在生产路径生效。批渲染缓存 `_get_native_render_cache()` 无开关、直接 `ClassDB.class_exists`，故 v0.35 拖拽提速本来就生效；漏开的只有 OrganismManager 原生模拟开关。
+
+### 42.4 修复与回归
+
+- 默认值 `false` → `true`；DLL 缺失时 `_get_native_*()` 仍自动回退，置 false 可强制 CPU 路径做 A/B。
+- 暴露一个隐藏测试缺陷：`SmokeTest._check_multicellular_cooperation()` 绕过正常 API 直接写 `genomes[0]`，未失效 native 代谢缓存 → native 下子代类型全变 4（{2,4,5}→{4}）。正常 register/inject/mutate 路径内部都已失效，仅此测试特例；补上显式 `_invalidate_native_metabolism_cache()` 后恢复。
+
+### 42.5 验证与结论
+
+双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`；五类 parity 全 OK；`NativeParityProbe` 双工程 OK，legacy 240 tick hash 仍 1356695503、M1 700 tick 检查点全等；默认值切换前后 hash 无漂移。DLL 未改（SHA `36DFEA19…5AB53D19`）。
+
+结论：用户实际卡顿的主因不是算法还不够快，而是**已有的原生优化没被打开**。打开后 1024 细胞约 54–62 TPS（headless CPU 下界）。headless 不含 GPU 合成，真实 GUI 的 1 倍速满速仍需窗口实测；裸 tick ≤8ms/tick 口径仍未达标，不表述达标。

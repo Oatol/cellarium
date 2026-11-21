@@ -2662,6 +2662,9 @@ func _check_multicellular_cooperation() -> bool:
 		demo_modes_fixed.append(mode)
 	demo_genome.call("set_modes", demo_modes_fixed)
 	manager.get("genomes")[0] = demo_genome
+	# v0.37.0：本测试绕过正常 API 直接替换 genomes[0]，需手动失效 native 代谢缓存
+	# （正常路径 register/inject/mutate 内部已自动失效）。native 默认开启后必须有这一步。
+	manager.call("_invalidate_native_metabolism_cache")
 	tick_core.set("running", true)
 	tick_core.call("clear_carry")
 	# v0.17.0 演示体改为多模式基因驱动：无头快验临时把分裂 cooldown 降为 1 tick。

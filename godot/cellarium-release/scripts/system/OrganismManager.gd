@@ -62,10 +62,12 @@ const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT"
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
 var _sim_tick: int = 0
-## v0.31.0 原生加速开关（GDExtension CellSpatial / CellNeural）。默认 false = 纯 GDScript，
-## 与 v0.30.0 状态 hash 逐位一致；置 true 走 C++ 碰撞/邻域/输入收集/神经推理，
-## 需先通过 state hash 对照。DLL 缺失或类未注册时自动回退 GDScript，不会导致启动失败。
-@export var native_spatial_enabled: bool = false
+## v0.37.0 原生加速开关（GDExtension CellSpatial / CellNeural）。默认 true = 优先 C++
+## 碰撞/邻域/输入收集/神经推理/代谢/渲染缓存，实测 1024 细胞约 50 TPS（纯 GDScript 仅 6）。
+## DLL 缺失或类未注册时 _get_native_*() 自动回退 GDScript，不会导致启动失败；
+## native 与 GDScript 的 state hash 逐位一致由 v0.31–v0.36 parity 探针保证。
+## 置 false 可强制纯 GDScript 路径，用于 A/B 与逐位对照。
+@export var native_spatial_enabled: bool = true
 var _native_spatial: RefCounted = null
 var _native_spatial_checked: bool = false
 var _native_neural: RefCounted = null

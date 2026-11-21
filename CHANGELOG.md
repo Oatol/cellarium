@@ -4,6 +4,38 @@
 
 ---
 
+## 0.37.0 — 2026-11-21
+
+**类型**：真实体验验证 + 修复「原生优化从未启用」。**发现 `native_spatial_enabled` 默认 false 且 Main.gd/场景均未开启，导致 v0.31–v0.36 的 C++ 优化在真实运行中一直是关闭的（复现 512 个体约 6 TPS）。改为默认 true 后，同机真实帧成本 1024 细胞约 54–62 TPS（纯 GDScript 仅 6 TPS）。**
+
+### 根因与发现
+
+- 新增 `tools/RealWorldTpsProbe.gd`：模拟真实 1 倍速单帧（完整 tick 链 + 批渲染缓存重建），量化可达 TPS。
+- 实测（headless，CPU 侧下界，未含真实 GPU 合成）：
+  - native=false：512→1024 细胞帧成本 161ms，约 **6.2 TPS**（与用户截图 TPS 6 完全吻合）。
+  - native=true：1024 细胞帧成本 16–19ms，约 **54–62 TPS**。
+- `native_spatial_enabled` 默认 false，Main.gd 与 main.tscn/sandbox.tscn 均未设置 → 真实运行一直走纯 GDScript 回退路径，六个版本的原生优化从未生效。
+- 批渲染缓存 `_get_native_render_cache()` 无开关、直接 `ClassDB.class_exists`，故 v0.35 的拖拽提速本就默认生效；漏开的只有 OrganismManager 的原生模拟开关。
+
+### 实现
+
+- `scripts/system/OrganismManager.gd`：`native_spatial_enabled` 默认 `false` → `true`；注释更新说明 DLL 缺失自动回退、置 false 可强制 CPU 路径做 A/B。
+- `tools/SmokeTest.gd`：`_check_multicellular_cooperation()` 绕过正常 API 直接替换 `genomes[0]`，注入后须显式调用 `_invalidate_native_metabolism_cache()`（正常 register/inject/mutate 路径内部已自动失效）。native 默认开启后，缺失此步会用旧模式缓存导致子代类型错乱。
+
+### 验证
+
+- 双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`。
+- 五类 parity（CollectInputsGrid / BehaviorSignal / RenderCache / Metabolism / Physics）全 OK。
+- `NativeParityProbe` 双工程 OK：legacy 240 tick hash 1356695503 逐位一致，M1 700 tick 检查点全等。
+- 默认值切换前后 state hash 无漂移；native 与 GDScript 路径逐位等价。
+
+### 说明
+
+- 本轮无 C++ 改动，DLL SHA 保持 v0.36 的 `36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
+- headless 帧成本是 CPU 下界；真实 GUI 的 GPU 合成/后处理开销仍需窗口实测，1024 细胞「1 倍速满速」暂不打包票。≤8ms/tick（裸 tick）口径仍未达标。
+
+---
+
 ## 0.36.0 — 2026-11-20
 
 **类型**：A 路线继续下沉（邻域输入收集融合，消除每 tick CSR 物化）。**behavior 从 5.57→1.27ms（4.4×），M1 场景全 tick 15.4→11.2ms，固定 3000 细胞 26.3→20.1ms。≤8ms/tick 仍未达标，如实记录。**
