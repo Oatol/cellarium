@@ -4,6 +4,34 @@
 
 ---
 
+## 0.38.0 — 2026-11-22
+
+**类型**：渲染缺陷修复（皿外方点 / 细胞重影）。**定位到 `CellBatchRenderer` 用 `Transform2D(0,pos).scaled()` 把细胞 origin 乘了 2 倍，皿内 (250,250) 的细胞被画到 (500,500) 的皿外大圆；且大规模时 CellBatch 与 CellBatchPoly 同时可见导致重复绘制。纯视图层修复，不进 state hash。**
+
+### 根因与发现
+
+- 用户截图反馈：512 细胞分裂到 1024 时，皿外出现大片青绿方形小点，形状是一个更大的圆，与皿内细胞位置成映射关系；刷新后仍在。
+- 关键线索：只在细胞数 > 512（近景 → 批渲染 LOD 切换阈值）时出现。
+- 根因 1（决定性）：`CellBatchRenderer._rebuild()` 第 81–82 行 `Transform2D(0.0, position).scaled(Vector2(cell_radius, cell_radius))` —— Godot 的 `Transform2D.scaled()` 会连 origin 一起缩放，`cell_radius=2.0` 时把 origin (250,250) 放大成 (500,500)。`tools/TransformScaledCheck` 实测确证。皿内细胞被整体放大 2 倍画到皿外，正是那片方点大圆。
+- 根因 2：`CellSceneRenderer._rebuild()` 在 `indices.size() > max_instances` 时同时设 `batch_renderer.visible=true` 与 `polygon_batch.visible=true`；两批细胞绘制叠加、多一倍 draw call。`tools/RenderLayerStateProbe` 实测确认切换后两者皆 true。
+
+### 实现
+
+- `CellBatchRenderer.gd`：改为先缩放基向量再写回 origin（`Transform2D(0, ZERO).scaled(...)` 然后 `transform.origin = position`），细胞实例绘制在真实位置。
+- `CellSceneRenderer.gd`：大规模分支关闭 `batch_renderer`、只保留 `polygon_batch`（v0.30 起多边形层已完整取代 MultiMesh 色块 LOD），消除重复绘制。
+
+### 验证
+
+- 新增 `tools/CellBatchOriginParityProbe.gd`：24 组位置/半径验证修正写法 origin 恒等于细胞位置（`failures=0`），登记入 SmokeTest manifest。
+- 双工程 `SmokeTest: SCRIPTS=66 FAILURES=0`；`NativeParityProbe` legacy 240 tick hash 1356695503 逐位一致（纯视图改动无 hash 影响）。
+- 本轮无 C++ 改动，DLL SHA 保持 v0.36 的 `36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
+
+### 说明
+
+- 皿外方点是坐标 bug，不是能量转移可视化、也不是细胞真的跑出培养皿（探针验证所有活细胞 bbox 均在皿内）。
+
+---
+
 ## 0.37.0 — 2026-11-21
 
 **类型**：真实体验验证 + 修复「原生优化从未启用」。**发现 `native_spatial_enabled` 默认 false 且 Main.gd/场景均未开启，导致 v0.31–v0.36 的 C++ 优化在真实运行中一直是关闭的（复现 512 个体约 6 TPS）。改为默认 true 后，同机真实帧成本 1024 细胞约 54–62 TPS（纯 GDScript 仅 6 TPS）。**

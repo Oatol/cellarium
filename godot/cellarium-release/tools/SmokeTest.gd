@@ -67,6 +67,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/BehaviorSignalParityProbe.gd",
 	"res://tools/RenderCacheParityProbe.gd",
 	"res://tools/CollectInputsGridParityProbe.gd",
+	"res://tools/CellBatchOriginParityProbe.gd",
 	"res://tools/DenseClusterProbe.gd",
 ]
 

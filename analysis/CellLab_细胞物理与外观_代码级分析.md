@@ -1457,3 +1457,36 @@ native=false 的 6.2 TPS 与用户截图的「512 个体 TPS 6」完全吻合。
 双工程 `SmokeTest: SCRIPTS=65 FAILURES=0`；五类 parity 全 OK；`NativeParityProbe` 双工程 OK，legacy 240 tick hash 仍 1356695503、M1 700 tick 检查点全等；默认值切换前后 hash 无漂移。DLL 未改（SHA `36DFEA19…5AB53D19`）。
 
 结论：用户实际卡顿的主因不是算法还不够快，而是**已有的原生优化没被打开**。打开后 1024 细胞约 54–62 TPS（headless CPU 下界）。headless 不含 GPU 合成，真实 GUI 的 1 倍速满速仍需窗口实测；裸 tick ≤8ms/tick 口径仍未达标，不表述达标。
+
+---
+
+## 43. v0.38.0：皿外方点 / 细胞重影渲染缺陷
+
+### 43.1 现象
+
+用户截图：512 细胞分裂到 1024 时，培养皿外出现大片青绿方形小点，形成一个比皿更大的圆，与皿内细胞位置成映射关系；刷新后仍在，暂停时 TPS 0，非卡死。用户明确定位触发点＝512→1024 分裂。
+
+### 43.2 根因（两个独立缺陷）
+
+1. **`CellBatchRenderer._rebuild()` 坐标放大（决定性）**：
+   ```gdscript
+   var transform: Transform2D = Transform2D(0.0, position)
+   transform = transform.scaled(Vector2(cell_radius, cell_radius))
+   ```
+   Godot `Transform2D.scaled()` 连 origin 一起缩放。`tools/TransformScaledCheck` 实测：`Transform2D(0, (250,250)).scaled(2,2).origin == (500,500)`。`cell_radius=2.0`（默认）时皿内细胞整体被放大 2 倍画到皿外——即那片方点大圆。正确写法：先缩放基向量（`Transform2D(0, ZERO).scaled(...)`）再写回 `origin = position`。
+2. **批渲染层重复可见**：`CellSceneRenderer._rebuild()` 在 `indices.size() > max_instances(512)` 时同时置 `batch_renderer.visible=true` 与 `polygon_batch.visible=true`。`tools/RenderLayerStateProbe` 实测切换后两者皆 true，同一批细胞画两次、多一倍 draw call。
+
+### 43.3 排除项
+
+探针验证所有活细胞 bbox 均在皿内（[18,482] vs 皿 [10,490]、outside_dish=0），排除细胞跑位；食物池容量 128 / max_dots 96，排除食物；场层是 shader 圆盘、无方点；无粒子层脚本。方点是 MultiMesh quad，被错误 transform 放大到皿外。
+
+### 43.4 修复与验证
+
+- `CellBatchRenderer.gd` 修正 transform 写法；`CellSceneRenderer.gd` 大规模分支关闭 CellBatch、只留 CellBatchPoly（v0.30 起已完整取代色块 LOD）。
+- 新增 `tools/CellBatchOriginParityProbe.gd`（24 组位置/半径，failures=0）防回归。
+- 双工程 `SmokeTest: SCRIPTS=66 FAILURES=0`；`NativeParityProbe` legacy 240 tick hash 1356695503 逐位一致。纯视图改动不进 hash。DLL 未改。
+
+### 43.5 附带结论（用户提问）
+
+- **Cell Lab 连接机制**：分裂时硬链（`CellWorld.e()` 里子代生成即 `cell.H[cell.C]=link`，Gene.m/n 按分裂轴继承）+ 接触动态链（`CellWorld.d()` 里 dist<r1+r2 且 GLUEOCYTE/o≥0.1/C<5）。无固定 rest length 常量，锚点按当前半径实时重算（`d4=min(r1,r2)*0.4`，静息距≈r1+r2−0.8·min+2·link_l），故细胞变小仍紧贴。拉断阈值锚点距>2·max(r1,r2)。
+- **黄色光点**：Cell Lab 无任何沿连接流动的粒子/光点（连接只传数值，渲染是静态膜桥+shader 静态条纹）。Godot 的黄色流动光点是本项目 `LinkLayer.gd` 第 94–105 行自加的能量转移可视化（每条能量差>0.001 的连接一个 draw_circle），纯视图只读，几千连接时是 C 路线 GPU 合成开销的候选之一。

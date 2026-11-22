@@ -78,8 +78,10 @@ func _rebuild() -> void:
 	for i in range(instance_count):
 		var source_index: int = visible_indices[mini(int(float(i) * stride), total_visible - 1)]
 		var position: Vector2 = Vector2(pos_x[source_index], pos_y[source_index])
-		var transform: Transform2D = Transform2D(0.0, position)
-		transform = transform.scaled(Vector2(cell_radius, cell_radius))
+		# v0.38.0 修复：Transform2D(0, position).scaled() 会连 origin 一起缩放，
+		# 把 (250,250) 乘成 (500,500)，细胞被画到皿外成大圆。必须先缩放基向量再写回 origin。
+		var transform: Transform2D = Transform2D(0.0, Vector2.ZERO).scaled(Vector2(cell_radius, cell_radius))
+		transform.origin = position
 		multimesh.set_instance_transform_2d(i, transform)
 		var org_id: int = int(org_ids[source_index])
 		var hue: float = fposmod(float(org_id) * 0.173 + 0.42, 1.0)

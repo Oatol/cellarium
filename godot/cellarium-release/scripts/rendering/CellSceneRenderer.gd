@@ -103,10 +103,13 @@ func _rebuild() -> void:
 		if alive[cell_index] != 0:
 			indices.append(cell_index)
 	if indices.size() > maxi(1, max_instances):
-		# 大规模回退到 MultiMesh 色块，避免成百上千个 Control/Node2D 实例。
+		# 大规模回退到单 CanvasItem 多边形批渲染，避免成百上千个 Control/Node2D 实例。
+		# v0.38.0 修复：此前同时打开 CellBatch（MultiMesh 色块）与 CellBatchPoly，
+		# 同一批细胞被画两次；色块层是 v0.30 之前的旧 LOD，多边形层已完整取代它。
+		# 两层同时可见会产生皿内精细多边形 + 皿外/重叠方块的重影，且多一倍 draw call。
 		_hide_all()
 		if batch_renderer != null:
-			batch_renderer.visible = true
+			batch_renderer.visible = false
 		if polygon_batch != null:
 			polygon_batch.visible = true
 		return
