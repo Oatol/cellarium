@@ -4,6 +4,36 @@
 
 ---
 
+## 0.39.0 — 2026-11-22
+
+**类型**：C 路线真实窗口诊断 + 绘制调用合批。**结论：GPU 合成/后处理不是用户卡顿主因；1324 细胞同场景 A/B 中 draw call 从 4231 降到 259，但运行态 3× FPS/帧时间基本不变（约 59 fps / 17 ms），瓶颈仍是 tick CPU。后处理开关只影响 1 个 draw call。**
+
+### 诊断
+
+- 新增帧时间 HUD（`scripts/system/FrameProfiler.gd` + `Main.gd` / `CellPolygonBatchRenderer.gd` / `CellSceneRenderer.gd` 埋点 + `GameHUD.gd` 上屏），显示帧间隔、引擎 `TIME_PROCESS`、draw call、细胞数。
+- 自写 `Time.get_ticks_usec()` 分段在 GUI/调试器下与 TPS 不自洽（例如 92 tick/0.5 s 却报每 tick 27–64 ms），不作为结论依据；最终 HUD 只保留可交叉验证口径。
+- 新增真实窗口诊断场景 `tools/WindowPerfScenario.tscn` / `.gd`：实例化 `main.tscn`，用 M1 光合自分裂 × 无限分裂 × 黏附基因组铺到 1324 细胞后冻结，便于同场景 A/B。所有注入走正常 `register_zygote`。
+- 真实窗口基线（1324 细胞冻结）：FPS 144、frame 6.9 ms、CPU 7.9–8.3 ms/frame、draw 4231。关闭 `Postprocess` 只减 1 draw call，关闭 `LinkLayer` 只减 2；逐层开关定位到 `CellBatchPoly` 一层占 3972 draw calls。
+
+### 实现
+
+- `CellPolygonBatchRenderer.gd`：把每个细胞的体色三角扇、核三角、膜轮廓细四边形、共享弦连接细四边形全部展平为三角数组，用 `RenderingServer.canvas_item_add_triangle_array()` 一次提交；保留逐细胞 `draw_*` 旧路径兜底，并加 `use_triangle_batch` A/B 开关。
+- `LinkLayer.gd`：连接光桥与黄色能量流光点同样展平为三角数组，一次提交；视觉与相位逻辑不变。
+- `FrameProfiler.gd` / `GameHUD.gd`：统一显示为每帧平均口径；HUD 高度恢复两行。
+
+### 验收
+
+- 同场景同会话 A/B（1324 细胞冻结）：`use_triangle_batch=false` → draw 4231；`true` → draw 259；再切回 `false` 仍 4231、`true` 仍 259。CPU 8.24 → 7.93 ms/frame。
+- 运行态 3× 1324 细胞：合批 on draw 547 / 17.0 ms / 59 fps；off draw 4519 / 17.1 ms / 59 fps。**draw call 大幅下降，但 FPS/帧时间未改善**，如实记录，不把该改动表述为解决卡顿。
+- `SmokeTest: SCRIPTS=68 FAILURES=0`；`RenderCacheParityProbe checked=10353 failures=0`；`CellBatchOriginParityProbe checked=24 failures=0`。纯视图改动，state hash 不进渲染数据。
+- DLL 未改，SHA 保持 `36DFEA19BEBB0FA72C5665A672E6EE1F15836C60506E11F609830EFA5AB53D19`。
+
+### 后续
+
+C 路线数据否定「GPU 合成/后处理是瓶颈」假设。下一步应回到 tick CPU / 渲染解耦专项，先定位运行态 3× 下 tick 与批渲染缓存的真实主线程占比，再决定是否继续下沉或拆分线程。
+
+---
+
 ## 0.38.0 — 2026-11-22
 
 **类型**：渲染缺陷修复（皿外方点 / 细胞重影）。**定位到 `CellBatchRenderer` 用 `Transform2D(0,pos).scaled()` 把细胞 origin 乘了 2 倍，皿内 (250,250) 的细胞被画到 (500,500) 的皿外大圆；且大规模时 CellBatch 与 CellBatchPoly 同时可见导致重复绘制。纯视图层修复，不进 state hash。**

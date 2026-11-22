@@ -8,12 +8,15 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 const CELL_PHYSICS: RefCounted = preload("res://scripts/system/CellPhysics.gd")
 const CELL_SCENE_RENDERER: RefCounted = preload("res://scripts/rendering/CellSceneRenderer.gd")
+const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd")
 
 @export var organism_manager_path: NodePath = ^"../../Simulation/OrganismManager"
 @export var tick_core_path: NodePath = ^"../../Simulation/TickCore"
 @export var command_bus_path: NodePath = ^"../../Simulation/CommandBus"
 @export_range(12, 32, 1) var outline_segments: int = 12
 @export var max_cells: int = 8000
+## C 路线 A/B 开关：false 回到逐细胞 draw_* 旧路径，用于真实窗口同场景对照。
+@export var use_triangle_batch: bool = true
 
 var organism_manager: Node = null
 var tick_core: Node = null
@@ -26,6 +29,11 @@ var _body_colors: PackedColorArray = PackedColorArray()
 var _outline_colors: PackedColorArray = PackedColorArray()
 var _nucleus_colors: PackedColorArray = PackedColorArray()
 var _links: PackedVector2Array = PackedVector2Array()
+## v0.39 C 路线：把逐细胞 draw_* 合并为 3 次 CanvasItem 提交。
+## 真实窗口 1324 细胞：逐细胞路径 4231 draw calls，合批后目标降到个位数。
+var _batch_vertices: PackedVector2Array = PackedVector2Array()
+var _batch_colors: PackedColorArray = PackedColorArray()
+var _batch_indices: PackedInt32Array = PackedInt32Array()
 var _dirty: bool = true
 var _active_count: int = 0
 var _last_chord_count: int = 0
@@ -51,7 +59,9 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if not _dirty:
 		return
+	FrameProfiler.poly_begin()
 	_rebuild_cache()
+	FrameProfiler.poly_end()
 	_dirty = false
 	queue_redraw()
 
@@ -74,12 +84,80 @@ func get_chord_count() -> int:
 	return _last_chord_count
 
 func _draw() -> void:
+	# v0.39 C 路线：所有几何（链接、细胞体、核、膜）已展开为三角面，
+	# 用 RenderingServer 直提三角数组，一次提交替代每细胞 3 次 draw_*。
+	if use_triangle_batch and _batch_vertices.size() >= 3 and _batch_indices.size() == _batch_vertices.size():
+		RenderingServer.canvas_item_add_triangle_array(
+			get_canvas_item(), _batch_indices, _batch_vertices, _batch_colors
+		)
+		return
+	# 兜底：缓存尚未构建时保持旧行为，避免首帧空白。
 	for link_index in range(0, _links.size(), 2):
 		draw_line(_links[link_index], _links[link_index + 1], Color(0.58, 0.82, 0.72, 0.42), 2.0)
 	for cell_index in range(_polygons.size()):
 		draw_colored_polygon(_polygons[cell_index], _body_colors[cell_index])
 		draw_polyline(_outlines[cell_index], _outline_colors[cell_index], 1.0)
 		draw_circle(_centers[cell_index], maxf(1.0, _radii[cell_index] * 0.15), _nucleus_colors[cell_index])
+
+func _build_batched_commands() -> void:
+	## 只读派生视图数据：细胞体/核拆成三角扇，膜与连接线拆成细四边形，
+	## 全部塞进一个 PackedVector2Array/PackedColorArray，用一次 draw_polygon 提交。
+	_batch_vertices = PackedVector2Array()
+	_batch_colors = PackedColorArray()
+	_batch_indices = PackedInt32Array()
+	var count: int = mini(_polygons.size(), mini(_body_colors.size(),
+		mini(_outlines.size(), mini(_centers.size(),
+		mini(_radii.size(), mini(_outline_colors.size(), _nucleus_colors.size()))))))
+	var nucleus_unit: PackedVector2Array = CHORDS.call("unit_circle", 8) as PackedVector2Array
+	for cell_index in range(count):
+		var polygon: PackedVector2Array = _polygons[cell_index] as PackedVector2Array
+		if polygon.size() < 3:
+			continue
+		var body_color: Color = _body_colors[cell_index]
+		var origin: Vector2 = polygon[0]
+		for point_index in range(1, polygon.size() - 1):
+			_append_triangle(origin, polygon[point_index], polygon[point_index + 1], body_color)
+		var outline: PackedVector2Array = _outlines[cell_index] as PackedVector2Array
+		var outline_color: Color = _outline_colors[cell_index]
+		for point_index in range(outline.size()):
+			_append_segment(outline[point_index], outline[(point_index + 1) % outline.size()], outline_color, 1.0)
+		var nucleus_radius: float = maxf(1.0, _radii[cell_index] * 0.15)
+		var nucleus_center: Vector2 = _centers[cell_index]
+		var nucleus_color: Color = _nucleus_colors[cell_index]
+		for point_index in range(nucleus_unit.size()):
+			_append_triangle(
+				nucleus_center,
+				nucleus_center + nucleus_unit[point_index] * nucleus_radius,
+				nucleus_center + nucleus_unit[(point_index + 1) % nucleus_unit.size()] * nucleus_radius,
+				nucleus_color
+			)
+	var link_color: Color = Color(0.58, 0.82, 0.72, 0.42)
+	for link_index in range(0, _links.size(), 2):
+		_append_segment(_links[link_index], _links[link_index + 1], link_color, 2.0)
+	_batch_indices.resize(_batch_vertices.size())
+	for vertex_index in range(_batch_vertices.size()):
+		_batch_indices[vertex_index] = vertex_index
+
+func _append_triangle(a: Vector2, b: Vector2, c: Vector2, color: Color) -> void:
+	_batch_vertices.append(a)
+	_batch_vertices.append(b)
+	_batch_vertices.append(c)
+	_batch_colors.append(color)
+	_batch_colors.append(color)
+	_batch_colors.append(color)
+
+func _append_segment(a: Vector2, b: Vector2, color: Color, width: float) -> void:
+	var delta: Vector2 = b - a
+	var length_squared: float = delta.length_squared()
+	if length_squared < 0.000001:
+		return
+	var normal: Vector2 = Vector2(-delta.y, delta.x) / sqrt(length_squared) * (width * 0.5)
+	var p0: Vector2 = a + normal
+	var p1: Vector2 = a - normal
+	var p2: Vector2 = b - normal
+	var p3: Vector2 = b + normal
+	_append_triangle(p0, p1, p2, color)
+	_append_triangle(p0, p2, p3, color)
 
 func _rebuild_cache() -> void:
 	var native_cache: RefCounted = _get_native_render_cache()
@@ -133,9 +211,13 @@ func _rebuild_cache_native(native_cache: RefCounted) -> bool:
 	_links = result["links"]
 	_active_count = int(result.get("active_count", 0))
 	_last_chord_count = int(result.get("chord_count", 0))
+	_build_batched_commands()
 	return true
 
 func _rebuild_cache_gdscript() -> void:
+	_batch_vertices = PackedVector2Array()
+	_batch_colors = PackedColorArray()
+	_batch_indices = PackedInt32Array()
 	_polygons.clear()
 	_outlines.clear()
 	_centers.clear()
@@ -267,6 +349,7 @@ func _rebuild_cache_gdscript() -> void:
 		))
 		_nucleus_colors.append(Color(0.08, 0.16, 0.15, 0.85 * vitality))
 	_active_count = _polygons.size()
+	_build_batched_commands()
 
 static func _radius_at(base_radius: float, scales: PackedFloat32Array, index: int) -> float:
 	var scale_value: float = 1.0

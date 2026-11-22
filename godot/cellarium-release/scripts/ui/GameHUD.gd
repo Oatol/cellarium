@@ -9,6 +9,7 @@ const SEMANTIC: RefCounted = preload("res://scripts/ui/SemanticRegistry.gd")
 const CODEC: RefCounted = preload("res://scripts/core/data/GenomeCodec.gd")
 const CELL_VISUALS: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.gd")
 const PANEL_CHROME: RefCounted = preload("res://scripts/ui/PanelChrome.gd")
+const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd")
 
 ## 这些键改动后需要重算环境场；食物投放参数只影响未来 tick 的源项。
 const ENVIRONMENT_FIELD_KEYS: Array[String] = [
@@ -123,6 +124,9 @@ func _process(delta: float) -> void:
 
 ## FPS = 实际渲染帧数/秒；TPS = TickCore 实际推进 tick 数/秒（非 speed_scale × 60）。
 func _update_perf_readout(delta: float) -> void:
+	# v0.39.0：把真实帧间隔喂给分段 profiler（含 GPU/合成），用于 C 路线定位。
+	# 必须在 _perf_label 空判断之前，避免 HUD 尚未装配时漏采样导致分段口径失真。
+	FrameProfiler.note_frame(delta)
 	if _perf_label == null:
 		return
 	_fps_frames += 1
@@ -140,9 +144,22 @@ func _update_perf_readout(delta: float) -> void:
 	_fps_frames = 0
 	_tps_ticks = 0
 	var speed_text: String = str(float(tick_core.get("speed_scale"))) if tick_core != null else "?"
-	_perf_label.text = "FPS %d | TPS %d | 倍速 %s× | LOD %d" % [
+	var line1: String = "FPS %d | TPS %d | 倍速 %s× | LOD %d" % [
 		fps, tps, speed_text,
 		int(tick_core.call("get_lod_level")) if tick_core != null and tick_core.has_method("get_lod_level") else 0,
+	]
+	# v0.39.0 C 路线：只展示可交叉验证的口径。
+	# FrameProfiler 的 Time.get_ticks_usec 分段在 GUI/调试器下的读数与 TPS 不自洽，
+	# 因此不再上屏；保留采样供离线分析，结论以帧间隔 + 引擎 process monitor + draw call 为准。
+	var rep: Dictionary = FrameProfiler.report()
+	var frame_us: float = float(rep.get("frame_avg_us", 0.0))
+	var frame_calls: int = int(rep.get("frame_calls", 0))
+	var engine_process_us: float = float(Performance.get_monitor(Performance.TIME_PROCESS)) * 1000000.0
+	var draw_calls: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	var cell_count: int = int((organism_manager.get("cells") as RefCounted).call("size")) if organism_manager != null and organism_manager.get("cells") != null else -1
+	_perf_label.text = "%s\nFRAME %.1fms avg/%df | CPU %.2fms | draw %d | cells %d" % [
+		line1, frame_us / 1000.0, frame_calls,
+		engine_process_us / 1000.0, draw_calls, cell_count,
 	]
 
 ## 光场/选区可视化层引用；光场默认可见，可在顶栏关闭。

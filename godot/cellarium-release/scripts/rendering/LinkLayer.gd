@@ -13,6 +13,10 @@ const CATALOG: RefCounted = preload("res://scripts/rendering/CellVisualCatalog.g
 var command_bus: Node = null
 var _rendered_link_count: int = 0
 var _last_flow_bias: float = 0.0
+## v0.39 C 路线：连接光桥/光点展开成三角数组，一次 RenderingServer 提交。
+var _batch_vertices: PackedVector2Array = PackedVector2Array()
+var _batch_colors: PackedColorArray = PackedColorArray()
+var _batch_indices: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
 	super._ready()
@@ -35,6 +39,9 @@ func get_last_flow_bias() -> float:
 	return _last_flow_bias
 
 func draw_cooperation_layer() -> void:
+	_batch_vertices = PackedVector2Array()
+	_batch_colors = PackedColorArray()
+	_batch_indices = PackedInt32Array()
 	var cells: RefCounted = get_cells()
 	if cells == null:
 		return
@@ -88,8 +95,8 @@ func draw_cooperation_layer() -> void:
 		var energy_delta: float = energy_a - energy_b
 		_last_flow_bias += energy_delta
 		# 外层柔光让连接像膜间桥，而不是一条硬线。
-		draw_line(start, end, Color(link_color.r, link_color.g, link_color.b, 0.16), link_width * 3.2, true)
-		draw_line(start, end, Color(link_color.r, link_color.g, link_color.b, 0.88), link_width, true)
+		_append_segment(start, end, Color(link_color.r, link_color.g, link_color.b, 0.16), link_width * 3.2)
+		_append_segment(start, end, Color(link_color.r, link_color.g, link_color.b, 0.88), link_width)
 		# 光点沿高能量 → 低能量方向移动；能量相等时仍显示连接但不强调流向。
 		if show_flow_pulse and absf(energy_delta) > 0.001:
 			var phase: float = fposmod(float(tick_value) * 0.035 + float(link_index) * 0.17, 1.0)
@@ -102,5 +109,44 @@ func draw_cooperation_layer() -> void:
 				minf(color_a.b * 0.5 + color_b.b * 0.5 + 0.3, 1.0),
 				0.95
 			)
-			draw_circle(pulse, 1.6, pulse_color)
+			_append_disc(pulse, 1.6, pulse_color, 8)
 		_rendered_link_count += 1
+	if _batch_vertices.size() >= 3:
+		_batch_indices.resize(_batch_vertices.size())
+		for vertex_index in range(_batch_vertices.size()):
+			_batch_indices[vertex_index] = vertex_index
+		RenderingServer.canvas_item_add_triangle_array(
+			get_canvas_item(), _batch_indices, _batch_vertices, _batch_colors
+		)
+
+func _append_triangle(a: Vector2, b: Vector2, c: Vector2, color: Color) -> void:
+	_batch_vertices.append(a)
+	_batch_vertices.append(b)
+	_batch_vertices.append(c)
+	_batch_colors.append(color)
+	_batch_colors.append(color)
+	_batch_colors.append(color)
+
+func _append_segment(a: Vector2, b: Vector2, color: Color, width: float) -> void:
+	var delta: Vector2 = b - a
+	var length_squared: float = delta.length_squared()
+	if length_squared < 0.000001:
+		return
+	var normal: Vector2 = Vector2(-delta.y, delta.x) / sqrt(length_squared) * (width * 0.5)
+	var p0: Vector2 = a + normal
+	var p1: Vector2 = a - normal
+	var p2: Vector2 = b - normal
+	var p3: Vector2 = b + normal
+	_append_triangle(p0, p1, p2, color)
+	_append_triangle(p0, p2, p3, color)
+
+func _append_disc(center: Vector2, radius: float, color: Color, segments: int) -> void:
+	for i in range(maxi(3, segments)):
+		var a0: float = TAU * float(i) / float(maxi(3, segments))
+		var a1: float = TAU * float(i + 1) / float(maxi(3, segments))
+		_append_triangle(
+			center,
+			center + Vector2(cos(a0), sin(a0)) * radius,
+			center + Vector2(cos(a1), sin(a1)) * radius,
+			color
+		)

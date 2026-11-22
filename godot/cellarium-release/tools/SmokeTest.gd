@@ -29,6 +29,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/system/StatisticsSystem.gd",
 	"res://scripts/system/SaveManager.gd",
 	"res://scripts/system/PerfProbe.gd",
+	"res://scripts/system/FrameProfiler.gd",
 	"res://scripts/rendering/CellariumView.gd",
 	"res://scripts/rendering/DishLayer.gd",
 	"res://scripts/rendering/LinkLayer.gd",
@@ -69,6 +70,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/CollectInputsGridParityProbe.gd",
 	"res://tools/CellBatchOriginParityProbe.gd",
 	"res://tools/DenseClusterProbe.gd",
+	"res://tools/WindowPerfScenario.gd",
 ]
 
 func _initialize() -> void:

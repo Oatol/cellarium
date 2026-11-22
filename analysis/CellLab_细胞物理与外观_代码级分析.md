@@ -1490,3 +1490,42 @@ native=false 的 6.2 TPS 与用户截图的「512 个体 TPS 6」完全吻合。
 
 - **Cell Lab 连接机制**：分裂时硬链（`CellWorld.e()` 里子代生成即 `cell.H[cell.C]=link`，Gene.m/n 按分裂轴继承）+ 接触动态链（`CellWorld.d()` 里 dist<r1+r2 且 GLUEOCYTE/o≥0.1/C<5）。无固定 rest length 常量，锚点按当前半径实时重算（`d4=min(r1,r2)*0.4`，静息距≈r1+r2−0.8·min+2·link_l），故细胞变小仍紧贴。拉断阈值锚点距>2·max(r1,r2)。
 - **黄色光点**：Cell Lab 无任何沿连接流动的粒子/光点（连接只传数值，渲染是静态膜桥+shader 静态条纹）。Godot 的黄色流动光点是本项目 `LinkLayer.gd` 第 94–105 行自加的能量转移可视化（每条能量差>0.001 的连接一个 draw_circle），纯视图只读，几千连接时是 C 路线 GPU 合成开销的候选之一。
+
+---
+
+## 44. v0.39.0：C 路线真实窗口测量与绘制合批
+
+### 44.1 问题与口径
+
+用户反馈窗口里仍卡，怀疑 GPU 合成/后处理瓶颈。此前 headless 无法覆盖 Vulkan 合成，本轮在用户授权下用 Godot MCP 直接控制真实窗口：新增 `tools/WindowPerfScenario.tscn`/`.gd`，实例化真实 `main.tscn`，用 M1 光合自分裂、无限分裂、黏附基因组铺到 1324 细胞后冻结模拟，使 A/B 两轮处于完全相同细胞数与相机状态。
+
+HUD 同时显示帧间隔、引擎 `Performance.TIME_PROCESS`、draw call、细胞数。自写 `FrameProfiler` 的 `Time.get_ticks_usec()` 分段在 GUI/调试器下与 TPS 不自洽（92 tick/0.5 s 却报 27–64 ms/tick），因此只保留采样、不上屏、不作为结论依据。
+
+### 44.2 逐层定位
+
+1324 细胞冻结基线：FPS 144、frame 6.9 ms、CPU 7.9–8.3 ms/frame、draw 4231。
+
+- 关闭 `Postprocess`：draw 4231→4230，帧时间无变化。**后处理不是瓶颈。**
+- 关闭 `LinkLayer`：draw 仅小幅变化（当时读数受 HUD 刷新滞后影响），但源码确认旧路径每条连接 2 次 `draw_line` + 条件 `draw_circle`，确属候选。
+- 关闭 `CellBatchPoly`：draw 4231→259。**真正的 draw call 大头是大规模细胞多边形批渲染层。**
+
+### 44.3 合批实现
+
+- `CellPolygonBatchRenderer.gd`：将每细胞体（三角扇）、核（8 段三角扇）、膜轮廓（细四边形）、共享弦连接（细四边形）展平到 `PackedVector2Array`/`PackedColorArray`，用 `RenderingServer.canvas_item_add_triangle_array()` 一次提交；加 `use_triangle_batch` 开关与旧路径兜底。
+- `LinkLayer.gd`：连接光桥与黄色能量流光点同样展平为三角数组，一次提交；相位逻辑不变。
+- `draw_polygon()` 不承载任意三角列表（会把所有点当成一个轮廓），必须用 RenderingServer 的 triangle array；Godot CanvasItem 无 `draw_lines()`，线段同样展开为四边形。
+
+### 44.4 A/B 结果（同会话同场景）
+
+| 状态 | draw calls | frame | CPU monitor |
+| --- | ---: | ---: | ---: |
+| 冻结，合批 off | 4231 | 6.9 ms | 8.24 ms |
+| 冻结，合批 on | 259 | 6.9 ms | 7.93 ms |
+| 3× 运行，合批 off | 4519 | 17.1 ms | — |
+| 3× 运行，合批 on | 547 | 17.0 ms | — |
+
+**结论**：draw call 降低 88–94%，但运行态 FPS/帧时间没有改善。用户感受到的卡顿主因不是 GPU 合成、后处理或黄色光点，而是 tick CPU 与主线程渲染缓存叠加。C 路线合批仍保留（减少提交开销、为后续 GPU 侧优化铺路），但不能表述为已解决流畅度。
+
+### 44.5 闸门
+
+`SmokeTest: SCRIPTS=68 FAILURES=0`；`RenderCacheParityProbe checked=10353 failures=0`；`CellBatchOriginParityProbe checked=24 failures=0`。纯视图改动不进 state hash，DLL SHA 仍 `36DFEA19…5AB53D19`。

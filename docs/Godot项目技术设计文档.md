@@ -658,6 +658,8 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 
 `CellBatchRenderer` 每帧从 SoA 组装 `Transform2D` 与 per-instance color，一次 `multimesh.set_as_bulk_visible` / buffer 更新；实例数按 LOD 上限截断并做稳定抽样（避免闪烁）。CPU 回退路径下用同一 MultiMesh，只是组装在 GDScript 中完成，视觉不降级。
 
+**v0.39.0 大规模档实现补充（纯视图）**：`CellPolygonBatchRenderer` 与 `LinkLayer` 不再逐细胞/逐连接调用 `draw_colored_polygon` / `draw_polyline` / `draw_circle` / `draw_line`，而是把细胞体、核、膜、连接光桥与能量流光点展平为三角数组，通过 `RenderingServer.canvas_item_add_triangle_array()` 一次提交。真实窗口 1324 细胞同场景 A/B：draw call 4231→259，但帧时间未改善；因此该实现只作为提交开销优化，不能替代 tick CPU 优化。所有几何均为只读派生数据，不写模拟状态、不进 state hash。
+
 ### 5.3 场可视化
 
 普通 / 热力 / 分析三视图共用 `FieldOverlay`：shader 采样最新场纹理，普通视图仅做微弱辉光，热力视图映射单通道到 8 色渐变，分析视图叠加等值线与矢量箭头（洋流）。视图切换只换 uniform，不重建场景。小地图复用同一纹理的低分辨率副本，帧率限制为 10 fps。

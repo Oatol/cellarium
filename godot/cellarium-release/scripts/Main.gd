@@ -2,6 +2,8 @@ extends Node2D
 ## 场景协调者：只做节点注入、状态显示与信号兜底，模拟逻辑留在各子系统。
 ## 依赖路径与培养基参数在 .tscn 中声明；脚本不硬编码节点名。
 
+const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd")
+
 @export var tick_core_path: NodePath = ^"Simulation/TickCore"
 @export var command_bus_path: NodePath = ^"Simulation/CommandBus"
 @export var environment_path: NodePath = ^"Simulation/EnvironmentManager"
@@ -106,6 +108,7 @@ func get_basal_autonomy() -> float:
 	return float(environment_manager.call("get_basal_autonomy"))
 
 func _on_tick_advanced(tick_index: int) -> void:
+	FrameProfiler.tick_begin()
 	if command_bus != null:
 		executed_commands += int(command_bus.call("execute_tick_commands", tick_index))
 	if organism_manager != null:
@@ -116,6 +119,7 @@ func _on_tick_advanced(tick_index: int) -> void:
 		environment_manager.call("apply_nutrient_sources", tick_index)
 		environment_manager.call("advance_food_entities", 1.0 / 60.0)
 		environment_manager.call("advance_field_tick")
+	FrameProfiler.tick_end()
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
 

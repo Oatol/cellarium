@@ -6,6 +6,7 @@ extends Node2D
 
 const SHAPE: RefCounted = preload("res://scripts/core/data/CellShape.gd")
 const CELL_PHYSICS: RefCounted = preload("res://scripts/system/CellPhysics.gd")
+const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd")
 const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd")
 
 @export var cell_scene: PackedScene = preload("res://scenes/cells/CellBase.tscn")
@@ -50,7 +51,9 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	if not _dirty:
 		return
+	FrameProfiler.scene_begin()
 	_rebuild()
+	FrameProfiler.scene_end()
 	_dirty = false
 
 func _on_tick_advanced(_tick_index: int) -> void:
