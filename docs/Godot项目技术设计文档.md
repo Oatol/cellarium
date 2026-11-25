@@ -664,6 +664,8 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 
 **v0.41.0 账本批量化**：微探针（§46）定位到 metab_env 的 90% 开销是 `energy_ledger.record()` 逐细胞创建 Dictionary entry（1142 细胞 3.42 ms），而非 consume 或数组累加；M1 光合细胞不调用 consume。`EnergyLedger.record_batch()` 两遍扫描、只为最后 `_max_entries` 条创建 entry；`OrganismManager._apply_environment_metabolism_ranges()` 两条路径按 intake_type 分组批量记账。真实窗口 1025 细胞 metab_env 5.27→2.56 ms（-51%）、tick1 22.9→19.5 ms，state hash 逐位不变。entries 顺序由 cell 交错改为按类型分组（账本不进 hash、守恒容差断言），有 `LedgerBatchParityProbe` 保证内容等价。纯 GDScript 改动，DLL 未变。≤8 ms/tick 仍未达成。
 
+**v0.42.0 场采样准备链路下沉**：四层分段定位把 v0.41 留下的 physics 段 2.4 ms 差额锁定为每 tick 两次场采样的准备开销，而非 GPU 同步（upload 0.08 / dispatch+sync 0.30 / readback 0.19 ms）；`sample_cells()` 为 1025 细胞各建一个临时 PackedFloat32Array 与字典项是单次 0.68 ms 的大头。`_field_sample_positions()` 直读 SoA 列替代逐细胞动态调用；`EnvironmentField.sample_cells_flat()` 的 GPU 路径改为把回读字节直写扁平缓冲，CPU 回退公式不变；兼容接口 `sample()` 不再命中批量缓存而走单元素 dispatch（同源 shader，数值逐位一致，且不再返回旧场值）。真实窗口 1025 细胞 `metab_fields` 2.24→1.02 ms、tick1 p50 18.0–18.5→15.4–16.7 ms；GPU 5125 个采样值逐位一致，state hash 不变。纯 GDScript 改动，DLL 未变。≤8 ms/tick 仍未达成。
+
 ### 5.3 场可视化
 
 普通 / 热力 / 分析三视图共用 `FieldOverlay`：shader 采样最新场纹理，普通视图仅做微弱辉光，热力视图映射单通道到 8 色渐变，分析视图叠加等值线与矢量箭头（洋流）。视图切换只换 uniform，不重建场景。小地图复用同一纹理的低分辨率副本，帧率限制为 10 fps。
