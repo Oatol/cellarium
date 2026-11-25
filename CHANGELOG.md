@@ -4,6 +4,45 @@
 
 ---
 
+## 0.42.0 — 2026-11-25
+
+**类型**：场采样准备链路专项——四层分段定位 + SoA 直读 + 扁平 GPU 采样路径。**结论：v0.41 留下的 physics 段约 2.4 ms 差额，经四层计时定位为每 tick 两次场采样准备中的逐细胞临时数组/字典缓存构建（单次 0.68 ms），而非 GPU 同步。改为直读 SoA 位置 + GPU 回读字节直写扁平缓冲后，metab_fields 2.24→1.02 ms、setup_positions 0.56→0.15 ms、tick1 p50 18.0–18.5→15.4–16.7 ms；真实 GPU 窗口 5125 个采样值逐位一致，state hash 不变。纯 GDScript 改动，DLL 未变。**
+
+### 诊断
+
+- 在真实 Vulkan 窗口 1025 细胞固定场景逐层埋点（只读，不进 STAGES / state hash）：整段差额 2.42 ms → `tick_setup` 2.10 ms / `tick_stats` 0.15 ms → `setup_dispatch` 1.53 ms / `setup_positions` 0.57 ms → `field_sample` 1.45 ms → GPU 四段 upload 0.083 / dispatch+sync 0.30 / readback 0.19 / **post 0.68 ms**。
+- 纠正 v0.41 推断：差额不是校验或 GPU 等待，而是 `sample_cells()` 为每细胞创建临时 PackedFloat32Array 与 Dictionary 缓存项，再由 `sample_cells_flat()` 复制一遍；每 tick 发生两次。
+- 顺带修正 `WindowPerfBenchmark` 把 `*_begin` 绝对时间戳当耗时打印的缺陷。
+
+### 实现
+
+- `OrganismManager._field_sample_positions()`：直读 `cell_pos_x` / `cell_pos_y` 构造 Vector2，替代 1025 次 `call("get_position")`，逐位等价。
+- `EnvironmentField.sample_cells_flat()`：GPU 路径新增 `_sample_cells_flat_gpu()`，同一 shader 与上传/同步顺序，回读字节直接解码进扁平缓冲；CPU 回退抽为 `_sample_cells_flat_cpu()`，公式不变。兼容接口 `sample()` 不再命中批量缓存而走单元素 dispatch，数值同源逐位一致。
+- 新增 `WindowPerfBenchmark._verify_flat_parity()`：setup 阶段一次性比较新旧路径全部 5125 个采样值。
+
+### 闸门
+
+- `SmokeTest: SCRIPTS=71 FAILURES=0`（工作区 + D 盘双工程）。
+- `NativeParityProbe: OK failures=0`，M1 与 legacy 全检查点 hash 与 v0.41 逐位相同。
+- 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`。
+- DLL SHA 保持 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+
+### 真实窗口 A/B（1025 细胞，1×/3×）
+
+| 指标 | v0.41 | v0.42 | 变化 |
+| --- | ---: | ---: | ---: |
+| `setup_positions` | 559 µs | 150 µs | -73% |
+| `setup_dispatch` | 1567 µs | 981 µs | -37% |
+| GPU `post` | 678 µs | 279 µs | -59% |
+| `metab_fields` | 2243 µs | 1022 µs | -54% |
+| PerfProbe total | 12.0 ms | 10.4 ms | -13% |
+| tick1 全链 p50 | 18.0–18.5 ms | 15.4–16.7 ms | 约 -12% |
+| tick3 全链 | 54.3 ms | 45.5–48.8 ms | 约 -12% |
+
+`≤8 ms/tick` 裸 tick 目标仍未达成，如实记录。剩余主要为 metabolism 4.44 ms（`metab_env` 2.48）、physics 3.54 ms、dev 2.7 ms。
+
+---
+
 ## 0.41.0 — 2026-11-25
 
 **类型**：metab_env 副作用循环下沉专项——账本批量化。**结论：微探针定位到 metab_env 的 90% 开销是 `energy_ledger.record()` 的逐细胞 Dictionary entry 创建（1142 细胞 3.42ms），而非 consume 或数组累加。改为按 intake_type 分组的批量 `record_batch()` 后，真实窗口 metab_env 5.27→2.56ms（-51%）、tick1 22.9→19.5ms、tick3 65.1→54.3ms；state hash 逐位不变。纯 GDScript 改动，DLL 未变。**

@@ -1606,3 +1606,47 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 - 账本逐条 record 是 metab_env 的伪瓶颈（大部分 entry 被立刻丢弃），批量化 + 只保留尾部 max 条是零精度风险的纯收益。
 - ≤8 ms/tick 仍未达成。当前 tick1 剩余：physics 段 14.3 ms（PerfProbe physics 3.71 ms / behavior 1.45 ms / signal 0.88 ms）、dev 2.79 ms、metabolism 5.66 ms。physics 段与 PerfProbe 分项之和仍有差值（`advance_physics_tick` 整段含验证未细分部分），后续需继续分段定位。
 - 本版未改 C++/DLL，未改 state hash 参与字段。
+
+## 47. v0.42 场采样准备链路下沉：物理前差额定位与扁平 GPU 路径
+
+### 47.1 四层分段定位（先测量再下手）
+
+承接 §46.4「physics 段 14.3 ms 与 PerfProbe 分项之和差约 2.4 ms」的悬案，本版在真实 Vulkan 窗口 1025 细胞固定场景下逐层埋点，全部只读、不进 STAGES / state hash：
+
+| 层级 | 结果 |
+| --- | ---: |
+| `advance_physics_tick` 整段 − PerfProbe 分项 | 14.18 − 11.76 = **2.42 ms** |
+| 一层：tick 头部 `tick_setup` / 尾部 `tick_stats` | 2.10 ms / 0.15 ms（尾部不是问题） |
+| 二层：头部 `setup_dispatch` / `setup_positions` / `setup_flow` | 1.53 ms / 0.57 ms / 0.016 ms（flow 可忽略） |
+| 三层：`begin_field_sampling_indexed` 内 duplicate / index_map / field_sample | 0.006 / 0.12 / **1.45 ms** |
+| 四层：GPU 采样 upload / dispatch+sync / readback / post | 0.083 / 0.30 / 0.19 / **0.68 ms** |
+
+结论：差额不是 GPU 同步或校验，而是**每 tick 两次场采样准备**（物理前一次、代谢前一次）。其中 `post` 是 `sample_cells()` 为 1025 个细胞各建一个 PackedFloat32Array + 一个 Dictionary 缓存项，再由 `sample_cells_flat()` 复制一遍——纯 GDScript 分配开销。顺带修正：旧诊断输出把 `*_begin` 绝对时间戳当耗时打印，已过滤。
+
+### 47.2 实现（严格等价）
+
+- `OrganismManager._field_sample_positions()`：直读 SoA 列 `cell_pos_x` / `cell_pos_y` 构造 Vector2，替代每细胞一次 `call("get_position")`；后者本身就是同一对数组，逐位等价。0.56 → 0.15 ms。
+- `EnvironmentField.sample_cells_flat()`：GPU 条件成立时走新的 `_sample_cells_flat_gpu()`——同一 shader、同一上传/同步顺序，把回读字节直接解码进扁平结果，跳过逐细胞临时数组与字典缓存；CPU 回退抽为 `_sample_cells_flat_cpu()`，公式不变。
+- 语义边界：`sample()` 兼容接口的缓存不再由批量采样填充（会走单元素 dispatch，同源 shader、数值逐位一致），因此也不会再拿到上一批的旧场值。主热路径行为/代谢一直用扁平数组，不经过该接口。
+- `WindowPerfBenchmark` 增加一次性逐位校验：同场状态下新 flat 路径 vs 旧 `sample_cells()`+复制路径，`values=5125 failures=0`。
+
+### 47.3 真实窗口 A/B（同会话同场景，1025 细胞，1×/3×）
+
+| 指标 | v0.41 | v0.42 | 变化 |
+| --- | ---: | ---: | ---: |
+| `setup_positions` | 559 µs | 150 µs | -73% |
+| `setup_dispatch` | 1567 µs | 981 µs | -37% |
+| GPU `post` | 678 µs | 279 µs | -59% |
+| `metab_fields` | 2243 µs | 1022 µs | -54% |
+| PerfProbe total | 12.0 ms | 10.4 ms | -13% |
+| tick1 全链（p50） | 18.0–18.5 ms | 15.4–16.7 ms | 约 -12% |
+| tick3 全链 | 54.3 ms | 45.5–48.8 ms | 约 -12% |
+
+说明：tick1 总时间存在 ±1 ms 级窗口波动，故同时列出区间；分段计时的下降幅度稳定，是收益的可靠依据。DLL 未改（纯 GDScript），原生 DLL SHA 仍为 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+
+### 47.4 闸门与结论
+
+- `SmokeTest`：工作区与 D 盘双工程均 `SCRIPTS=71 FAILURES=0`。
+- `NativeParityProbe`：双工程 `OK failures=0`，M1 全检查点 hash 与 v0.41 逐位相同（如 m1_photo tick=1 `872470415`、tick=700 `3284848376`）。
+- 真实 GPU 窗口 flat 路径逐位对照 `values=5125 failures=0`。
+- **≤8 ms/tick 仍未达成**，如实记录。当前剩余：metabolism 4.44 ms（`metab_env` 2.48 / `metab_fields` 1.02 / `metab_base` 0.71）、physics 3.54 ms、dev 2.7 ms、behavior 1.39 ms、signal 0.85 ms，以及头部准备约 1.15 ms。下一优先目标转为 `metab_env` 2.48 ms 与 physics 3.54 ms 的进一步下沉，需另立专项并保持逐位闸门。

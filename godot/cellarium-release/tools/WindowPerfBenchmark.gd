@@ -92,7 +92,33 @@ func _setup() -> void:
 		str(_manager.get("native_spatial_enabled")),
 		str(ClassDB.class_exists("CellRenderCache")),
 	])
+	_verify_flat_parity()
 	_setup_done = true
+
+## v0.42：真实 GPU 窗口内，专用 flat 路径与旧 sample_cells()+复制路径的逐位对照。
+## 只在 setup 阶段执行一次，不进入任何测量相位。
+func _verify_flat_parity() -> void:
+	var field_ref: RefCounted = _environment.get("field") as RefCounted
+	if field_ref == null or not field_ref.has_method("sample_cells"):
+		return
+	var positions: Array[Vector2] = _manager.call("_field_sample_positions")
+	if positions.is_empty():
+		return
+	var new_flat: PackedFloat32Array = field_ref.call("sample_cells_flat", positions)
+	var sampled: Array = field_ref.call("sample_cells", positions)
+	var old_flat: PackedFloat32Array = PackedFloat32Array()
+	old_flat.resize(new_flat.size())
+	for index in range(mini(sampled.size(), positions.size())):
+		var values: PackedFloat32Array = sampled[index]
+		var offset: int = index * 5
+		for channel in range(mini(values.size(), 5)):
+			if offset + channel < old_flat.size():
+				old_flat[offset + channel] = values[channel]
+	var failures: int = 0
+	for index in range(new_flat.size()):
+		if new_flat[index] != old_flat[index]:
+			failures += 1
+	print("WINDOW_BENCH_FLAT_PARITY values=%d failures=%d" % [new_flat.size(), failures])
 
 func _process(delta: float) -> void:
 	if _done or not _setup_done:
@@ -211,12 +237,39 @@ func _report() -> void:
 		# metab_* 诊断子阶段（不进 STAGES 汇总），定位 metabolism 8ms 的内部构成。
 		if probe.has_method("diagnostic_averages"):
 			var diag: Dictionary = probe.call("diagnostic_averages")
-			for key in diag.keys():
+			var diag_keys: Array = diag.keys()
+			diag_keys.sort()
+			for key in diag_keys:
 				var k: String = str(key)
-				if k.begins_with("metab_"):
+				# *_begin 是埋点记录的绝对时间戳，不是耗时，不得当子阶段打印。
+				if k.ends_with("_begin"):
+					continue
+				if k.begins_with("metab_") or k.begins_with("tick_") or k.begins_with("setup_"):
 					var dline: String = "WINDOW_BENCH_SUBSTAGE %s avg=%.1fus" % [k, float(diag[key])]
 					print(dline)
 					lines.append(dline)
+	# v0.42：EnvironmentManager 批量采样准备分段（累计值按调用次数平均）。
+	var sample_calls: int = int(_environment.get("diag_sample_calls"))
+	if sample_calls > 0:
+		var eline: String = "WINDOW_BENCH_ENVIDIAG calls=%d duplicate=%.1fus index_map=%.1fus field_sample=%.1fus" % [
+			sample_calls,
+			float(int(_environment.get("diag_duplicate_usec"))) / float(sample_calls),
+			float(int(_environment.get("diag_index_map_usec"))) / float(sample_calls),
+			float(int(_environment.get("diag_field_sample_usec"))) / float(sample_calls),
+		]
+		print(eline)
+		lines.append(eline)
+	# v0.42：GPU 批量采样内部四段（上传 / dispatch+sync / 回读 / 逐细胞缓存构建）。
+	var field_ref: RefCounted = _environment.get("field") as RefCounted
+	if field_ref != null and field_ref.has_method("get_sample_diagnostics"):
+		var fd: Dictionary = field_ref.call("get_sample_diagnostics")
+		var fline: String = "WINDOW_BENCH_GPUDIAG calls=%d upload=%.1fus dispatch=%.1fus readback=%.1fus post=%.1fus" % [
+			int(fd.get("calls", 0)), float(fd.get("upload_usec", 0.0)),
+			float(fd.get("dispatch_usec", 0.0)), float(fd.get("readback_usec", 0.0)),
+			float(fd.get("post_usec", 0.0)),
+		]
+		print(fline)
+		lines.append(fline)
 	var path: String = ProjectSettings.globalize_path("user://window_perf_bench.txt")
 	var file: FileAccess = FileAccess.open("user://window_perf_bench.txt", FileAccess.WRITE)
 	if file != null:

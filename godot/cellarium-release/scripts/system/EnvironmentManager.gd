@@ -48,6 +48,11 @@ var _sample_cell_indices: Array[int] = []
 var _sample_index_by_cell: Dictionary = {}
 var _field_samples: Array[PackedFloat32Array] = []
 var _field_samples_flat: PackedFloat32Array = PackedFloat32Array()
+## v0.42 诊断：批量采样准备分段累计耗时，只观测；不进 state hash / 存档。
+var diag_sample_calls: int = 0
+var diag_duplicate_usec: int = 0
+var diag_index_map_usec: int = 0
+var diag_field_sample_usec: int = 0
 
 func _ready() -> void:
 	bind_preset()
@@ -220,12 +225,21 @@ func begin_field_sampling(positions: Array[Vector2]) -> void:
 ## v0.30.0：按 cell_index 建一次索引，消除 sample_fields() 的 O(n) 线性查找。
 ## cell_indices 与 positions 一一对应（由 OrganismManager 按活细胞升序生成）。
 func begin_field_sampling_indexed(positions: Array[Vector2], cell_indices: Array[int]) -> void:
+	# v0.42：分段计时仅用于定位 dispatch 内部热点，不改变任何采样数值与顺序。
+	var t0: int = Time.get_ticks_usec()
 	_sample_positions = positions.duplicate()
 	_sample_cell_indices = cell_indices.duplicate()
+	var t1: int = Time.get_ticks_usec()
 	_sample_index_by_cell.clear()
 	for sample_index in range(_sample_cell_indices.size()):
 		_sample_index_by_cell[_sample_cell_indices[sample_index]] = sample_index
+	var t2: int = Time.get_ticks_usec()
 	_field_samples_flat = field.call("sample_cells_flat", positions)
+	var t3: int = Time.get_ticks_usec()
+	diag_sample_calls += 1
+	diag_duplicate_usec += t1 - t0
+	diag_index_map_usec += t2 - t1
+	diag_field_sample_usec += t3 - t2
 
 func sample_fields(position: Vector2) -> PackedFloat32Array:
 	var index: int = _sample_positions.find(position)

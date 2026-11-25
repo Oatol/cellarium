@@ -161,6 +161,12 @@ var _gpu_sample_cells: int = 0
 var _gpu_delta_count: int = 0
 var _gpu_full_readback_count: int = 0
 var _gpu_last_sample_bytes: int = 0
+## v0.42 诊断：批量采样内部四段累计耗时，只观测；不进 state hash / 场数值。
+var diag_sample_count: int = 0
+var diag_sample_upload_usec: int = 0
+var diag_sample_dispatch_usec: int = 0
+var diag_sample_readback_usec: int = 0
+var diag_sample_post_usec: int = 0
 
 func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, defaults: PackedFloat32Array, prefer_compute: bool = true) -> bool:
 	if grid_resolution < 2 or dish_radius <= 0.0 or defaults.size() != CHANNEL_COUNT:
@@ -350,6 +356,7 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 			result.append(_sample_cpu(position))
 		return result
 	var begin: int = Time.get_ticks_usec()
+	var t0: int = begin
 	var position_bytes: PackedByteArray = PackedByteArray()
 	position_bytes.resize(positions.size() * 8)
 	for index in range(positions.size()):
@@ -360,6 +367,7 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 		return _sample_cells_cpu(positions)
 	if _rendering_device.buffer_update(_sample_params_buffer, 0, params.size() * 4, params.to_byte_array()) != OK:
 		return _sample_cells_cpu(positions)
+	var t1: int = Time.get_ticks_usec()
 	var list: int = _rendering_device.compute_list_begin()
 	if list < 0:
 		return _sample_cells_cpu(positions)
@@ -369,10 +377,12 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 	_rendering_device.compute_list_end()
 	_rendering_device.submit()
 	_rendering_device.sync()
+	var t2: int = Time.get_ticks_usec()
 	var byte_count: int = positions.size() * CHANNEL_COUNT * 4
 	var bytes: PackedByteArray = _rendering_device.buffer_get_data(_samples_buffer, 0, byte_count)
 	if bytes.size() < byte_count:
 		return _sample_cells_cpu(positions)
+	var t3: int = Time.get_ticks_usec()
 	_sample_cache.clear()
 	for index in range(positions.size()):
 		var values: PackedFloat32Array = PackedFloat32Array()
@@ -381,10 +391,16 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 			values[channel_index] = bytes.decode_float(index * CHANNEL_COUNT * 4 + channel_index * 4)
 		_sample_cache[positions[index]] = values
 		result.append(values)
+	var t4: int = Time.get_ticks_usec()
 	_gpu_sample_count += 1
 	_gpu_sample_cells += positions.size()
 	_gpu_last_sample_bytes = byte_count
-	_gpu_readback_usec += maxi(0, Time.get_ticks_usec() - begin)
+	_gpu_readback_usec += maxi(0, t4 - t0)
+	diag_sample_count += 1
+	diag_sample_upload_usec += t1 - t0
+	diag_sample_dispatch_usec += t2 - t1
+	diag_sample_readback_usec += t3 - t2
+	diag_sample_post_usec += t4 - t3
 	return result
 
 ## v0.30.0：零逐细胞分配版。CPU 回退直接写扁平 PackedFloat32Array；GPU 路径复用
@@ -395,21 +411,69 @@ func sample_cells_flat(positions: Array[Vector2]) -> PackedFloat32Array:
 	if positions.is_empty():
 		return result
 	if backend_name != "gpu_compute" or positions.size() > MAX_GPU_SAMPLE_CELLS or not _sample_pipeline.is_valid():
-		for index in range(positions.size()):
-			var position: Vector2 = positions[index]
-			if channels.size() != CHANNEL_COUNT or not _is_inside(position):
-				continue
-			var cell_index: int = _cell_index(position)
-			var offset: int = index * CHANNEL_COUNT
-			for channel_index in range(CHANNEL_COUNT):
-				result[offset + channel_index] = channels[channel_index][cell_index]
-		return result
-	var sampled: Array[PackedFloat32Array] = sample_cells(positions)
-	for index in range(mini(sampled.size(), positions.size())):
-		var values: PackedFloat32Array = sampled[index]
+		return _sample_cells_flat_cpu(positions, result)
+	# v0.42：专用 GPU 路径直接写扁平缓冲，不再经 sample_cells() 的逐细胞临时数组 / 字典缓存。
+	return _sample_cells_flat_gpu(positions, result)
+
+## v0.42：从 sample_cells_flat 抽出的 CPU 回退，数值公式与原内联循环逐位一致。
+func _sample_cells_flat_cpu(positions: Array[Vector2], result: PackedFloat32Array) -> PackedFloat32Array:
+	for index in range(positions.size()):
+		var position: Vector2 = positions[index]
+		if channels.size() != CHANNEL_COUNT or not _is_inside(position):
+			continue
+		var cell_index: int = _cell_index(position)
 		var offset: int = index * CHANNEL_COUNT
-		for channel_index in range(mini(values.size(), CHANNEL_COUNT)):
-			result[offset + channel_index] = values[channel_index]
+		for channel_index in range(CHANNEL_COUNT):
+			result[offset + channel_index] = channels[channel_index][cell_index]
+	return result
+
+## v0.42：与 sample_cells() 同一 shader / 同一上传与同步顺序，只是把回读字节直接解码进扁平缓冲。
+## 语义差异仅限兼容接口 sample() 的缓存填充：这里清空缓存而不填充，sample() 会走单元素
+## dispatch（同一 shader，数值逐位一致），不会再拿到上一批的旧场值。
+func _sample_cells_flat_gpu(positions: Array[Vector2], result: PackedFloat32Array) -> PackedFloat32Array:
+	var t0: int = Time.get_ticks_usec()
+	var position_bytes: PackedByteArray = PackedByteArray()
+	position_bytes.resize(positions.size() * 8)
+	for index in range(positions.size()):
+		position_bytes.encode_float(index * 8, positions[index].x)
+		position_bytes.encode_float(index * 8 + 4, positions[index].y)
+	var params: PackedFloat32Array = PackedFloat32Array([float(resolution), float(positions.size()), center.x, center.y, radius])
+	if _rendering_device.buffer_update(_position_buffer, 0, position_bytes.size(), position_bytes) != OK:
+		return _sample_cells_flat_cpu(positions, result)
+	if _rendering_device.buffer_update(_sample_params_buffer, 0, params.size() * 4, params.to_byte_array()) != OK:
+		return _sample_cells_flat_cpu(positions, result)
+	var t1: int = Time.get_ticks_usec()
+	var list: int = _rendering_device.compute_list_begin()
+	if list < 0:
+		return _sample_cells_flat_cpu(positions, result)
+	_rendering_device.compute_list_bind_compute_pipeline(list, _sample_pipeline)
+	_rendering_device.compute_list_bind_uniform_set(list, _sample_uniform_sets[_active_buffer], 0)
+	_rendering_device.compute_list_dispatch(list, ceili(float(positions.size()) / 64.0), 1, 1)
+	_rendering_device.compute_list_end()
+	_rendering_device.submit()
+	_rendering_device.sync()
+	var t2: int = Time.get_ticks_usec()
+	var byte_count: int = positions.size() * CHANNEL_COUNT * 4
+	var bytes: PackedByteArray = _rendering_device.buffer_get_data(_samples_buffer, 0, byte_count)
+	if bytes.size() < byte_count:
+		return _sample_cells_flat_cpu(positions, result)
+	var t3: int = Time.get_ticks_usec()
+	_sample_cache.clear()
+	for index in range(positions.size()):
+		var base: int = index * CHANNEL_COUNT * 4
+		var offset: int = index * CHANNEL_COUNT
+		for channel_index in range(CHANNEL_COUNT):
+			result[offset + channel_index] = bytes.decode_float(base + channel_index * 4)
+	var t4: int = Time.get_ticks_usec()
+	_gpu_sample_count += 1
+	_gpu_sample_cells += positions.size()
+	_gpu_last_sample_bytes = byte_count
+	_gpu_readback_usec += t4 - t0
+	diag_sample_count += 1
+	diag_sample_upload_usec += t1 - t0
+	diag_sample_dispatch_usec += t2 - t1
+	diag_sample_readback_usec += t3 - t2
+	diag_sample_post_usec += t4 - t3
 	return result
 
 func _sample_cells_cpu(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
@@ -575,6 +639,17 @@ func diffuse_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 	for source in _pending_sources:
 		source.fill(0.0)
 	return true
+
+## v0.42 诊断：每次批量 GPU 采样的四段平均耗时（微秒），只读。
+func get_sample_diagnostics() -> Dictionary:
+	var divisor: float = float(maxi(1, diag_sample_count))
+	return {
+		"calls": diag_sample_count,
+		"upload_usec": float(diag_sample_upload_usec) / divisor,
+		"dispatch_usec": float(diag_sample_dispatch_usec) / divisor,
+		"readback_usec": float(diag_sample_readback_usec) / divisor,
+		"post_usec": float(diag_sample_post_usec) / divisor,
+	}
 
 func get_backend_diagnostics() -> Dictionary:
 	var total_usec: int = _gpu_upload_usec + _gpu_dispatch_usec + _gpu_readback_usec

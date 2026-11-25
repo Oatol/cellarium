@@ -331,11 +331,23 @@ func _energy_flow_value(key: String, cell_index: int) -> float:
 
 func advance_physics_tick(dt: float) -> void:
 	_sim_tick += 1
-	_reset_energy_flow(int(cells.call("size")))
 	perf_probe.call("begin_tick")
+	# v0.42 诊断：tick 头部准备（能量流清零 + 物理前场采样 dispatch），只读埋点不进 STAGES / hash。
+	perf_probe.call("begin", "tick_setup")
+	perf_probe.call("begin", "setup_flow")
+	_reset_energy_flow(int(cells.call("size")))
+	perf_probe.call("end", "setup_flow")
 	# 阶段10：一个 tick 两批（物理前/后），每批一次 GPU 采样 dispatch + 小回读。
+	# v0.42：拆成显式局部变量仅为分段计时，求值顺序与参数副作用与原写法完全一致。
 	if environment_manager != null:
-		environment_manager.call("begin_field_sampling_indexed", _field_sample_positions(), _field_sample_cell_indices())
+		perf_probe.call("begin", "setup_positions")
+		var sample_positions: Array[Vector2] = _field_sample_positions()
+		var sample_indices: Array[int] = _field_sample_cell_indices()
+		perf_probe.call("end", "setup_positions")
+		perf_probe.call("begin", "setup_dispatch")
+		environment_manager.call("begin_field_sampling_indexed", sample_positions, sample_indices)
+		perf_probe.call("end", "setup_dispatch")
+	perf_probe.call("end", "tick_setup")
 	# LOD 神经降频（§2.6）：高倍速下按 tick_core 间隔更新神经，中间 tick 复用上次 intents。
 	var update_neural: bool = tick_core == null or bool(tick_core.call("should_update_neural"))
 	perf_probe.call("begin", "behavior")
@@ -457,7 +469,10 @@ func advance_physics_tick(dt: float) -> void:
 	perf_probe.call("begin", "signal")
 	_apply_signal_secretion(dt)
 	perf_probe.call("end", "signal")
+	# v0.42 诊断：tick 尾部统计更新（种群计数 + 采样快照），只读埋点。
+	perf_probe.call("begin", "tick_stats")
 	statistics.call("advance_tick", _species_populations())
+	perf_probe.call("end", "tick_stats")
 	perf_probe.call("end_tick")
 
 func _species_populations() -> Dictionary:
@@ -472,11 +487,15 @@ func _species_populations() -> Dictionary:
 	return populations
 
 func _field_sample_positions() -> Array[Vector2]:
+	# v0.42：直接读 SoA 列，避免每次采样对 1025 个细胞做动态 call("get_position")。
+	# CellArray.get_position() 本身即 Vector2(cell_pos_x[i], cell_pos_y[i])，逐位等价。
 	var positions: Array[Vector2] = []
 	var alive: PackedByteArray = cells.get("cell_alive")
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	for cell_index in range(int(cells.call("size"))):
 		if alive[cell_index] != 0:
-			positions.append(cells.call("get_position", cell_index))
+			positions.append(Vector2(pos_x[cell_index], pos_y[cell_index]))
 	return positions
 
 ## v0.30.0：与 _field_sample_positions() 一一对应的活细胞索引，供 O(1) 场采样查找。
