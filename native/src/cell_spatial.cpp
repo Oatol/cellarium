@@ -259,25 +259,32 @@ Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 	PackedFloat32Array pos_x = pos_x_in;
 	PackedFloat32Array pos_y = pos_y_in;
 	const int count = pos_x.size();
+	// v0.45：内层 pair 循环原本每次走 PackedFloat32Array::set/operator[]（含 COW 与边界检查）。
+	// 这里一次取可写裸指针，读写仍是 float32 → double → float32 的原顺序，逐位等价。
+	float *px = pos_x.ptrw();
+	float *py = pos_y.ptrw();
+	const uint8_t *alive_ptr = alive.ptr();
+	const float *scale_ptr = radius_scales.ptr();
+	const float *stiff_ptr = stiffnesses.ptr();
 
 	auto build_pairs = [&]() -> std::vector<int> {
 		const GridBuckets grid = GridBuckets::build(pos_x, pos_y, alive, count, cell_size);
 		std::vector<int> pairs;
 		for (int a = 0; a < count; ++a) {
-			if (alive[a] == 0) continue;
-			const int64_t cx = cell_coord(pos_x[a], cell_size);
-			const int64_t cy = cell_coord(pos_y[a], cell_size);
-			const double ax = static_cast<double>(pos_x[a]);
-			const double ay = static_cast<double>(pos_y[a]);
-			const double scale_a = (a < radius_scales.size()) ? static_cast<double>(radius_scales[a]) : 1.0;
+			if (alive_ptr[a] == 0) continue;
+			const int64_t cx = cell_coord(px[a], cell_size);
+			const int64_t cy = cell_coord(py[a], cell_size);
+			const double ax = static_cast<double>(px[a]);
+			const double ay = static_cast<double>(py[a]);
+			const double scale_a = (a < radius_scales.size()) ? static_cast<double>(scale_ptr[a]) : 1.0;
 			const double contact_a = cell_radius * scale_a;
 			grid.for_each_neighbor(cx, cy, [&](int32_t bv) {
 				const int b = static_cast<int>(bv);
 				if (b <= a) return;
 				if (cell_radius > 0.0) {
-					const double dx = static_cast<double>(pos_x[b]) - ax;
-					const double dy = static_cast<double>(pos_y[b]) - ay;
-					const double scale_b = (b < radius_scales.size()) ? static_cast<double>(radius_scales[b]) : 1.0;
+					const double dx = static_cast<double>(px[b]) - ax;
+					const double dy = static_cast<double>(py[b]) - ay;
+					const double scale_b = (b < radius_scales.size()) ? static_cast<double>(scale_ptr[b]) : 1.0;
 					const double contact_distance = contact_a + cell_radius * scale_b;
 					if (dx * dx + dy * dy > contact_distance * contact_distance * 4.0) return;
 				}
@@ -297,10 +304,10 @@ Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 		for (size_t pair_index = 0; pair_index + 1 < pairs.size(); pair_index += 2) {
 			const int a = pairs[pair_index];
 			const int b = pairs[pair_index + 1];
-			const double dx = static_cast<double>(pos_x[b]) - static_cast<double>(pos_x[a]);
-			const double dy = static_cast<double>(pos_y[b]) - static_cast<double>(pos_y[a]);
-			const double scale_a = (a < radius_scales.size()) ? static_cast<double>(radius_scales[a]) : 1.0;
-			const double scale_b = (b < radius_scales.size()) ? static_cast<double>(radius_scales[b]) : 1.0;
+			const double dx = static_cast<double>(px[b]) - static_cast<double>(px[a]);
+			const double dy = static_cast<double>(py[b]) - static_cast<double>(py[a]);
+			const double scale_a = (a < radius_scales.size()) ? static_cast<double>(scale_ptr[a]) : 1.0;
+			const double scale_b = (b < radius_scales.size()) ? static_cast<double>(scale_ptr[b]) : 1.0;
 			const double contact_distance = cell_radius * (scale_a + scale_b);
 			const double distance_squared = dx * dx + dy * dy;
 			if (distance_squared > contact_distance * contact_distance + 0.000001) continue;
@@ -313,13 +320,13 @@ Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 			}
 			double stiffness = 1.0;
 			if (a < stiffnesses.size() && b < stiffnesses.size()) {
-				stiffness = clampd((static_cast<double>(stiffnesses[a]) + static_cast<double>(stiffnesses[b])) * 0.5, 0.25, 2.0);
+				stiffness = clampd((static_cast<double>(stiff_ptr[a]) + static_cast<double>(stiff_ptr[b])) * 0.5, 0.25, 2.0);
 			}
 			const double correction = (contact_distance - distance) * 0.5 * stiffness;
-			pos_x.set(a, static_cast<float>(static_cast<double>(pos_x[a]) - normal_x * correction));
-			pos_y.set(a, static_cast<float>(static_cast<double>(pos_y[a]) - normal_y * correction));
-			pos_x.set(b, static_cast<float>(static_cast<double>(pos_x[b]) + normal_x * correction));
-			pos_y.set(b, static_cast<float>(static_cast<double>(pos_y[b]) + normal_y * correction));
+			px[a] = static_cast<float>(static_cast<double>(px[a]) - normal_x * correction);
+			py[a] = static_cast<float>(static_cast<double>(py[a]) - normal_y * correction);
+			px[b] = static_cast<float>(static_cast<double>(px[b]) + normal_x * correction);
+			py[b] = static_cast<float>(static_cast<double>(py[b]) + normal_y * correction);
 			++round_resolved;
 			max_correction = std::max(max_correction, correction);
 		}

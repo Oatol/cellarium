@@ -409,32 +409,49 @@ func advance_physics_tick(dt: float) -> void:
 		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
+	# v0.45 诊断：把 physics 段拆到 FFI 边界两侧，区分 GDScript 准备/写回与 C++ 内核。
+	perf_probe.call("begin", "phys_args")
 	var native_spatial: RefCounted = _get_native_spatial()
+	perf_probe.call("end", "phys_args")
 	if native_spatial != null and dt > 0.0:
 		var physics_constants: Dictionary = CELL_PHYSICS_SCRIPT.get_script_constant_map()
+		perf_probe.call("begin", "phys_verlet")
 		var stepped: Dictionary = native_spatial.call("step_verlet_and_links",
 			cells.get("cell_pos_x"), cells.get("cell_pos_y"),
 			cells.get("cell_prev_x"), cells.get("cell_prev_y"), cells.get("cell_alive"),
 			cells.get("link_cell_a"), cells.get("link_cell_b"), cells.get("link_rest_length"),
 			float(physics_constants.get("DAMPING", 0.98)),
 			int(physics_constants.get("CONSTRAINT_ITERATIONS", 2)))
+		perf_probe.call("end", "phys_verlet")
+		perf_probe.call("begin", "phys_verlet_write")
 		cells.set("cell_pos_x", stepped["pos_x"])
 		cells.set("cell_pos_y", stepped["pos_y"])
 		cells.set("cell_prev_x", stepped["prev_x"])
 		cells.set("cell_prev_y", stepped["prev_y"])
+		perf_probe.call("end", "phys_verlet_write")
 	else:
+		perf_probe.call("begin", "phys_verlet_fallback")
 		CELL_PHYSICS_SCRIPT.call("step", cells, dt)
+		perf_probe.call("end", "phys_verlet_fallback")
 	if native_spatial != null:
 		# v0.31.0：C++ 碰撞求解，逐位等价已由 spatial_parity_probe 验证（SPATIAL_HASH_CELL_SIZE=64）。
+		perf_probe.call("begin", "phys_collision")
 		var coll: Dictionary = native_spatial.call("resolve_collisions",
 			cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"),
 			cells.get("cell_radius_scale"), cells.get("cell_stiffness"),
 			cell_radius, 64.0, 6)
+		perf_probe.call("end", "phys_collision")
+		perf_probe.call("begin", "phys_collision_write")
 		cells.set("cell_pos_x", coll["pos_x"])
 		cells.set("cell_pos_y", coll["pos_y"])
+		perf_probe.call("end", "phys_collision_write")
 	else:
+		perf_probe.call("begin", "phys_collision_fallback")
 		CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius, cells.get("cell_radius_scale"), cells.get("cell_stiffness"))
+		perf_probe.call("end", "phys_collision_fallback")
+	perf_probe.call("begin", "phys_project")
 	CELL_PHYSICS_SCRIPT.call("project_to_dish", cells, dish_center, maxf(1.0, dish_radius - maxf(cell_radius, 1.0)), boundary_normal_damping, cells.get("cell_radius_scale"), cell_radius)
+	perf_probe.call("end", "phys_project")
 	perf_probe.call("end", "physics")
 	perf_probe.call("begin", "metabolism")
 	# v0.33.0 诊断子阶段：仅埋点，不进 STAGES 汇总与状态 hash，用于定位下沉目标。
@@ -642,16 +659,24 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 	var types: PackedByteArray = cells.get("cell_type")
 	var positions: PackedFloat32Array = cells.get("cell_pos_x")
 	var positions_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var org_alive_flags: PackedByteArray = organisms.get("org_alive")
 	var health: PackedFloat32Array = organisms.get("org_health")
 	var respiration_values: PackedByteArray = PackedByteArray()
-	respiration_values.resize(organisms.get("org_alive").size())
+	respiration_values.resize(org_alive_flags.size())
 	## v0.16.0：营养优先级按个体派生，0.5 的系数恒为 1.0，旧基因组行为不变。
 	var priority_values: PackedFloat32Array = PackedFloat32Array()
-	priority_values.resize(organisms.get("org_alive").size())
+	priority_values.resize(org_alive_flags.size())
 	priority_values.fill(0.5)
+	# v0.44：typed 直接属性访问替代每个体两次 Variant 字符串 get（微探针 344→176 µs）。
 	for org_id in genomes:
-		respiration_values[int(org_id)] = int(genomes[org_id].get("respiration"))
-		priority_values[int(org_id)] = clampf(float(genomes[org_id].get("nutrition_priority")), 0.0, 1.0)
+		var oi: int = int(org_id)
+		var genome: RefCounted = genomes[org_id] as RefCounted
+		respiration_values[oi] = genome.respiration
+		priority_values[oi] = clampf(genome.nutrition_priority, 0.0, 1.0)
+	# v0.44：能量流是诊断缓冲、不进 state hash；把 _energy_flow_add 的字典查找提到循环外，
+	# 每细胞直接写扁平 PackedFloat64Array（微探针 1099→329 µs）。长度由 _reset_energy_flow 保证。
+	var flow_production: PackedFloat64Array = _energy_flow.get("production", PackedFloat64Array())
+	var flow_self_cost: PackedFloat64Array = _energy_flow.get("self_cost", PackedFloat64Array())
 	var native_metabolism: RefCounted = _get_native_metabolism()
 	if native_metabolism != null:
 		# v0.33.0：纯计算段下沉 C++；副作用（consume / ledger / 死亡）顺序与 GDScript 原路径完全一致。
@@ -679,7 +704,8 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 				elif types[cell_index] == CELL_TYPE_NITROCYTE:
 					consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
 				energies[cell_index] += consumed
-				_energy_flow_add("production", cell_index, consumed)
+				if consumed != 0.0:
+					flow_production[cell_index] += consumed
 				if consumed > 0.0:
 					var type_key: int = int(types[cell_index])
 					if not ledger_by_type.has(type_key):
@@ -687,7 +713,8 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 					(ledger_by_type[type_key] as PackedFloat64Array).append(consumed)
 			var movement_cost: float = float(movement_costs[cell_index])
 			energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
-			_energy_flow_add("self_cost", cell_index, movement_cost)
+			if movement_cost != 0.0:
+				flow_self_cost[cell_index] += movement_cost
 			if toxic_flags[cell_index] != 0:
 				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
 		_flush_ledger_groups(ledger_by_type)
@@ -718,7 +745,8 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 				elif types[cell_index] == CELL_TYPE_NITROCYTE:
 					consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
 				energies[cell_index] += consumed
-				_energy_flow_add("production", cell_index, consumed)
+				if consumed != 0.0:
+					flow_production[cell_index] += consumed
 				if consumed > 0.0:
 					var type_key: int = int(types[cell_index])
 					if not ledger_by_type.has(type_key):
@@ -728,14 +756,15 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 			var movement: float = absf(float(intents[0]))
 			var movement_cost: float = movement_energy_cost * movement * movement * dt
 			energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
-			_energy_flow_add("self_cost", cell_index, movement_cost)
+			if movement_cost != 0.0:
+				flow_self_cost[cell_index] += movement_cost
 			if bool(respiration.get("toxic", false)):
 				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
 		_flush_ledger_groups(ledger_by_type)
 	organisms.set("org_health", health)
 	cells.set("cell_energy", energies)
 	for org_id in range(health.size() - 1, -1, -1):
-		if organisms.get("org_alive")[org_id] != 0 and health[org_id] <= 0.0:
+		if org_alive_flags[org_id] != 0 and health[org_id] <= 0.0:
 			_remove_organism_cells(org_id, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_TOXICITY"]))
 
 func _flush_ledger_groups(ledger_by_type: Dictionary) -> void:

@@ -4,6 +4,41 @@
 
 ---
 
+## 0.44.0 — 2026-11-26
+
+**类型**：metab_env 扁平化 + physics FFI 边界分段 + C++ 碰撞内层裸指针化。**同会话 A/B：metab_env 2888 → 1496 µs（-48%）；C++ 碰撞 3682 → 1679 µs（-54%）；PerfProbe 裸 tick 10.66 → 7.92 / 8.10 ms（两轮跨 8 ms 线，未稳定达标）。DLL 更新，state hash 逐位不变。**
+
+### 诊断（先测后改）
+
+- 扩展 `MetabEnvMicroProbe.gd`：typed 属性访问 344 → 176 µs；`_energy_flow_add` 式字典查找 1099 µs vs 扁平直写 329 µs。证实每 tick 重建 respiration/priority 与逐细胞字典查找是真凶，范围循环本身不是。
+- 在 `advance_physics_tick` 加 FFI 边界两侧只读埋点（`phys_args` / `phys_verlet` / `phys_verlet_write` / `phys_collision` / `phys_collision_write` / `phys_project`）：physics 3.97 ms 中 `resolve_collisions` 占 3.68 ms（93%），Verlet 40 µs、project_to_dish 219 µs、GDScript 准备/写回合计 <10 µs。顶部 physics 与 PerfProbe 的差额已确认是 `tick_setup` 1.38 ms + `tick_stats` 0.16 ms，**没有尾部场采样埋在 physics 段**。
+
+### 实现
+
+- `OrganismManager._apply_environment_metabolism_ranges()`：genome 改用 typed 直接属性访问；`org_alive` 只读一次；能量流诊断缓冲把 `_energy_flow_add` 的字典查找提到循环外，每细胞直写扁平 `PackedFloat64Array`（诊断数据不进 state hash）。
+- `native/src/cell_spatial.cpp` `resolve_collisions()`：一次 `ptrw()`/`ptr()` 取裸指针替代内层 pair 循环的 `PackedFloat32Array::set/operator[]`；float32 → double → float32 顺序未变，桶构建、pair 遍历序、每 3 轮重建、提前退出条件均未改。
+- `WindowPerfBenchmark` 输出过滤新增 `phys_` 前缀；`MetabEnvMicroProbe` 新增 typed/dict 对照分段。
+
+### 真实窗口 A/B（同会话同场景，1025 细胞）
+
+| 指标 | v0.43 | v0.44 首轮 | v0.44 确认轮 |
+| --- | ---: | ---: | ---: |
+| `metab_env` | 2888 µs | 1479 µs | 1496 µs |
+| `phys_collision` | 3682 µs | 1636 µs | 1679 µs |
+| `physics` 段 | 3967 µs | 1890 µs | 1941 µs |
+| PerfProbe 裸 tick | 10.66 ms | 7.92 ms | 8.10 ms |
+| tick1 全链 p50 | 16033 µs | 9980 µs | 9934 µs |
+
+### 闸门
+
+- 原型工程 `spatial_parity_probe.gd`：`SPATIAL_PARITY OK (total_failures=0)`，collision 73620 次修正位置全等。
+- 双工程 `SmokeTest: SCRIPTS=71 FAILURES=0`；`NativeParityProbe: OK failures=0`，m1_photo tick=1 `872470415`、tick=700 `3284848376` 与 v0.43 逐位相同。
+- 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`。
+- DLL SHA-256 更新为 `81142C2A7964D68F37F28AEFA101208C9370C2482D9392D89179283E5200738F`。
+- **≤8 ms/tick 未稳定达标**：两轮裸 tick 分别 7.92 / 8.10 ms，如实记录；全链 tick1 p50 约 9.9 ms（含头部采样准备与统计）。
+
+---
+
 ## 0.43.0 — 2026-11-26
 
 **类型**：dev（发育 tick）首轮专项——先做只读全景确认，再把逐个体重复 Dictionary 查找改为 tick 开头一次性读取 SoA 数组。**同会话 A/B：dev p50 3285 → 71 µs（-97.8%）。纯 GDScript，DLL 未变；state hash 与原生逐位一致。≤8 ms/tick 仍未达成。**

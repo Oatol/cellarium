@@ -94,6 +94,8 @@ func _initialize() -> void:
 	var acc_death_scan: int = 0
 	var acc_consume: int = 0
 	var acc_consume_calls: int = 0
+	var acc_prep_typed: int = 0
+	var acc_group_via_dict: int = 0
 	var DT: float = 1.0 / 60.0
 	var TOXIC: float = float(manager.get("anaerobic_toxicity_damage_per_second"))
 	for rep in range(REPEAT):
@@ -117,6 +119,19 @@ func _initialize() -> void:
 			prio_values[int(oid)] = clampf(float(genomes[oid].get("nutrition_priority")), 0.0, 1.0)
 		var tp1: int = Time.get_ticks_usec()
 		acc_prep += tp1 - tp0
+		var tpt0: int = Time.get_ticks_usec()
+		var resp_typed: PackedByteArray = PackedByteArray()
+		resp_typed.resize(org_count)
+		var prio_typed: PackedFloat32Array = PackedFloat32Array()
+		prio_typed.resize(org_count)
+		prio_typed.fill(0.5)
+		for oid in genomes:
+			var oi: int = int(oid)
+			var g: RefCounted = genomes[oid] as RefCounted
+			resp_typed[oi] = g.respiration
+			prio_typed[oi] = clampf(g.nutrition_priority, 0.0, 1.0)
+		var tpt1: int = Time.get_ticks_usec()
+		acc_prep_typed += tpt1 - tpt0
 		var t0: int = Time.get_ticks_usec()
 		for i in range(count):
 			if alive[i] == 0:
@@ -182,6 +197,23 @@ func _initialize() -> void:
 			fs[i] += float(movement_costs[i])
 		var tg1: int = Time.get_ticks_usec()
 		acc_group_flow += tg1 - tg0
+		var th0: int = Time.get_ticks_usec()
+		var flow_dict: Dictionary = {"production": fp, "self_cost": fs}
+		for i in range(count):
+			if alive[i] == 0:
+				continue
+			var fg: float = float(food_gains[i])
+			if fg != 0.0 and flow_dict.has("production"):
+				var vals: PackedFloat64Array = flow_dict["production"] as PackedFloat64Array
+				if i < vals.size():
+					vals[i] += fg
+			var cost: float = float(movement_costs[i])
+			if cost != 0.0 and flow_dict.has("self_cost"):
+				var vals2: PackedFloat64Array = flow_dict["self_cost"] as PackedFloat64Array
+				if i < vals2.size():
+					vals2[i] += cost
+		var th1: int = Time.get_ticks_usec()
+		acc_group_via_dict += th1 - th0
 		var tc0: int = Time.get_ticks_usec()
 		for i in range(count):
 			if alive[i] == 0:
@@ -208,6 +240,8 @@ func _initialize() -> void:
 	print("METAB_MICRO fetch_us=%.1f" % (float(acc_fetch) / float(REPEAT)))
 	print("METAB_MICRO prep_us=%.1f" % (float(acc_prep) / float(REPEAT)))
 	print("METAB_MICRO group_flow_us=%.1f" % (float(acc_group_flow) / float(REPEAT)))
+	print("METAB_MICRO group_via_dict_us=%.1f" % (float(acc_group_via_dict) / float(REPEAT)))
+	print("METAB_MICRO prep_typed_us=%.1f" % (float(acc_prep_typed) / float(REPEAT)))
 	print("METAB_MICRO death_scan_us=%.1f" % (float(acc_death_scan) / float(REPEAT)))
 	print("METAB_MICRO consume_us=%.1f calls=%d" % [float(acc_consume) / float(REPEAT), acc_consume_calls / REPEAT])
 	var type_zero: int = 0

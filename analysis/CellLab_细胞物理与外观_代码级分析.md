@@ -1681,3 +1681,39 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 
 - 双工程 `SmokeTest: SCRIPTS=71 FAILURES=0`；`NativeParityProbe: OK failures=0`（m1_photo tick=1 `872470415`、tick=700 `3284848376` 与 v0.42 相同）；真实窗口 flat parity `values=5125 failures=0`。DLL 未改，SHA 不变。
 - `cpu_budget_met=false`，≤8 ms/tick 未达成。剩余：metab_env 2.89 ms、physics 4.08 ms、metab_fields 1.35 ms、behavior 1.60 ms、signal 1.00 ms。下一步按"metab_env（prep + group_flow）优先，physics 拆 FFI 边界并行"推进。
+
+---
+
+## 49. v0.44.0：metab_env 扁平化与 physics FFI 边界专项（2026-11-26）
+
+### 49.1 metab_env：先证伪范围循环，再改两处真实开销
+
+- 微探针对照：typed 直接属性访问 344 → 176 µs；`_energy_flow_add` 式每细胞字典查找 1099 µs vs 扁平直写 329 µs；旧逐条 `record` 1798 µs vs `record_batch` 363 µs。用户原怀疑的"按 intake_type 的范围循环本身"只占约 350 µs，不是主因。
+- 改动仅涉及诊断缓冲与只读派生数组：`org_alive` 每 tick 取一次；`respiration` / `nutrition_priority` 用 typed 属性访问；能量流直写扁平 `PackedFloat64Array`。这些都不进 state hash，语法与语义等价由双工程闸门确认。
+- 同会话 A/B：`metab_env` 2888 → 1479 / 1496 µs（-48%）。
+
+### 49.2 physics：拆到 FFI 两侧后锁定 C++ 碰撞
+
+- 新增六段只读埋点（`phys_args` / `phys_verlet` / `phys_verlet_write` / `phys_collision` / `phys_collision_write` / `phys_project`），`WindowPerfBenchmark` 过滤新增 `phys_` 前缀。
+- 结果：physics 3967 µs = `phys_collision` 3682 µs（93%）+ `phys_project` 219 µs + `phys_verlet` 40 µs + 准备/写回 <10 µs。**v0.42 担心的"尾部场采样落在 physics 段"被证伪**；顶部 physics 与 PerfProbe 的差额是 `tick_setup` 1379 µs + `tick_stats` 159 µs。
+- 这与 Cell Lab/Alien 的教训一致：真正贵的不是线程/GPU 边界，而是内核里对每个元素的容器访问。Alien 用 40 字节 `LightObject` 紧凑镜像避免邻居扫描碰 500 字节对象；本项目对应做法是把 `PackedFloat32Array` 的逐次 `set/operator[]` 换成一次 `ptrw()` 裸指针。
+
+### 49.3 C++ 改动与逐位保证
+
+- `CellSpatial::resolve_collisions()`：进入函数后取 `float *px/py = pos_x.ptrw() / pos_y.ptrw()` 与 `alive/scale/stiffness` 的 `ptr()`；pair 构建与 6 轮修正循环全部走裸指针。每次修正仍是 `double` 计算后 `static_cast<float>` 写回，float32 舍入点与顺序完全不变；网格构建、pair 遍历序（`a` 升序 → 9 格 → 插入序）、`b > a`、2× 距离过滤、每 3 轮重建、`max_correction < 0.001` 提前退出均未改。
+- 原型 `spatial_parity_probe.gd`：邻域 CSR 657380 值全等、collect_inputs 12000 值全等、碰撞 73620 次修正位置全等。
+- 双工程 `NativeParityProbe` 的 m1_photo tick=1 `872470415` / tick=700 `3284848376` 与 v0.43 完全相同。
+- DLL SHA-256：`81142C2A7964D68F37F28AEFA101208C9370C2482D9392D89179283E5200738F`，已同步 `native/`/构建工作区/两个发布工程。
+
+### 49.4 同会话 A/B 与结论
+
+| 指标 | v0.43 | v0.44 首轮 | v0.44 确认轮 |
+| --- | ---: | ---: | ---: |
+| `metab_env` | 2888 µs | 1479 µs | 1496 µs |
+| `phys_collision` | 3682 µs | 1636 µs | 1679 µs |
+| `physics` | 3967 µs | 1890 µs | 1941 µs |
+| PerfProbe 裸 tick | 10.66 ms | 7.92 ms | 8.10 ms |
+| tick1 全链 p50 | 16033 µs | 9980 µs | 9934 µs |
+
+- **≤8 ms/tick 仍未稳定达标**：两轮裸 tick 7.92 / 8.10 ms 分列 8 ms 线两侧；按验收口径如实记为未达标，不宣称通过。
+- 剩余热点：metab_fields 1.30–1.35 ms（GPU 采样准备，GPU `post` 约 0.32 ms）、behavior 1.43–1.53 ms、signal 0.88–0.97 ms、metab_base 0.73–0.79 ms、头部 tick_setup 约 1.15 ms、tick_stats 约 0.16 ms。下一轮目标是 metab_fields/头部采样准备与 behavior 的进一步扁平化，仍需逐位闸门。
