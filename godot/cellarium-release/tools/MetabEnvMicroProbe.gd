@@ -29,6 +29,7 @@ func _initialize() -> void:
 	genome.set("division_mass", 0.05)
 	genome.set("max_cells_per_organism", int(genome_script.get_script_constant_map().get("UNLIMITED_CELLS", -1)))
 	genome.call("set_modes", genome_script.call("solo_photo_modes"))
+	var genomes: Dictionary = {}
 	var spawned: int = 0
 	for row in range(-16, 17):
 		for col in range(-16, 17):
@@ -39,6 +40,7 @@ func _initialize() -> void:
 			if x * x + y * y > 200.0 * 200.0:
 				continue
 			manager.call("register_zygote", spawned, 0, -1, genome, Vector2(x, y), 1.0, 0)
+			genomes[spawned] = genome
 			spawned += 1
 	for i in range(4):
 		manager.call("advance_physics_tick", 1.0 / 60.0)
@@ -47,8 +49,13 @@ func _initialize() -> void:
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var types: PackedByteArray = cells.get("cell_type")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var energies: PackedFloat32Array = (cells.get("cell_energy") as PackedFloat32Array).duplicate()
-	var health: PackedFloat32Array = (manager.get("organisms") as RefCounted).get("org_health").duplicate()
+	var organisms: RefCounted = manager.get("organisms") as RefCounted
+	var health: PackedFloat32Array = organisms.get("org_health").duplicate()
+	var org_alive: PackedByteArray = organisms.get("org_alive")
+	var org_count: int = int(org_alive.size())
 	# 构造 food_gains / movement_costs / toxic_flags（光合场景典型值）
 	var food_gains: PackedFloat64Array = PackedFloat64Array()
 	var movement_costs: PackedFloat64Array = PackedFloat64Array()
@@ -81,6 +88,12 @@ func _initialize() -> void:
 	var acc_flow: int = 0
 	var acc_ledger: int = 0
 	var acc_health: int = 0
+	var acc_fetch: int = 0
+	var acc_prep: int = 0
+	var acc_group_flow: int = 0
+	var acc_death_scan: int = 0
+	var acc_consume: int = 0
+	var acc_consume_calls: int = 0
 	var DT: float = 1.0 / 60.0
 	var TOXIC: float = float(manager.get("anaerobic_toxicity_damage_per_second"))
 	for rep in range(REPEAT):
@@ -88,6 +101,22 @@ func _initialize() -> void:
 		var h: PackedFloat32Array = health.duplicate()
 		var fp: PackedFloat64Array = flow_prod.duplicate()
 		var fs: PackedFloat64Array = flow_self.duplicate()
+		var tf0: int = Time.get_ticks_usec()
+		var fetched_flat: PackedFloat32Array = env.call("get_field_samples_flat")
+		var fetched_idx: PackedInt32Array = env.call("get_field_sample_index_array", count)
+		var tf1: int = Time.get_ticks_usec()
+		acc_fetch += tf1 - tf0
+		var tp0: int = Time.get_ticks_usec()
+		var resp_values: PackedByteArray = PackedByteArray()
+		resp_values.resize(org_count)
+		var prio_values: PackedFloat32Array = PackedFloat32Array()
+		prio_values.resize(org_count)
+		prio_values.fill(0.5)
+		for oid in genomes:
+			resp_values[int(oid)] = int(genomes[oid].get("respiration"))
+			prio_values[int(oid)] = clampf(float(genomes[oid].get("nutrition_priority")), 0.0, 1.0)
+		var tp1: int = Time.get_ticks_usec()
+		acc_prep += tp1 - tp0
 		var t0: int = Time.get_ticks_usec()
 		for i in range(count):
 			if alive[i] == 0:
@@ -136,6 +165,39 @@ func _initialize() -> void:
 		acc_ledger += t4 - t3
 		acc_ledger_batch += t4b - t4
 		acc_health += t5 - t4b
+		var tg0: int = Time.get_ticks_usec()
+		var groups: Dictionary = {}
+		for i in range(count):
+			if alive[i] == 0:
+				continue
+			var fg: float = float(food_gains[i])
+			if fg > 0.0:
+				var key: int = int(types[i])
+				if not groups.has(key):
+					groups[key] = PackedFloat64Array()
+				(groups[key] as PackedFloat64Array).append(fg)
+			# 镜像 _energy_flow_add 的两次字典查找 + 边界检查 + 写入。
+			if fg > 0.0:
+				fp[i] += fg
+			fs[i] += float(movement_costs[i])
+		var tg1: int = Time.get_ticks_usec()
+		acc_group_flow += tg1 - tg0
+		var tc0: int = Time.get_ticks_usec()
+		for i in range(count):
+			if alive[i] == 0:
+				continue
+			var fg: float = float(food_gains[i])
+			if fg > 0.0 and types[i] == 0:
+				env.call("consume_nutrient", Vector2(pos_x[i], pos_y[i]), fg)
+				acc_consume_calls += 1
+		var tc1: int = Time.get_ticks_usec()
+		acc_consume += tc1 - tc0
+		var td0: int = Time.get_ticks_usec()
+		for oid in range(org_count - 1, -1, -1):
+			if org_alive[oid] != 0 and h[oid] <= 0.0:
+				pass
+		var td1: int = Time.get_ticks_usec()
+		acc_death_scan += td1 - td0
 	print("METAB_MICRO cells=%d repeat=%d" % [count, REPEAT])
 	print("METAB_MICRO read_us=%.1f" % (float(acc_read_us) / float(REPEAT)))
 	print("METAB_MICRO energy_us=%.1f" % (float(acc_energy) / float(REPEAT)))
@@ -143,5 +205,18 @@ func _initialize() -> void:
 	print("METAB_MICRO ledger_record_us=%.1f" % (float(acc_ledger) / float(REPEAT)))
 	print("METAB_MICRO ledger_batch_us=%.1f" % (float(acc_ledger_batch) / float(REPEAT)))
 	print("METAB_MICRO health_us=%.1f" % (float(acc_health) / float(REPEAT)))
+	print("METAB_MICRO fetch_us=%.1f" % (float(acc_fetch) / float(REPEAT)))
+	print("METAB_MICRO prep_us=%.1f" % (float(acc_prep) / float(REPEAT)))
+	print("METAB_MICRO group_flow_us=%.1f" % (float(acc_group_flow) / float(REPEAT)))
+	print("METAB_MICRO death_scan_us=%.1f" % (float(acc_death_scan) / float(REPEAT)))
+	print("METAB_MICRO consume_us=%.1f calls=%d" % [float(acc_consume) / float(REPEAT), acc_consume_calls / REPEAT])
+	var type_zero: int = 0
+	var type_four: int = 0
+	for i in range(count):
+		if types[i] == 0:
+			type_zero += 1
+		elif types[i] == 4:
+			type_four += 1
+	print("METAB_MICRO types zygote=%d photo=%d" % [type_zero, type_four])
 	print("METAB_MICRO gain_positive=%d" % acc_read)
 	quit()

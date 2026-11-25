@@ -1862,8 +1862,13 @@ func apply_command(command: Dictionary) -> int:
 
 func advance_development_tick() -> int:
 	var executed: int = 0
-	for org_id in range(organisms.get("org_alive").size()):
-		if organisms.get("org_alive")[org_id] == 0 or organisms.get("org_state")[org_id] != ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"]:
+	# v0.43 诊断：存活/状态数组每 tick 只读一次，避免逐个体重复走 Dictionary 查找。
+	# org_dev_cursor 不在循环外缓存：execute_instruction 会原地推进它，必须每次现取。
+	var alive_flags: PackedByteArray = organisms.get("org_alive")
+	var states: PackedByteArray = organisms.get("org_state")
+	var developing_state: int = int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["STATE_DEVELOPING"])
+	for org_id in range(alive_flags.size()):
+		if alive_flags[org_id] == 0 or states[org_id] != developing_state:
 			continue
 		if not genomes.has(org_id):
 			continue

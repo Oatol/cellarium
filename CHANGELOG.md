@@ -4,6 +4,42 @@
 
 ---
 
+## 0.43.0 — 2026-11-26
+
+**类型**：dev（发育 tick）首轮专项——先做只读全景确认，再把逐个体重复 Dictionary 查找改为 tick 开头一次性读取 SoA 数组。**同会话 A/B：dev p50 3285 → 71 µs（-97.8%）。纯 GDScript，DLL 未变；state hash 与原生逐位一致。≤8 ms/tick 仍未达成。**
+
+### 全景确认（第 0 步，只读）
+
+- 真实 Vulkan 窗口 1025 细胞跑既有 `WindowPerfBenchmark`：dev 段均值 3349 µs / p50 3285 µs / p95 3887 µs，稳定在 3 ms 量级（比交接文档记录的 2.7 ms 更高）。
+- `PerfProbe.STAGES` 与 `WindowPerfBenchmark` 均无 dev 内部分段；dev 只有顶层整块计时，确认是信息盲区。
+- 同会话基线同时记录：tick1 p50 22005 µs、metab_env 3063 µs、physics 分段 15572 µs。
+
+### 诊断与实现
+
+- `advance_development_tick()` 每个体两次 `organisms.get("org_alive")` / `get("org_state")`、一次常量 map 查询；在 1025 个体下这是 dev 段的全部成本（本场景个体均为 MATURE，指令体不执行）。
+- 改为 tick 开头各取一次 `PackedByteArray` 局部变量、常量只查一次；`org_dev_cursor` **不**外提，因为 `execute_instruction` 会原地推进它，必须逐次现取。
+- `MetabEnvMicroProbe.gd` 扩展诊断分段（fetch / prep / group_flow / death_scan / consume / 类型分布），不改模拟代码：证实 consume 调用数为 0、细胞全为 PHOTOCYTE；`prep` 526 µs、`group_flow` 458 µs 是下一轮 metab_env 的候选。
+
+### 真实窗口 A/B（同会话同场景，1025 细胞）
+
+| 指标 | 改前 | 改后 | 变化 |
+| --- | ---: | ---: | ---: |
+| dev 段 p50 | 3285 µs | 71 µs | -97.8% |
+| tick1 全链 p50 | 22005 µs | 16033 µs | 同会话波动大，不单独归因 |
+| PerfProbe total | 13.16 ms | 12.20 ms | 同上 |
+
+其余段（physics / metab_env）在同会话两次运行中有 6–11% 漂移，不作为本改动收益；仅 dev 的 46× 远超漂移。
+
+### 闸门
+
+- `SmokeTest: SCRIPTS=71 FAILURES=0`（工作区 + D 盘双工程）。
+- `NativeParityProbe: OK failures=0`，M1 与 legacy 各检查点 gd == cpp 逐位相同；本改动只读数组、无写入，状态语义不变。
+- 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`。
+- DLL SHA 保持 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+- `cpu_budget_met=false`，如实记录。剩余热点：metab_env 2.89 ms、physics 4.08 ms（PerfProbe）、metab_fields 1.35 ms、behavior 1.60 ms。
+
+---
+
 ## 0.42.0 — 2026-11-25
 
 **类型**：场采样准备链路专项——四层分段定位 + SoA 直读 + 扁平 GPU 采样路径。**结论：v0.41 留下的 physics 段约 2.4 ms 差额，经四层计时定位为每 tick 两次场采样准备中的逐细胞临时数组/字典缓存构建（单次 0.68 ms），而非 GPU 同步。改为直读 SoA 位置 + GPU 回读字节直写扁平缓冲后，metab_fields 2.24→1.02 ms、setup_positions 0.56→0.15 ms、tick1 p50 18.0–18.5→15.4–16.7 ms；真实 GPU 窗口 5125 个采样值逐位一致，state hash 不变。纯 GDScript 改动，DLL 未变。**

@@ -1650,3 +1650,34 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 - `NativeParityProbe`：双工程 `OK failures=0`，M1 全检查点 hash 与 v0.41 逐位相同（如 m1_photo tick=1 `872470415`、tick=700 `3284848376`）。
 - 真实 GPU 窗口 flat 路径逐位对照 `values=5125 failures=0`。
 - **≤8 ms/tick 仍未达成**，如实记录。当前剩余：metabolism 4.44 ms（`metab_env` 2.48 / `metab_fields` 1.02 / `metab_base` 0.71）、physics 3.54 ms、dev 2.7 ms、behavior 1.39 ms、signal 0.85 ms，以及头部准备约 1.15 ms。下一优先目标转为 `metab_env` 2.48 ms 与 physics 3.54 ms 的进一步下沉，需另立专项并保持逐位闸门。
+
+---
+
+## 48. v0.43.0：dev 段全景确认与只读遍历外提（2026-11-26）
+
+### 48.1 第 0 步：先确认 dev 真实占比（不写代码）
+
+- 同会话真实 Vulkan 窗口基线：dev 均值 3349 µs / p50 3285 µs / p95 3887 µs，稳定在 3 ms 量级，高于交接文档记录的 2.7 ms。目标缺口 7.4–8.7 ms，而 dev 单项就占 3.3 ms，**有资格升为并列专项**。
+- `PerfProbe.STAGES`（behavior/physics/metabolism/predation/signal/field/commit）与 `WindowPerfBenchmark` 的顶层六段都没有 dev 内部分段；dev 是纯盲区。
+- 直接读源码：`advance_development_tick()` 对每个 org 反复执行 `organisms.get("org_alive")` / `get("org_state")` 与常量 map 查询；本场景 org 全为 MATURE，指令体根本不执行，3.3 ms 全部是遍历与字典查找开销。
+
+### 48.2 借鉴来源：Cell Lab / Alien 如何避免"模拟流程卡"
+
+- **Cell Lab（v103，反编译源码 `decompiled_zh`）**：`CellWorld` 构造函数一次性预分配 `Cell[] x`、`Food[] A`、`Link[] J` 与两张固定容量空间网格 `aV[网格数][203]` / `ba[网格数][404]`，死亡用 `x[i].a(x[z-1]); z--` 的尾槽换删，出生写 `x[z]`，全程不 new；渲染缓冲 `ByteBuffer → FloatBuffer k/l/m/n/o` 同样预分配，按材质 `glDrawArrays` 批量提交。`com_saterskog_cell_lab_q` 在 `onDrawFrame` 把 update1/update2 作为两个 Runnable 提交给 **单线程 `ThreadPoolExecutor(1,1)`**（第 135 行），渲染线程只做 GL，并用 `Thread.sleep((16666666 - nanoTime)/1000000)` 把帧节奏锁在 60 fps；过夜培养模式则在后台 Runnable 内一次跑 15 步、最多 50 ms 一批。核心思路：**模拟与绘制线程解耦 + 全预分配 + 固定上限网格 + 每帧步数节流**。
+- **Alien（chrxh/alien，source/Engine/Impl + source/Data）**：`EngineWorker::runThreadLoop()` 独立线程每次 `calcTimesteps(1, false)`，默认 `_syncSimulationWithRendering=false`，TPS 限速用 `slowdownTPS()` + 忙等 `waitAndAllowAccess()`，渲染缓冲拷贝有 `FrameTimeout(500ms)` 且超时跳过；`SimulationKernelsService::launchTimestepKernels()` 把一步拆成 `physics_fillGrids → calcFluidForces → applyForces → verletPositionUpdate → energyFlow → cellState → cell function → structuralOperations` 的固定 kernel 序列，通过 CUDA Graph `cudaStreamBeginCapture` / `cudaGraphLaunch` 一次性发射（调试模式才逐个 launch），每步只在 GC 前 `cudaStreamSynchronize` 一次；`GarbageCollectorKernelsService` 用 pointer-array 与 heap 双缓冲 + `cudaSwapPointerArrays/cudaSwapHeaps` 做槽位回收；`EngineConstants.h` 规定 `TIMESTEPS_PER_CELL_FUNCTION=6`、`MAX_OBJECT_CONNECTIONS=6`、`NEURAL_NET_INPUTS=16`，把昂贵工作限频、把每对象工作量设硬上限。核心思路：**整步批量发射、一次性同步、双缓冲复用、昂贵逻辑按周期降频**。
+- 对本项目可借鉴：dev/metab_env 这类 GDScript O(n) 扫描应做成"每 tick 只读一次共享数组 + 局部 typed array"（对应 Cell Lab 的预分配与 Alien 的批量提交）；昂贵逻辑按周期或脏标记触发（Alien 的 `TIMESTEPS_PER_CELL_FUNCTION`、Cell Lab 的 `bg` 冻结分支）；**不**能照搬整体搬 GPU，因为会破坏 state hash 逐位闸门与 CPU 回退等价。
+
+### 48.3 实现与 A/B
+
+- `OrganismManager.advance_development_tick()`：tick 开头取一次 `org_alive` / `org_state` 两个 `PackedByteArray` 和一次 `STATE_DEVELOPING` 常量，循环内不再走 Dictionary；`org_dev_cursor` 保持逐个现取（`execute_instruction` 原地推进，不能缓存）。
+- 同会话 A/B：dev p50 3285 → 71 µs，p95 3887 → 82 µs，约 46×。tick1 p50 22005 → 16033 µs、PerfProbe total 13.16 → 12.20 ms，但 physics / metab_env 同时出现 6–11% 漂移，故不把整链下降归因于本改动。
+
+### 48.4 metab_env 微探针补测（第 1 步预备，仍只读）
+
+- 扩展 `tools/MetabEnvMicroProbe.gd` 的分段：`fetch` 149 µs、`prep` 526 µs、`group_flow` 458 µs、`death_scan` 31 µs；`ledger_batch` 525 µs 对比旧 `record` 2822 µs；`consume` 调用 0 次、细胞类型 1142/1142 全为 PHOTOCYTE，再次证伪 consume。
+- 用户原先怀疑的"逐细胞范围循环本身"只占约 350 µs；真实缺口主要在每 tick 重建 respiration/priority 数组（`prep`）与账本分组 + `_energy_flow_add` 的字典/边界检查（`group_flow`），下一轮优先验证这两处的缓存化与扁平化。
+
+### 48.5 闸门与结论
+
+- 双工程 `SmokeTest: SCRIPTS=71 FAILURES=0`；`NativeParityProbe: OK failures=0`（m1_photo tick=1 `872470415`、tick=700 `3284848376` 与 v0.42 相同）；真实窗口 flat parity `values=5125 failures=0`。DLL 未改，SHA 不变。
+- `cpu_budget_met=false`，≤8 ms/tick 未达成。剩余：metab_env 2.89 ms、physics 4.08 ms、metab_fields 1.35 ms、behavior 1.60 ms、signal 1.00 ms。下一步按"metab_env（prep + group_flow）优先，physics 拆 FFI 边界并行"推进。
