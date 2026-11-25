@@ -4,6 +4,43 @@
 
 ---
 
+## 0.41.0 — 2026-11-25
+
+**类型**：metab_env 副作用循环下沉专项——账本批量化。**结论：微探针定位到 metab_env 的 90% 开销是 `energy_ledger.record()` 的逐细胞 Dictionary entry 创建（1142 细胞 3.42ms），而非 consume 或数组累加。改为按 intake_type 分组的批量 `record_batch()` 后，真实窗口 metab_env 5.27→2.56ms（-51%）、tick1 22.9→19.5ms、tick3 65.1→54.3ms；state hash 逐位不变。纯 GDScript 改动，DLL 未变。**
+
+### 诊断
+
+- 新增 `tools/MetabEnvMicroProbe.gd`：复刻 M1 光合场景 metab_env 副作用循环，分段计时 read / energy / flow / ledger / health，并在同一 rep 内同进程 A/B 逐条 `record()` vs 批量 `record_batch()`。
+- 关键发现：M1 为 `cell_type=4`（PHOTOCYTE），光合分支不调用 `consume_nutrient`/`consume_signal`，所以 consume 在标准测试场景开销为零。真凶是账本逐条 record：1142 细胞下逐条 3423us，而 energy 148us / flow 141us / health 49us 加起来不足 350us。
+- 账本 entry 上限 `_max_entries=256`，1025 条摄入记录里绝大多数创建后立刻被 `pop_front()` 丢弃——纯浪费。
+
+### 实现
+
+- `EnergyLedger.gd`：新增 `record_batch(action, debit, credit, amounts, context)`。一次 Dictionary 池查找、一次 balance 累加；两遍扫描先算有效条数与余额，只为最后 `_max_entries` 条创建 Dictionary，避免为被丢弃条目分配。entries 组内按输入顺序追加，语义等价逐条 record。
+- `OrganismManager.gd`：`_apply_environment_metabolism_ranges()` 的 native 与 GDScript 兜底两条路径，都把 `energy_ledger.record()` 改为按 `intake_type` 分组收集 consumed，循环后 `_flush_ledger_groups()` 每组一次 `record_batch()`。energies / energy_flow / health / 死亡判定逻辑完全未动。
+- 语义边界：entries 顺序由「全局 cell 交错」变为「按 intake_type 分组、组内 cell 升序」。账本不进 state hash，守恒检查用容差，SmokeTest 只查 entries 数量——该变化安全。已在分析文档标注。
+
+### 闸门
+
+- `SmokeTest: SCRIPTS=71 FAILURES=0`。
+- `LedgerBatchParityProbe: checked=36 failures=0`（批量与逐条的余额、entries 内容、守恒断言全等，三种 intake_type 交错输入含 0/负值）。
+- `NativeParityProbe: OK failures=0`：state hash 与 v0.40 逐位相同（tick 1/2/10/60/300/302/600/602/700 检查点数字未变）。
+- 新探针 `MetabEnvMicroProbe.gd` / `LedgerBatchParityProbe.gd` 已登记 manifest。DLL SHA 保持 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+
+### 真实窗口 A/B（同会话同场景，1025 细胞，1×/3×）
+
+| 指标 | v0.40 | v0.41 | 变化 |
+| --- | ---: | ---: | ---: |
+| metab_env | 5.27 ms | 2.56 ms | -51% |
+| metabolism 总 | 8.60 ms | 5.66 ms | -34% |
+| tick1 全链 | 22.9 ms | 19.5 ms | -15% |
+| tick3 全链 | 65.1 ms | 54.3 ms | -17% |
+| tick1+cache | 29.9 ms | 26.5 ms | -11% |
+
+`≤8 ms/tick` 裸 tick 目标仍未达成，如实记录。当前 tick1 内剩余：physics 段 14.3ms（其中 PerfProbe physics 3.71ms、behavior 1.45ms、signal 0.88ms）、dev 2.79ms、metabolism 5.66ms。
+
+---
+
 ## 0.40.0 — 2026-11-25
 
 **类型**：tick CPU / 渲染解耦专项——真实窗口固定 1025 细胞分段定位 + 三角展开下沉。**结论：v0.39 合批虽把 draw call 降 88–94%，但 GDScript 逐顶点三角展开让批渲染缓存重建从约 1 ms 退化到 32.8 ms，抵消了收益；下沉 C++ 后 cache 降到 8.7 ms。tick 主瓶颈是 `metabolism` 8.6 ms（其中 `metab_env` 5.27 ms 的副作用循环仍在 GDScript），其次 physics 3.85 ms、dev 2.9 ms。≤8 ms/tick 目标仍未达成。**

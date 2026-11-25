@@ -62,6 +62,47 @@ func record(action: String, debit_pool: String, credit_pool: String, amount: flo
 	})
 	return true
 
+## v0.41.0：批量记同类型账目。语义等价于对 amounts 中每个 amount>0 逐条 record()，
+## 但把 1025 次 GDScript 调用压成 1 次：Dictionary 池查找/balance 更新各做一次，
+## entries 仍按输入顺序逐条追加并按 _max_entries 截断，因此条目内容与顺序一致。
+## amount<=0 或非有限值跳过（与 record() 的空操作语义一致）；返回成功入账条数。
+func record_batch(action: String, debit_pool: String, credit_pool: String, amounts: PackedFloat64Array, context: String) -> int:
+	if not _balances.has(debit_pool) or not _balances.has(credit_pool):
+		_violations += 1
+		return 0
+	var debit_value: float = float(_balances[debit_pool])
+	var credit_value: float = float(_balances[credit_pool])
+	# 先统计有效条数与余额增量，避免为最终会被 pop_front 丢弃的条目创建 Dictionary。
+	var valid_count: int = 0
+	for amount_value in amounts:
+		var amount: float = float(amount_value)
+		if amount <= 0.0 or not is_finite(amount):
+			continue
+		debit_value -= amount
+		credit_value += amount
+		valid_count += 1
+	# 仅追加最后 _max_entries 条；旧 entries 超出部分一次性移除，等价于逐条 pop_front 的结果。
+	var keep_from: int = maxi(0, valid_count - _max_entries)
+	var seen: int = 0
+	for amount_value in amounts:
+		var amount: float = float(amount_value)
+		if amount <= 0.0 or not is_finite(amount):
+			continue
+		if seen >= keep_from:
+			if _entries.size() >= _max_entries:
+				_entries.pop_front()
+			_entries.append({
+				"action": action,
+				"debit": debit_pool,
+				"credit": credit_pool,
+				"amount": amount,
+				"context": context,
+			})
+		seen += 1
+	_balances[debit_pool] = debit_value
+	_balances[credit_pool] = credit_value
+	return valid_count
+
 func get_entries() -> Array[Dictionary]:
 	return _entries.duplicate(true)
 

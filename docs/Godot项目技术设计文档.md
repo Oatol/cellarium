@@ -662,6 +662,8 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 
 **v0.40.0 三角展开下沉与 tick 分段定位**：GDScript 逐顶点三角展开使批渲染缓存重建从约 1 ms 退化到 32.8 ms，故把展开并入 `CellRenderCache.rebuild()` 的 C++ 路径（输出 `batch_vertices` / `batch_colors` / `batch_indices`），GDScript 仅作 DLL 缺失兜底；真实窗口 1025 细胞 cache 相位降回 8.7 ms。新增 `tools/WindowPerfBenchmark.tscn/.gd`：固定细胞数、冻结主 tick、手动跑 1×/3× tick 与缓存重建并输出 avg/p50/p95；`PerfProbe.diagnostic_averages()` 暴露 metab_* 子阶段（只读诊断，不进汇总与 state hash）。1025 细胞读数：tick1 22.9 ms / tick3 65.1 ms / cache 8.7 ms；tick 内 `metabolism` 8.6 ms（其中 `metab_env` 5.27 ms）为一级瓶颈，`physics` 3.85 ms 次之。≤8 ms/tick 目标仍未达成。`metab_env` 的跨模块副作用循环仍在 GDScript，是后续解耦专项目标，本版未改模拟逻辑。
 
+**v0.41.0 账本批量化**：微探针（§46）定位到 metab_env 的 90% 开销是 `energy_ledger.record()` 逐细胞创建 Dictionary entry（1142 细胞 3.42 ms），而非 consume 或数组累加；M1 光合细胞不调用 consume。`EnergyLedger.record_batch()` 两遍扫描、只为最后 `_max_entries` 条创建 entry；`OrganismManager._apply_environment_metabolism_ranges()` 两条路径按 intake_type 分组批量记账。真实窗口 1025 细胞 metab_env 5.27→2.56 ms（-51%）、tick1 22.9→19.5 ms，state hash 逐位不变。entries 顺序由 cell 交错改为按类型分组（账本不进 hash、守恒容差断言），有 `LedgerBatchParityProbe` 保证内容等价。纯 GDScript 改动，DLL 未变。≤8 ms/tick 仍未达成。
+
 ### 5.3 场可视化
 
 普通 / 热力 / 分析三视图共用 `FieldOverlay`：shader 采样最新场纹理，普通视图仅做微弱辉光，热力视图映射单通道到 8 色渐变，分析视图叠加等值线与矢量箭头（洋流）。视图切换只换 uniform，不重建场景。小地图复用同一纹理的低分辨率副本，帧率限制为 10 fps。

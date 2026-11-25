@@ -72,6 +72,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/DenseClusterProbe.gd",
 	"res://tools/WindowPerfScenario.gd",
 	"res://tools/WindowPerfBenchmark.gd",
+	"res://tools/MetabEnvMicroProbe.gd",
+	"res://tools/LedgerBatchParityProbe.gd",
 ]
 
 func _initialize() -> void:

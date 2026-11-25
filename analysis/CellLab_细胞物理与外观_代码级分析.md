@@ -1565,3 +1565,44 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 - `metab_fields` 2.30 ms 是环境场采样批量回读开销；`dev` 2.93 ms 是发育/分裂段。
 - 三级倍速下主循环每帧跑多个 tick，tick CPU 是体验卡顿真凶；渲染解耦（模拟线程 / tick 分片）应围绕上述热点展开。≤8 ms/tick 裸 tick 目标仍未达成，如实记录。
 - 本版改的是只读派生视图数据与诊断工具，不进 state hash。DLL SHA 更新为 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+
+---
+
+## 46. v0.41 metab_env 副作用循环下沉：账本批量化
+
+### 46.1 先测量再下沉（避免凭函数名猜）
+
+承接 §45「metab_env 5.27 ms 是最大热点」的结论，本版先用微探针 `tools/MetabEnvMicroProbe.gd` 复刻 M1 光合场景的副作用循环、分段计时，结果（1142 细胞）：
+
+| 段 | 逐条耗时 |
+| --- | ---: |
+| read（读取 food_gains/costs） | ~0.07 ms |
+| energy（energies 累加 + movement） | ~0.15 ms |
+| flow（energy_flow 累加） | ~0.14 ms |
+| **ledger（逐条 record）** | **3.42 ms** |
+| health（毒性扣血） | ~0.05 ms |
+
+**纠正 §45 的推断**：曾以为 consume 循环（consume_nutrient/consume_signal）是大头，但 M1 是 `cell_type=4`（PHOTOCYTE），光合分支不调用 consume，其开销为零。真正的大头是账本 `record()` 的逐细胞 Dictionary entry 创建。`_max_entries=256`，1025 条摄入记录绝大多数创建后立刻 `pop_front()` 丢弃，纯浪费。这再次印证「定位热点必须先分段计时」。
+
+### 46.2 实现
+
+- `EnergyLedger.record_batch(action, debit, credit, amounts, context)`：一次 Dictionary 池查找、一次 balance 累加；两遍扫描——先算有效条数与余额增量，只为最后 `_max_entries` 条创建 Dictionary。entries 组内按输入顺序追加，语义等价逐条 record。
+- `OrganismManager._apply_environment_metabolism_ranges()`：native 与 GDScript 兜底两路径都改为按 `intake_type` 分组收集 consumed，循环后 `_flush_ledger_groups()` 每组一次 record_batch。energies / energy_flow / health / 死亡判定逻辑完全未动。
+- 语义边界：entries 顺序由全局 cell 交错变为按 intake_type 分组、组内 cell 升序；账本不进 state hash，守恒检查容差 0.01，SmokeTest 只查 entries 数量，故安全。`LedgerBatchParityProbe` 验证三种 intake_type 交错输入（含 0/负值）下余额、entries 内容、守恒断言与逐条 record 全等。
+
+### 46.3 真实窗口 A/B（同会话同场景，1025 细胞）
+
+| 指标 | v0.40 | v0.41 | 变化 |
+| --- | ---: | ---: | ---: |
+| metab_env | 5.27 ms | 2.56 ms | -51% |
+| metabolism 总 | 8.60 ms | 5.66 ms | -34% |
+| tick1 全链 | 22.9 ms | 19.5 ms | -15% |
+| tick3 全链 | 65.1 ms | 54.3 ms | -17% |
+
+微探针同进程 A/B：逐条账本 3423us → 批量 606us（5.6×）。`NativeParityProbe` state hash 与 v0.40 逐位相同，确认模拟真相源未变。DLL 未改（纯 GDScript）。
+
+### 46.4 结论与下一步
+
+- 账本逐条 record 是 metab_env 的伪瓶颈（大部分 entry 被立刻丢弃），批量化 + 只保留尾部 max 条是零精度风险的纯收益。
+- ≤8 ms/tick 仍未达成。当前 tick1 剩余：physics 段 14.3 ms（PerfProbe physics 3.71 ms / behavior 1.45 ms / signal 0.88 ms）、dev 2.79 ms、metabolism 5.66 ms。physics 段与 PerfProbe 分项之和仍有差值（`advance_physics_tick` 整段含验证未细分部分），后续需继续分段定位。
+- 本版未改 C++/DLL，未改 state hash 参与字段。
