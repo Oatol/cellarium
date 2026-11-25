@@ -211,7 +211,13 @@ func _rebuild_cache_native(native_cache: RefCounted) -> bool:
 	_links = result["links"]
 	_active_count = int(result.get("active_count", 0))
 	_last_chord_count = int(result.get("chord_count", 0))
-	_build_batched_commands()
+	# v0.40.0：C++ 已顺带完成三角展开，直接取用；GDScript 逐顶点 append 曾导致 32ms 回归。
+	if result.has("batch_vertices") and result.has("batch_colors") and result.has("batch_indices"):
+		_batch_vertices = result["batch_vertices"]
+		_batch_colors = result["batch_colors"]
+		_batch_indices = result["batch_indices"]
+	else:
+		_build_batched_commands()
 	return true
 
 func _rebuild_cache_gdscript() -> void:

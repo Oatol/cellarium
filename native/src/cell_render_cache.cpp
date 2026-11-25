@@ -41,6 +41,31 @@ PackedVector2Array unit_circle(int segments) {
 	return unit;
 }
 
+void append_triangle(PackedVector2Array &vertices, PackedColorArray &colors,
+		const Vector2 &a, const Vector2 &b, const Vector2 &c, const Color &color) {
+	vertices.append(a);
+	vertices.append(b);
+	vertices.append(c);
+	colors.append(color);
+	colors.append(color);
+	colors.append(color);
+}
+
+void append_segment(PackedVector2Array &vertices, PackedColorArray &colors,
+		const Vector2 &a, const Vector2 &b, const Color &color, double width) {
+	const Vector2 delta = b - a;
+	const double length_squared = static_cast<double>(delta.length_squared());
+	if (length_squared < 0.000001) return;
+	const Vector2 normal = Vector2(-delta.y, delta.x) / static_cast<float>(std::sqrt(length_squared))
+		* static_cast<float>(width * 0.5);
+	const Vector2 p0 = a + normal;
+	const Vector2 p1 = a - normal;
+	const Vector2 p2 = b - normal;
+	const Vector2 p3 = b + normal;
+	append_triangle(vertices, colors, p0, p1, p2, color);
+	append_triangle(vertices, colors, p0, p2, p3, color);
+}
+
 /// Sutherland-Hodgman half-plane clip; keep the side containing the origin.
 PackedVector2Array clip_keep_origin(const PackedVector2Array &points, const Vector2 &a, const Vector2 &b) {
 	const Vector2 edge = b - a;
@@ -299,6 +324,48 @@ Dictionary CellRenderCache::rebuild(
 		nucleus_colors.append(Color(0.08f, 0.16f, 0.15f, static_cast<float>(0.85 * vitality)));
 	}
 
+	// v0.40.0 C 路线：把 GDScript _build_batched_commands() 的三角展开下沉到此处。
+	// 逐顶点 PackedVector2Array.append() 在 GDScript 下 1024 细胞约 32ms，
+	// 是 draw call 已降但帧时间未变的根因。此处与 GDScript 兜底路径逐点同构。
+	PackedVector2Array batch_vertices;
+	PackedColorArray batch_colors;
+	PackedInt32Array batch_indices;
+	const PackedVector2Array nucleus_unit = unit_circle(12); // GDScript maxi(12, 8) == 12
+	const Color link_color(0.58f, 0.82f, 0.72f, 0.42f);
+	for (int index = 0; index < polygons.size(); ++index) {
+		const PackedVector2Array polygon = polygons[index];
+		if (polygon.size() < 3) continue;
+		const Color body_color = body_colors[index];
+		const Vector2 origin = polygon[0];
+		for (int point_index = 1; point_index < polygon.size() - 1; ++point_index) {
+			append_triangle(batch_vertices, batch_colors, origin,
+					polygon[point_index], polygon[point_index + 1], body_color);
+		}
+		const PackedVector2Array outline = outlines[index];
+		const Color outline_color = outline_colors[index];
+		for (int point_index = 0; point_index < outline.size(); ++point_index) {
+			append_segment(batch_vertices, batch_colors, outline[point_index],
+					outline[(point_index + 1) % outline.size()], outline_color, 1.0);
+		}
+		const double nucleus_radius = std::max(1.0, static_cast<double>(radii[index]) * 0.15);
+		const Vector2 nucleus_center = centers[index];
+		const Color nucleus_color = nucleus_colors[index];
+		for (int point_index = 0; point_index < nucleus_unit.size(); ++point_index) {
+			append_triangle(batch_vertices, batch_colors, nucleus_center,
+					nucleus_center + nucleus_unit[point_index] * static_cast<float>(nucleus_radius),
+					nucleus_center + nucleus_unit[(point_index + 1) % nucleus_unit.size()] * static_cast<float>(nucleus_radius),
+					nucleus_color);
+		}
+	}
+	for (int link_index = 0; link_index + 1 < links.size(); link_index += 2) {
+		append_segment(batch_vertices, batch_colors, links[link_index], links[link_index + 1], link_color, 2.0);
+	}
+	const int vertex_count = batch_vertices.size();
+	batch_indices.resize(vertex_count);
+	for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
+		batch_indices.set(vertex_index, vertex_index);
+	}
+
 	Dictionary result;
 	result["polygons"] = polygons;
 	result["outlines"] = outlines;
@@ -308,6 +375,9 @@ Dictionary CellRenderCache::rebuild(
 	result["outline_colors"] = outline_colors;
 	result["nucleus_colors"] = nucleus_colors;
 	result["links"] = links;
+	result["batch_vertices"] = batch_vertices;
+	result["batch_colors"] = batch_colors;
+	result["batch_indices"] = batch_indices;
 	result["active_count"] = polygons.size();
 	result["chord_count"] = chord_count;
 	return result;

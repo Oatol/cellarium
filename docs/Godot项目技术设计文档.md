@@ -660,6 +660,8 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 
 **v0.39.0 大规模档实现补充（纯视图）**：`CellPolygonBatchRenderer` 与 `LinkLayer` 不再逐细胞/逐连接调用 `draw_colored_polygon` / `draw_polyline` / `draw_circle` / `draw_line`，而是把细胞体、核、膜、连接光桥与能量流光点展平为三角数组，通过 `RenderingServer.canvas_item_add_triangle_array()` 一次提交。真实窗口 1324 细胞同场景 A/B：draw call 4231→259，但帧时间未改善；因此该实现只作为提交开销优化，不能替代 tick CPU 优化。所有几何均为只读派生数据，不写模拟状态、不进 state hash。
 
+**v0.40.0 三角展开下沉与 tick 分段定位**：GDScript 逐顶点三角展开使批渲染缓存重建从约 1 ms 退化到 32.8 ms，故把展开并入 `CellRenderCache.rebuild()` 的 C++ 路径（输出 `batch_vertices` / `batch_colors` / `batch_indices`），GDScript 仅作 DLL 缺失兜底；真实窗口 1025 细胞 cache 相位降回 8.7 ms。新增 `tools/WindowPerfBenchmark.tscn/.gd`：固定细胞数、冻结主 tick、手动跑 1×/3× tick 与缓存重建并输出 avg/p50/p95；`PerfProbe.diagnostic_averages()` 暴露 metab_* 子阶段（只读诊断，不进汇总与 state hash）。1025 细胞读数：tick1 22.9 ms / tick3 65.1 ms / cache 8.7 ms；tick 内 `metabolism` 8.6 ms（其中 `metab_env` 5.27 ms）为一级瓶颈，`physics` 3.85 ms 次之。≤8 ms/tick 目标仍未达成。`metab_env` 的跨模块副作用循环仍在 GDScript，是后续解耦专项目标，本版未改模拟逻辑。
+
 ### 5.3 场可视化
 
 普通 / 热力 / 分析三视图共用 `FieldOverlay`：shader 采样最新场纹理，普通视图仅做微弱辉光，热力视图映射单通道到 8 色渐变，分析视图叠加等值线与矢量箭头（洋流）。视图切换只换 uniform，不重建场景。小地图复用同一纹理的低分辨率副本，帧率限制为 10 fps。

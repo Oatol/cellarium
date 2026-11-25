@@ -1529,3 +1529,39 @@ HUD 同时显示帧间隔、引擎 `Performance.TIME_PROCESS`、draw call、细�
 ### 44.5 闸门
 
 `SmokeTest: SCRIPTS=68 FAILURES=0`；`RenderCacheParityProbe checked=10353 failures=0`；`CellBatchOriginParityProbe checked=24 failures=0`。纯视图改动不进 state hash，DLL SHA 仍 `36DFEA19…5AB53D19`。
+
+---
+
+## 45. v0.40 tick CPU / 渲染解耦专项：真实窗口分段定位
+
+### 45.1 动机与口径
+
+v0.39 已证明显存窗口卡顿不是 GPU 合成/后处理：1324 细胞同场景 A/B 中 draw call 4231→259，但运行态 FPS/帧时间不变。本版回到 tick CPU：在真实 Vulkan 窗口内固定 1025 细胞、冻结主 tick，手动按固定 budget 调完整 tick 链与批渲染缓存重建，输出 avg/p50/p95。测量不经过编辑器 debugger / game_eval，避免 Time 采样被调试暂停污染（v0.39 已记录该口径不自洽）。
+
+### 45.2 合批回归与修复
+
+v0.39 的 `CellPolygonBatchRenderer._build_batched_commands()` 在 GDScript 中逐顶点 `PackedVector2Array.append()` 展开三角：1025 细胞下批渲染缓存重建从历史约 1 ms 退化到 **32.8 ms**，正好抵消 draw call 下降的收益。本版把该展开下沉到 C++ `CellRenderCache.rebuild()`（新增 `append_triangle` / `append_segment` / `unit_circle`，输出 `batch_vertices` / `batch_colors` / `batch_indices`），GDScript native 路径直接取用；DLL 缺失时回退 GDScript 兜底。修复后 cache 相位 **32.8 → 8.7 ms**。`RenderCacheParityProbe` 新增 batch 三角数组逐点对照（顶点/颜色/索引），`checked=266844 failures=0`。
+
+### 45.3 真实窗口 1025 细胞分层读数
+
+| 相位 | work avg | 说明 |
+| --- | ---: | --- |
+| tick1 | 22.9 ms | 1× 完整 tick 链 |
+| tick3 | 65.1 ms | 3×（三次 tick 链） |
+| cache | 8.7 ms | 仅批渲染缓存重建 |
+| tick1_cache | 29.9 ms | 1× tick + 缓存 |
+| tick3_cache | 72.6 ms | 3× tick + 缓存 |
+
+tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）17.7 ms、`dev`（`advance_development_tick`）2.93 ms、`nutrient` 45us、`food` 17us、`field`（`advance_field_tick`）0.92 ms。
+
+`advance_physics_tick` 内 PerfProbe 细分：`behavior` 1.52 ms、`physics` 3.85 ms、`metabolism` 8.60 ms、`predation` 0.19 ms、`signal` 0.93 ms、`total` 15.09 ms。
+
+`metabolism` 内部（metab_* 诊断子阶段）：`metab_env` **5.27 ms**、`metab_fields` 2.30 ms、`metab_base` 0.77 ms、`metab_radius` 0.10 ms、`metab_links` 0.08 ms、`metab_rates` 0.06 ms、`metab_lifecycle` 0.003 ms。
+
+### 45.4 结论与下一步
+
+- 一级瓶颈是 `metabolism` 8.6 ms，占 `advance_physics_tick` 15.1 ms 的 57%；再往下是 `metab_env` 5.27 ms。
+- `metab_env` 的纯数值段（`compute_environment_batch()`）已在 C++，但副作用循环（`consume_nutrient` / `consume_signal` / `energy_ledger.record` / `_energy_flow_add`）仍在 GDScript 逐细胞执行，是最大可下沉目标。它涉及跨模块副作用顺序，必须单独专项并保证 state hash 逐位一致，本版未实施。
+- `metab_fields` 2.30 ms 是环境场采样批量回读开销；`dev` 2.93 ms 是发育/分裂段。
+- 三级倍速下主循环每帧跑多个 tick，tick CPU 是体验卡顿真凶；渲染解耦（模拟线程 / tick 分片）应围绕上述热点展开。≤8 ms/tick 裸 tick 目标仍未达成，如实记录。
+- 本版改的是只读派生视图数据与诊断工具，不进 state hash。DLL SHA 更新为 `1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。

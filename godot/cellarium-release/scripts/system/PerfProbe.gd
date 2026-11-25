@@ -76,6 +76,28 @@ func averages() -> Dictionary:
 		result[stage] = sum_value / float(_samples.size())
 	return result
 
+## v0.40：诊断用——返回所有样本中出现过的键的平均值（含 metab_* 子阶段）。
+## 只读，不进 STAGES 汇总、不进 state hash，专供 WindowPerfBenchmark 定位热点。
+func diagnostic_averages() -> Dictionary:
+	var result: Dictionary = {}
+	if _samples.is_empty():
+		return result
+	var keys: Dictionary = {}
+	for sample in _samples:
+		for key in (sample as Dictionary).keys():
+			keys[str(key)] = true
+	for key in keys.keys():
+		var sum_value: float = 0.0
+		var count: int = 0
+		for sample in _samples:
+			var value: Variant = (sample as Dictionary).get(key, null)
+			if value != null:
+				sum_value += float(value)
+				count += 1
+		if count > 0:
+			result[str(key)] = sum_value / float(count)
+	return result
+
 ## 是否达到 §8.1 目标：1000 生物 / 8000 细胞时 tick ≤ 8 ms（headless CPU 可放宽到 14 ms）。
 func meets_tick_budget(cpu_fallback: bool = false) -> bool:
 	var averages_value: Dictionary = averages()

@@ -4,6 +4,37 @@
 
 ---
 
+## 0.40.0 — 2026-11-25
+
+**类型**：tick CPU / 渲染解耦专项——真实窗口固定 1025 细胞分段定位 + 三角展开下沉。**结论：v0.39 合批虽把 draw call 降 88–94%，但 GDScript 逐顶点三角展开让批渲染缓存重建从约 1 ms 退化到 32.8 ms，抵消了收益；下沉 C++ 后 cache 降到 8.7 ms。tick 主瓶颈是 `metabolism` 8.6 ms（其中 `metab_env` 5.27 ms 的副作用循环仍在 GDScript），其次 physics 3.85 ms、dev 2.9 ms。≤8 ms/tick 目标仍未达成。**
+
+### 诊断
+
+- 新增 `tools/WindowPerfBenchmark.tscn` / `.gd`：实例化真实 `main.tscn`，用 M1 光合自分裂 × 无限分裂 × 黏附基因组铺 1025 细胞，冻结主 tick，手动按固定 budget 跑 5 个相位（tick1 / tick3 / cache / tick1_cache / tick3_cache）各 120 帧，输出 avg/p50/p95 到 `user://window_perf_bench.txt`。不使用编辑器 debugger / game_eval 参与测量，避免 Time 采样被调试暂停污染。
+- 新增 tick 内部六段细分（cmd/physics/dev/nutrient/food/field），并通过 `PerfProbe.diagnostic_averages()` 暴露 metab_* 子阶段（只读，不进 STAGES 汇总与 state hash）。
+- 真实窗口 1025 细胞最终读数：`tick1` 22.9 ms、`tick3` 65.1 ms、`cache` 8.7 ms；tick 内部 `advance_physics_tick` 17.7 ms + `advance_development_tick` 2.9 ms + `advance_field_tick` 0.92 ms；PerfProbe `behavior` 1.52 / `physics` 3.85 / `metabolism` 8.60 / `predation` 0.19 / `signal` 0.93 ms（total 15.09 ms）。
+- `metabolism` 内部：`metab_env` 5.27 ms（环境代谢）、`metab_fields` 2.30 ms（场采样）、`metab_base` 0.77 ms，其余均 <0.11 ms。
+
+### 实现
+
+- `native/src/cell_render_cache.cpp`：`CellRenderCache.rebuild()` 顺带完成三角展开，新增 batch_vertices / batch_colors / batch_indices 三个输出；`append_triangle` / `append_segment` / `unit_circle` 辅助函数与 GDScript 兜底路径逐点同构。
+- `CellPolygonBatchRenderer.gd`：native 路径直接取用 C++ 三角数组，跳过 GDScript `_build_batched_commands()`；DLL 缺失时仍回退 GDScript 展开。cache 重建 32.8 → 8.7 ms。
+- 新 DLL SHA-256：`1770853EA1D5A880BE0471636F772F18B0DAA62A37EB4C0BDA573D19BE82E438`。
+
+### 闸门
+
+- `SmokeTest: SCRIPTS=69 FAILURES=0`。
+- `RenderCacheParityProbe checked=266844 failures=0`（新增 batch 三角数组逐点对照，含顶点/颜色/索引）。
+- 本轮改的是视图三角展开（不进 state hash 的只读派生数据）与诊断工具；`NativeParityProbe` state hash 逻辑未触及。DLL 升级仅为渲染缓存输出扩展，模拟路径二进制未变。
+
+### 下一步（未在本版实施）
+
+- `metab_env` 5.27 ms：`compute_environment_batch()` 纯计算已在 C++，但副作用循环（`consume_nutrient` / `consume_signal` / `energy_ledger.record` / `_energy_flow_add`）仍在 GDScript 逐细胞执行，是最大可下沉目标；涉及跨模块副作用顺序，需单独专项并保证 state hash 逐位一致。
+- `metab_fields` 2.30 ms：环境场采样批量回读开销。
+- 三级倍速下主循环每帧要跑多个 tick，tick CPU 是体验卡顿真凶；渲染解耦（模拟线程 / tick 分片）应围绕上述热点展开。
+
+---
+
 ## 0.39.0 — 2026-11-22
 
 **类型**：C 路线真实窗口诊断 + 绘制调用合批。**结论：GPU 合成/后处理不是用户卡顿主因；1324 细胞同场景 A/B 中 draw call 从 4231 降到 259，但运行态 3× FPS/帧时间基本不变（约 59 fps / 17 ms），瓶颈仍是 tick CPU。后处理开关只影响 1 个 draw call。**

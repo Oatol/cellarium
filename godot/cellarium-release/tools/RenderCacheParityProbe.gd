@@ -55,6 +55,10 @@ func _initialize() -> void:
 	var gd_radii: PackedFloat32Array = (renderer.get("_radii") as PackedFloat32Array).duplicate()
 	var gd_links: PackedVector2Array = (renderer.get("_links") as PackedVector2Array).duplicate()
 	var gd_chords: int = int(renderer.get("_last_chord_count"))
+	# v0.40.0：GDScript 兜底三角展开，与 C++ rebuild 的 batch_* 对照。
+	var gd_batch_vertices: PackedVector2Array = (renderer.get("_batch_vertices") as PackedVector2Array).duplicate()
+	var gd_batch_colors: PackedColorArray = (renderer.get("_batch_colors") as PackedColorArray).duplicate()
+	var gd_batch_indices: PackedInt32Array = (renderer.get("_batch_indices") as PackedInt32Array).duplicate()
 
 	# C++ path
 	var cells: RefCounted = manager.get("cells") as RefCounted
@@ -114,6 +118,39 @@ func _initialize() -> void:
 	if gd_chords != int(cpp.get("chord_count", -1)):
 		print("RENDER_CACHE_PARITY: FAIL chords gd=%d cpp=%d" % [gd_chords, int(cpp.get("chord_count", -1))])
 		failures += 1
+
+	# v0.40.0：三角合批数组逐点对照（视图数据，容差 0.01）。
+	var cpp_vertices: PackedVector2Array = cpp.get("batch_vertices", PackedVector2Array())
+	var cpp_colors: PackedColorArray = cpp.get("batch_colors", PackedColorArray())
+	var cpp_indices: PackedInt32Array = cpp.get("batch_indices", PackedInt32Array())
+	if gd_batch_vertices.size() != cpp_vertices.size():
+		print("RENDER_CACHE_PARITY: FAIL batch vertices %d vs %d" % [gd_batch_vertices.size(), cpp_vertices.size()])
+		failures += 1
+	else:
+		for i in range(gd_batch_vertices.size()):
+			checked += 1
+			var a: Vector2 = gd_batch_vertices[i]
+			var b: Vector2 = cpp_vertices[i]
+			if absf(a.x - b.x) > 0.01 or absf(a.y - b.y) > 0.01:
+				failures += 1
+	if gd_batch_colors.size() != cpp_colors.size():
+		print("RENDER_CACHE_PARITY: FAIL batch colors %d vs %d" % [gd_batch_colors.size(), cpp_colors.size()])
+		failures += 1
+	else:
+		for i in range(gd_batch_colors.size()):
+			checked += 1
+			var a: Color = gd_batch_colors[i]
+			var b: Color = cpp_colors[i]
+			if absf(a.r - b.r) > 0.01 or absf(a.g - b.g) > 0.01 or absf(a.b - b.b) > 0.01 or absf(a.a - b.a) > 0.01:
+				failures += 1
+	if gd_batch_indices.size() != cpp_indices.size():
+		print("RENDER_CACHE_PARITY: FAIL batch indices %d vs %d" % [gd_batch_indices.size(), cpp_indices.size()])
+		failures += 1
+	else:
+		for i in range(gd_batch_indices.size()):
+			checked += 1
+			if gd_batch_indices[i] != cpp_indices[i]:
+				failures += 1
 
 	print("RENDER_CACHE_PARITY: checked=%d failures=%d cells=%d polys=%d" % [checked, failures, N, gd_poly.size()])
 	if failures == 0:
