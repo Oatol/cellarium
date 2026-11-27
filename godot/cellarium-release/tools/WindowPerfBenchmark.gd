@@ -244,7 +244,7 @@ func _report() -> void:
 				# *_begin 是埋点记录的绝对时间戳，不是耗时，不得当子阶段打印。
 				if k.ends_with("_begin"):
 					continue
-				if k.begins_with("metab_") or k.begins_with("tick_") or k.begins_with("setup_") or k.begins_with("phys_"):
+				if k.begins_with("metab_") or k.begins_with("tick_") or k.begins_with("setup_") or k.begins_with("phys_") or k.begins_with("beh_"):
 					var dline: String = "WINDOW_BENCH_SUBSTAGE %s avg=%.1fus" % [k, float(diag[key])]
 					print(dline)
 					lines.append(dline)

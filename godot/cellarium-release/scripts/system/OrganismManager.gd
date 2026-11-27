@@ -368,13 +368,20 @@ func advance_physics_tick(dt: float) -> void:
 			var sample_indices: PackedInt32Array = PackedInt32Array()
 			if environment_manager != null:
 				fields_flat = environment_manager.call("get_field_samples_flat") as PackedFloat32Array
+				# v0.45 诊断：behavior 内部 idxarr 重建开销，只读埋点不进 hash。
+				perf_probe.call("begin", "beh_idxarr")
 				sample_indices = environment_manager.call("get_field_sample_index_array", cell_count) as PackedInt32Array
+				perf_probe.call("end", "beh_idxarr")
+			perf_probe.call("begin", "beh_collect")
 			var inputs_grid: PackedFloat32Array = native_spatial.call("collect_inputs_grid",
 				cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_energy"),
 				cells.get("cell_alive"), cells.get("cell_type"),
 				fields_flat, sample_indices, 64.0, 1.0) as PackedFloat32Array
+			perf_probe.call("end", "beh_collect")
+			perf_probe.call("begin", "beh_eval")
 			_behavior_outputs_flat = native_neural.call("evaluate_batch",
 				inputs_grid, cells.get("neural_weights"), cells.get("cell_alive"), 0, cell_count)
+			perf_probe.call("end", "beh_eval")
 			used_grid_path = true
 		if not used_grid_path:
 			var environment: Dictionary = _build_behavior_environment()
@@ -397,11 +404,15 @@ func advance_physics_tick(dt: float) -> void:
 		if apply_native != null and apply_native.has_method("copy_outputs_to_intents"):
 			# v0.35.0：批量写回 6 个输出；Vector2.rotated 的位移仍由 GDScript 执行，
 			# 因为引擎内置三角与 godot-cpp std::cos 有 1 ULP 差异，会破坏 state hash。
+			perf_probe.call("begin", "beh_copy")
 			var copied_intents: PackedFloat32Array = apply_native.call("copy_outputs_to_intents",
 				cells.get("cell_alive"), cells.get("behavior_intents"), _behavior_outputs_flat) as PackedFloat32Array
+			perf_probe.call("end", "beh_copy")
 			if copied_intents.size() == cell_count * 6:
 				cells.set("behavior_intents", copied_intents)
+				perf_probe.call("begin", "beh_apply")
 				CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
+				perf_probe.call("end", "beh_apply")
 				applied_outputs = true
 		if not applied_outputs:
 			CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
@@ -625,10 +636,16 @@ func _apply_base_metabolism(dt: float) -> void:
 			WorkerThreadPool.wait_for_task_completion(task_id)
 	else:
 		_compute_base_metabolism_range(0, energies.size(), dt, energies, alive, deltas)
+	# v0.45：self_cost 是诊断缓冲（不进 state hash），把 _energy_flow_add 的字典查找提到循环外，
+	# 每细胞直写扁平数组，与 v0.44 metab_env 同款改法，逐位等价。
+	var self_cost_values: PackedFloat64Array = _energy_flow.get("self_cost", PackedFloat64Array()) as PackedFloat64Array
+	var self_cost_amount: float = base_metabolic_cost * dt
+	var self_cost_size: int = self_cost_values.size()
 	for cell_index in range(energies.size()):
 		if alive[cell_index] != 0:
 			energies[cell_index] = maxf(0.0, energies[cell_index] + deltas[cell_index])
-			_energy_flow_add("self_cost", cell_index, base_metabolic_cost * dt)
+			if cell_index < self_cost_size:
+				self_cost_values[cell_index] += self_cost_amount
 	cells.set("cell_energy", energies)
 	for cell_index in range(energies.size() - 1, -1, -1):
 		if alive[cell_index] != 0 and energies[cell_index] <= 0.0:

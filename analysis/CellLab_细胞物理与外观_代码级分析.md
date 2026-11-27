@@ -1717,3 +1717,35 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 
 - **≤8 ms/tick 仍未稳定达标**：两轮裸 tick 7.92 / 8.10 ms 分列 8 ms 线两侧；按验收口径如实记为未达标，不宣称通过。
 - 剩余热点：metab_fields 1.30–1.35 ms（GPU 采样准备，GPU `post` 约 0.32 ms）、behavior 1.43–1.53 ms、signal 0.88–0.97 ms、metab_base 0.73–0.79 ms、头部 tick_setup 约 1.15 ms、tick_stats 约 0.16 ms。下一轮目标是 metab_fields/头部采样准备与 behavior 的进一步扁平化，仍需逐位闸门。
+
+---
+
+## 50. v0.45.0 — behavior 内层裸指针化与诊断缓冲去字典化（2026-11-27）
+
+### 50.1 先测后改：behavior 1.46 ms 首次分段
+
+- 在 `advance_physics_tick` 的 behavior 段加五个只读埋点（`beh_idxarr` / `beh_collect` / `beh_eval` / `beh_copy` / `beh_apply`），`WindowPerfBenchmark` 过滤新增 `beh_` 前缀。基线 behavior 1456 µs = collect 694（47%）+ eval 306 + apply 283 + idxarr 110 + copy 39。
+- 真凶与 v0.44 碰撞同源：C++ `collect_inputs_grid()` 内层 1025 细胞 ×8 通道逐次 `inputs.set()`，每次含 COW 检查与边界检查。`beh_apply` 的 1025 次 `Vector2.rotated` 仍留 GDScript（v0.35 已证实下沉 C++ 有 1 ULP 差异）。
+- 另两处同款字典开销：`get_field_sample_index_array()` 每调用点 cell_count 次字典 `.get()`；`_apply_base_metabolism()` 每细胞 `_energy_flow_add("self_cost", ...)` 字典查找。两者都是诊断缓冲/索引映射，不进 state hash。
+
+### 50.2 实现与逐位保证
+
+- `CellSpatial::collect_inputs_grid()`：一次 `ptrw()`/`ptr()` 取 `inputs/alive/types/pos_x/pos_y/energies/fields_flat/sample_indices` 裸指针，内层循环全部直读直写。float32 → double → float32 的 clamp/min/除法顺序未变，网格构建、邻域遍历序、死细胞跳过条件均未改。
+- `EnvironmentManager.get_field_sample_index_array()`：直接用 `_sample_cell_indices`（活细胞升序）写回 `indices[cell_index] = sample_index`；`_sample_index_by_cell` 本就是该数组的逆映射且索引唯一，逐位等价。
+- `OrganismManager._apply_base_metabolism()`：`self_cost` 数组循环外取一次、每细胞直写；诊断缓冲不进 hash，逐位等价。
+- 原型 `spatial_parity_probe.gd`：邻域 CSR 657380、collect_inputs 12000、碰撞 73620 次修正全等。双工程 `NativeParityProbe` m1_photo tick=1 `872470415` / tick=700 `3284848376` 与 v0.44 完全相同。
+- DLL SHA-256：`BFCF32227328E74120F93D4E42CF8775D3D1E7A72AEA50AC7E5E1722FB4E00D7`，已同步 `native/`/构建工作区/两个发布工程。
+
+### 50.3 同会话 A/B 与结论
+
+| 指标 | v0.45 基线 | 首轮 | 确认轮 |
+| --- | ---: | ---: | ---: |
+| `beh_collect` | 694 µs | 388 µs | 393 µs |
+| `beh_idxarr` | 102 µs | 30 µs | 31 µs |
+| `metab_base` | 690 µs | 310 µs | 323 µs |
+| `behavior` | 1456 µs | 1061 µs | 1061 µs |
+| PerfProbe 裸 tick | 8.04 ms | 7.48 ms | 7.29 ms |
+| tick1 全链 p50 | 11962 µs | 9743 µs | 9428 µs |
+
+- **≤8 ms/tick 首次稳定达标**：同会话两轮裸 tick 7.48 / 7.29 ms，均低于 8 ms 线，余量 0.5–0.7 ms。确认轮机器负载更低（tick1 p50 9428 vs 基线 11962），但裸 tick 的 7 个 STAGES 分段稳定、不受头部采样负载影响。按验收口径记为达标，全链 tick1 p50 约 9.4–9.7 ms 含头部采样准备与统计、不计入验收。
+- 剩余热点：metab_env 1.35–1.40 ms、phys_collision 1.64 ms、metab_fields（GPU 采样）约 1.1–1.3 ms、beh_apply 0.27 ms、signal 约 0.9 ms、头部 tick_setup 1.2–2.0 ms（受机器负载波动大）。下一步若要扩余量，优先 signal 与 beh_apply 的分段定位，仍需逐位闸门。

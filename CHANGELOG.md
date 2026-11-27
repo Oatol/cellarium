@@ -4,6 +4,42 @@
 
 ---
 
+## 0.45.0 — 2026-11-27
+
+**类型**：behavior 内层 FFI 裸指针化 + 两处诊断缓冲去字典化。**同会话 A/B：beh_collect 694 → 392 µs（-44%）、beh_idxarr 102 → 30 µs（-70%）、metab_base 690 → 311 µs（-55%）；PerfProbe 裸 tick 8.04 → 7.48 / 7.29 ms（同会话两轮均低于 8 ms，首次稳定达标）。DLL 更新，state hash 逐位不变。**
+
+### 诊断（先测后改）
+
+- 给 `advance_physics_tick` 的 behavior 段加只读埋点（`beh_idxarr` / `beh_collect` / `beh_eval` / `beh_copy` / `beh_apply`），`WindowPerfBenchmark` 输出过滤新增 `beh_` 前缀。基线（v0.44）：behavior 1456 µs = collect 694（47%）+ eval 306 + apply 283 + idxarr 110 + copy 39。真凶是 C++ `collect_inputs_grid` 内层 1025×8 次 `inputs.set()`，与 v0.44 碰撞内核同款 COW/边界检查问题。
+- `get_field_sample_index_array()` 每调用点做 cell_count 次字典 `.get()`，而 `_sample_index_by_cell` 本就是活细胞升序索引的逆映射——可直接写回，无需查字典。`_apply_base_metabolism()` 有 1025 次 `_energy_flow_add("self_cost", ...)` 字典查找，v0.44 已在 metab_env 证伪其必要性（诊断缓冲不进 hash）。
+
+### 实现
+
+- `native/src/cell_spatial.cpp` `collect_inputs_grid()`：一次 `ptrw()`/`ptr()` 取裸指针替代内层 `inputs.set()` 与逐次 `operator[]`；float32 → double → float32 顺序未变，网格构建、邻域遍历序、clamp/min 表达式均未改。
+- `EnvironmentManager.get_field_sample_index_array()`：按 `_sample_cell_indices`（活细胞升序）直接写 `indices[cell_index] = sample_index`，去掉字典查找，逐位等价。
+- `OrganismManager._apply_base_metabolism()`：`self_cost` 诊断数组在循环外取一次，每细胞直写 `PackedFloat64Array`；不进 state hash，逐位等价。
+
+### 真实窗口 A/B（同会话同场景，1025 细胞）
+
+| 指标 | v0.45 基线 | 首轮 | 确认轮 |
+| --- | ---: | ---: | ---: |
+| `beh_collect` | 694 µs | 388 µs | 393 µs |
+| `beh_idxarr` | 102 µs | 30 µs | 31 µs |
+| `metab_base` | 690 µs | 310 µs | 323 µs |
+| `behavior` 段 | 1456 µs | 1061 µs | 1061 µs |
+| PerfProbe 裸 tick | 8.04 ms | 7.48 ms | 7.29 ms |
+| tick1 全链 p50 | 11962 µs | 9743 µs | 9428 µs |
+
+### 闸门
+
+- 原型工程 `spatial_parity_probe.gd`：`SPATIAL_PARITY OK (total_failures=0)`，collect_inputs n=12000、collision 73620 次修正位置全等。
+- 双工程 `SmokeTest: SCRIPTS=71 FAILURES=0`；`NativeParityProbe: OK failures=0`，m1_photo tick=1 `872470415`、tick=700 `3284848376` 与 v0.44 逐位相同。
+- 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（两轮均通过）。
+- DLL SHA-256 更新为 `BFCF32227328E74120F93D4E42CF8775D3D1E7A72AEA50AC7E5E1722FB4E00D7`。
+- **≤8 ms/tick 达标**：同会话两轮裸 tick 7.48 / 7.29 ms，均低于 8 ms 线，余量 0.5–0.7 ms；全链 tick1 p50 约 9.4–9.7 ms（含头部采样准备与统计，不计入验收口径）。注意确认轮机器负载更低（tick1 p50 9428 vs 基线 11962），裸 tick 段不受头部采样负载影响、两轮分段稳定。
+
+---
+
 ## 0.44.0 — 2026-11-26
 
 **类型**：metab_env 扁平化 + physics FFI 边界分段 + C++ 碰撞内层裸指针化。**同会话 A/B：metab_env 2888 → 1496 µs（-48%）；C++ 碰撞 3682 → 1679 µs（-54%）；PerfProbe 裸 tick 10.66 → 7.92 / 8.10 ms（两轮跨 8 ms 线，未稳定达标）。DLL 更新，state hash 逐位不变。**

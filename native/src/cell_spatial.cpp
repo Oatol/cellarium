@@ -215,38 +215,49 @@ PackedFloat32Array CellSpatial::collect_inputs_grid(const PackedFloat32Array &po
 	const int count = alive.size();
 	PackedFloat32Array inputs;
 	inputs.resize(count * 8);
+	// v0.45：内层逐次 inputs.set() 含 COW + 边界检查（1025 细胞 ×8 次）；
+	// 一次取裸指针直写，float32 舍入顺序与遍历语义完全不变，逐位等价。
+	// 与 v0.44 resolve_collisions 同款改法，由 spatial_parity / NativeParityProbe 双重闸门保证。
+	float *out_ptr = inputs.ptrw();
+	const uint8_t *alive_ptr = alive.ptr();
+	const uint8_t *types_ptr = types.ptr();
+	const float *px = pos_x.ptr();
+	const float *py = pos_y.ptr();
+	const float *energy_ptr = energies.ptr();
+	const float *fields_ptr = fields_flat.ptr();
+	const int32_t *sample_ptr = sample_indices.ptr();
 	const bool use_flat = fields_flat.size() > 0 && sample_indices.size() > 0;
 	const double emax = std::max(energy_max, 0.000001);
 	const GridBuckets grid = GridBuckets::build(pos_x, pos_y, alive, count, cell_size);
 	for (int cell_index = 0; cell_index < count; ++cell_index) {
 		const int out = cell_index * 8;
-		for (int c = 0; c < 8; ++c) inputs.set(out + c, 0.0f);
-		if (alive[cell_index] == 0) continue;
+		for (int c = 0; c < 8; ++c) out_ptr[out + c] = 0.0f;
+		if (alive_ptr[cell_index] == 0) continue;
 		int sample_index = -1;
 		if (use_flat && cell_index < sample_indices.size()) {
-			sample_index = static_cast<int>(sample_indices[cell_index]);
+			sample_index = static_cast<int>(sample_ptr[cell_index]);
 		}
 		if (use_flat && sample_index >= 0) {
 			const int flat_offset = sample_index * 5;
 			for (int channel = 0; channel < 5; ++channel) {
 				if (flat_offset + channel < fields_flat.size()) {
-					inputs.set(out + channel,
-							static_cast<float>(clampd(static_cast<double>(fields_flat[flat_offset + channel]), -1.0, 1.0)));
+					out_ptr[out + channel] =
+							static_cast<float>(clampd(static_cast<double>(fields_ptr[flat_offset + channel]), -1.0, 1.0));
 				}
 			}
 		}
 		int same_count = 0;
 		int other_count = 0;
-		const int64_t cx = cell_coord(pos_x[cell_index], cell_size);
-		const int64_t cy = cell_coord(pos_y[cell_index], cell_size);
-		const uint8_t self_type = types[cell_index];
+		const int64_t cx = cell_coord(px[cell_index], cell_size);
+		const int64_t cy = cell_coord(py[cell_index], cell_size);
+		const uint8_t self_type = types_ptr[cell_index];
 		grid.for_each_neighbor(cx, cy, [&](int32_t neighbor) {
-			if (neighbor == cell_index || neighbor < 0 || neighbor >= count || alive[neighbor] == 0) return;
-			if (types[neighbor] == self_type) ++same_count; else ++other_count;
+			if (neighbor == cell_index || neighbor < 0 || neighbor >= count || alive_ptr[neighbor] == 0) return;
+			if (types_ptr[neighbor] == self_type) ++same_count; else ++other_count;
 		});
-		inputs.set(out + 5, static_cast<float>(std::min(static_cast<double>(same_count) / 8.0, 1.0)));
-		inputs.set(out + 6, static_cast<float>(std::min(static_cast<double>(other_count) / 8.0, 1.0)));
-		inputs.set(out + 7, static_cast<float>(clampd(static_cast<double>(energies[cell_index]) / emax, 0.0, 1.0)));
+		out_ptr[out + 5] = static_cast<float>(std::min(static_cast<double>(same_count) / 8.0, 1.0));
+		out_ptr[out + 6] = static_cast<float>(std::min(static_cast<double>(other_count) / 8.0, 1.0));
+		out_ptr[out + 7] = static_cast<float>(clampd(static_cast<double>(energy_ptr[cell_index]) / emax, 0.0, 1.0));
 	}
 	return inputs;
 }

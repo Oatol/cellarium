@@ -264,11 +264,13 @@ func get_field_samples_flat() -> PackedFloat32Array:
 	return _field_samples_flat
 
 func get_field_sample_index_array(cell_count: int) -> PackedInt32Array:
+	# v0.45：_sample_index_by_cell 就是 _sample_cell_indices 的逆映射（sample_index → cell_index），
+	# 且每个活细胞索引唯一。直接按活细胞索引写回，省掉 cell_count 次字典 get，逐位等价。
 	var indices: PackedInt32Array = PackedInt32Array()
 	indices.resize(cell_count)
 	indices.fill(-1)
-	for cell_index in range(cell_count):
-		indices[cell_index] = int(_sample_index_by_cell.get(cell_index, -1))
+	for sample_index in range(_sample_cell_indices.size()):
+		indices[_sample_cell_indices[sample_index]] = sample_index
 	return indices
 
 func get_field_diagnostics() -> Dictionary:
