@@ -40,6 +40,17 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path <project> --script res:/
 
 技术基线（不可擅改）：沙盒为核心；固定 1/60 tick 与「tick 频率 + LOD、单帧上限 12」；确定性（静态分区 + 单写者 + 派生 RNG）；`CommandBus` 唯一写入口；5 类环境场 2 张 ping-pong 存储纹理 + 等价 CPU 回退；GNP1 / 存档 schema / Agent 契约冻结后只做版本化追加。
 
+## 性能专项（已达标）
+
+1025 细胞真实窗口裸 tick 同会话两轮 **7.48 / 7.29 ms**，稳定低于 ≤8 ms/tick（v0.45 达标，v0.46 signal 再降 31%）。全程 state hash 与场值 flat parity 逐位不变。分段计时驱动的全过程、闸门口径与已证伪猜测见：
+
+- `HANDOFF.md`：会话交接（现状、路径、命令、铁律、已证伪清单）
+- `analysis/CellLab_细胞物理与外观_代码级分析.md` §48–§51：Cell Lab / Alien 防卡源码级结论 + v0.44–v0.46 性能专项
+- `CHANGELOG.md`：逐版本 A/B 数据与闸门记录
+- `.workbuddy-ai/memory/MEMORY.md`：踩坑结论（接手必读）
+
+性能基准单次 ≤60 秒（机器长时满载会过热蓝屏），并发编译 `-j 4`；任何改动须重跑双工程 SmokeTest + NativeParityProbe + 真实窗口 flat parity。
+
 ## 版本与备份
 
 见 `CHANGELOG.md` 与 v1.1 合并稿 §11。每个版本上传：tag + 变更摘要 + 文档/代码快照 + 验收记录。
