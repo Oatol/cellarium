@@ -244,7 +244,7 @@ func _report() -> void:
 				# *_begin 是埋点记录的绝对时间戳，不是耗时，不得当子阶段打印。
 				if k.ends_with("_begin"):
 					continue
-				if k.begins_with("metab_") or k.begins_with("tick_") or k.begins_with("setup_") or k.begins_with("phys_") or k.begins_with("beh_"):
+				if k.begins_with("metab_") or k.begins_with("tick_") or k.begins_with("setup_") or k.begins_with("phys_") or k.begins_with("beh_") or k.begins_with("sig_"):
 					var dline: String = "WINDOW_BENCH_SUBSTAGE %s avg=%.1fus" % [k, float(diag[key])]
 					print(dline)
 					lines.append(dline)
@@ -270,6 +270,10 @@ func _report() -> void:
 		]
 		print(fline)
 		lines.append(fline)
+	# v0.46：signal 分泌源数量（解释 sig_add 开销），只读诊断。
+	var srcline: String = "WINDOW_BENCH_SIGSRC count=%d" % int(_manager.get("diag_signal_source_count"))
+	print(srcline)
+	lines.append(srcline)
 	var path: String = ProjectSettings.globalize_path("user://window_perf_bench.txt")
 	var file: FileAccess = FileAccess.open("user://window_perf_bench.txt", FileAccess.WRITE)
 	if file != null:

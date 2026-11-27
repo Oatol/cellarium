@@ -4,6 +4,37 @@
 
 ---
 
+## 0.46.0 — 2026-11-27
+
+**类型**：signal 分泌源批量写入（纯 GDScript，DLL 未动）。**同会话 A/B：sig_add 795 → 516 / 535 µs（-33%，524 源）、signal 段 834 → 559 / 577 µs（-31%）；state hash 与场值 flat parity 逐位不变。**
+
+### 诊断（先测后改）
+
+- 给 `_apply_signal_secretion()` 加 `sig_collect` / `sig_add` 只读埋点，`WindowPerfBenchmark` 过滤新增 `sig_` 前缀并输出分泌源数。signal 834 µs = sig_add 795（95%）+ sig_collect 32。真凶是每源三次跨对象动态 `call()`（`add_signal_source` → `add_channel_source` → `get_grid_position` + `add_source`）+ Vector2 分配 + 双层字典写入，与 C++ 采集（524 源）无关。
+
+### 实现
+
+- `EnvironmentField.add_signal_sources_batch()`：同一脚本内静态调用 `get_grid_position`、内联 `add_source` 的边界检查与 `_pending_sources[4][index] += amount`，把 N 次动态 call 合成 1 次。`EnvironmentManager.add_signal_sources_batch()` 转发；`OrganismManager` 传入原 `indices`（升序）、`pos_x`/`pos_y`、`amounts`，累加顺序与 float32 写回不变。
+- 未下沉 C++：`get_grid_position` 的 Vector2 运算是 float32，GDScript float 是 double，标量改写会破坏逐位 parity（v0.35 同款教训）。验证过 GDScript `PackedFloat32Array` 局部引用写回等同于索引写回。
+
+### 真实窗口 A/B（同会话同场景，1025 细胞 / 524 分泌源）
+
+| 指标 | v0.46 基线 | 首轮 | 确认轮 |
+| --- | ---: | ---: | ---: |
+| `sig_add` | 795 µs | 516 µs | 535 µs |
+| `sig_collect` | 32 µs | 34 µs | — |
+| `signal` 段 | 834 µs | 559 µs | 577 µs |
+| PerfProbe 裸 tick | 7.37 ms | 7.81 ms | 7.11 ms |
+
+### 闸门
+
+- 双工程 `SmokeTest: SCRIPTS=71 FAILURES=0`；`NativeParityProbe: OK failures=0`，m1_photo tick=1 `872470415`、tick=700 `3284848376` 与 v0.45 逐位相同。
+- 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（两轮均通过，场值逐位一致）。
+- DLL SHA-256 不变：`BFCF32227328E74120F93D4E42CF8775D3D1E7A72AEA50AC7E5E1722FB4E00D7`。
+- 裸 tick 段间有负载波动（首轮 metab_env 2288 vs 确认轮 1422 µs），**<8 ms 达标结论沿用 v0.45 的两轮口径**；本版收益以同段 `sig_add` 对比为准，不把整链下降归因于单改动。
+
+---
+
 ## 0.45.0 — 2026-11-27
 
 **类型**：behavior 内层 FFI 裸指针化 + 两处诊断缓冲去字典化。**同会话 A/B：beh_collect 694 → 392 µs（-44%）、beh_idxarr 102 → 30 µs（-70%）、metab_base 690 → 311 µs（-55%）；PerfProbe 裸 tick 8.04 → 7.48 / 7.29 ms（同会话两轮均低于 8 ms，首次稳定达标）。DLL 更新，state hash 逐位不变。**

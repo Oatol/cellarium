@@ -223,6 +223,8 @@ var _behavior_outputs_flat: PackedFloat32Array = PackedFloat32Array()
 ## 最近一次工具的业务反馈（ADHERE 选点、INSPECT 摘要等），由 HUD 读取显示。
 var last_tool_message: String = ""
 var adhesion_anchor: int = -1
+## v0.46 诊断：最近一个 tick 的分泌源数量，只读不进 hash。
+var diag_signal_source_count: int = 0
 
 func _ready() -> void:
 	species_system.call("configure", speciation_distance, speciation_cooldown)
@@ -1096,14 +1098,18 @@ func _apply_signal_secretion(dt: float) -> void:
 	var native_neural: RefCounted = _get_native_neural()
 	if native_neural != null and native_neural.has_method("collect_signal_sources"):
 		# v0.35.0：只筛出非零分泌源，amount 用 double 返回；环境写入仍在原 cell index 顺序。
+		perf_probe.call("begin", "sig_collect")
 		var sources: Dictionary = native_neural.call("collect_signal_sources",
 			alive, cells.get("behavior_intents"), pos_x, pos_y, dt)
 		var indices: PackedInt32Array = sources["indices"]
 		var amounts: PackedFloat64Array = sources["amounts"]
-		for source_index in range(indices.size()):
-			var cell_index: int = int(indices[source_index])
-			environment_manager.call("add_signal_source",
-				Vector2(pos_x[cell_index], pos_y[cell_index]), float(amounts[source_index]))
+		perf_probe.call("end", "sig_collect")
+		perf_probe.call("begin", "sig_add")
+		# v0.46：N 次跨对象动态 call 合成 1 次批量写入；indices 升序、float32 位置、
+		# amount 的 double→float32 转换与写入顺序全部不变，逐位等价由 hash 闸门保证。
+		environment_manager.call("add_signal_sources_batch", indices, pos_x, pos_y, amounts)
+		diag_signal_source_count = indices.size()
+		perf_probe.call("end", "sig_add")
 		return
 	for cell_index in range(alive.size()):
 		if alive[cell_index] == 0:

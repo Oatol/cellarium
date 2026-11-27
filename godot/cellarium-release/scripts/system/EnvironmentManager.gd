@@ -300,6 +300,12 @@ func add_channel_source(position: Vector2, channel_index: int, amount: float) ->
 	var grid: Vector2i = field.call("get_grid_position", position)
 	return bool(field.call("add_source", channel_index, grid.x, grid.y, amount))
 
+## v0.46：批量写入化学信号源（通道 4）。逻辑逐位复制 add_channel_source + get_grid_position
+## + add_source 的调用链，只把 N 次动态 call 合成 1 次；单源的 float32 运算与写入顺序不变。
+func add_signal_sources_batch(cell_indices: PackedInt32Array, pos_x: PackedFloat32Array,
+		pos_y: PackedFloat32Array, amounts: PackedFloat64Array) -> int:
+	return int(field.call("add_signal_sources_batch", cell_indices, pos_x, pos_y, amounts))
+
 ## 地形编辑（阶段5）：世界坐标 → 格坐标 → 固体 mask 笔刷。
 func paint_terrain(position: Vector2, radius_cells: int, solid: bool) -> int:
 	var grid: Vector2i = field.call("get_grid_position", position)

@@ -1749,3 +1749,31 @@ tick 内部六段：`cmd` 6.7us、`physics`（= `advance_physics_tick` 整段）
 
 - **≤8 ms/tick 首次稳定达标**：同会话两轮裸 tick 7.48 / 7.29 ms，均低于 8 ms 线，余量 0.5–0.7 ms。确认轮机器负载更低（tick1 p50 9428 vs 基线 11962），但裸 tick 的 7 个 STAGES 分段稳定、不受头部采样负载影响。按验收口径记为达标，全链 tick1 p50 约 9.4–9.7 ms 含头部采样准备与统计、不计入验收。
 - 剩余热点：metab_env 1.35–1.40 ms、phys_collision 1.64 ms、metab_fields（GPU 采样）约 1.1–1.3 ms、beh_apply 0.27 ms、signal 约 0.9 ms、头部 tick_setup 1.2–2.0 ms（受机器负载波动大）。下一步若要扩余量，优先 signal 与 beh_apply 的分段定位，仍需逐位闸门。
+
+---
+
+## 51. v0.46.0 — signal 分泌源批量写入（2026-11-27）
+
+### 51.1 先测后改：signal 834 µs 首次分段
+
+- 给 `_apply_signal_secretion()` 加 `sig_collect` / `sig_add` 只读埋点，`WindowPerfBenchmark` 过滤新增 `sig_` 前缀并输出分泌源数。基线 signal 834 µs = sig_add 795（95%）+ sig_collect 32（C++，524 源）。
+- 真凶是每源三次跨对象动态 `call()`（`add_signal_source` → `add_channel_source` → `get_grid_position` + `add_source`）+ Vector2 分配 + `_pending_sources[channel][index]` 双层字典写入。与 C++ `collect_signal_sources`（32 µs）无关。
+
+### 51.2 实现与逐位保证
+
+- `EnvironmentField.add_signal_sources_batch(cell_indices, pos_x, pos_y, amounts)`：同一脚本内静态调用 `get_grid_position`、内联 `add_source` 的边界检查与 `_pending_sources[4][index] += amount`；N 次动态 call 合成 1 次。
+- `EnvironmentManager` 仅做转发；`OrganismManager` 传入原 `indices`（升序）、`pos_x`/`pos_y`、`amounts`，单源 float32 位置构造、double→float32 转换、累加顺序与原逐源循环完全一致。
+- 未下沉 C++：`get_grid_position` 的 Vector2 运算全程 float32，GDScript float 是 double，标量改写会破坏逐位 parity（v0.35 `apply_outputs_flat` 同款 1 ULP 教训）。
+- 验证 GDScript `PackedFloat32Array` 局部引用写回 `arr[0] = PackedFloat32Array` 取 `local = arr[0]` 后 `local[i] = v` 会写回原数组（`SEM arr0=9.0 local=9.0`），批量写入安全。
+- 双工程 `NativeParityProbe` m1_photo tick=1 `872470415` / tick=700 `3284848376` 与 v0.45 完全相同；真实窗口 flat parity 5125 值两轮全等。DLL 未改，SHA 仍 `BFCF32227328E74120F93D4E42CF8775D3D1E7A72AEA50AC7E5E1722FB4E00D7`。
+
+### 51.3 同会话 A/B 与结论
+
+| 指标 | v0.46 基线 | 首轮 | 确认轮 |
+| --- | ---: | ---: | ---: |
+| `sig_add` | 795 µs | 516 µs | 535 µs |
+| `signal` | 834 µs | 559 µs | 577 µs |
+| PerfProbe 裸 tick | 7.37 ms | 7.81 ms | 7.11 ms |
+
+- `sig_add` 稳定在 516–535 µs（-33%），524 源约 1 µs/源；signal 段 -31%。裸 tick 段间有负载波动（首轮 metab_env 2288 vs 确认轮 1422 µs），收益以同段对比为准，不把整链下降归因于单改动。
+- 剩余热点：metab_env 1.42–2.29 ms（负载波动大）、phys_collision 1.64 ms、metab_fields（GPU 采样）约 1.1–1.3 ms、behavior 1.06 ms（beh_apply 0.27 ms 不可下沉 C++）、头部 tick_setup 1.2–2.0 ms。下一步若要扩余量，优先 metab_env 的负载波动来源与 beh_apply 的分段定位，仍需逐位闸门。

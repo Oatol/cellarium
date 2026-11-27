@@ -324,6 +324,31 @@ func add_source(channel_index: int, x: int, y: int, amount: float) -> bool:
 	_pending_sources[channel_index][index] += amount
 	return true
 
+## v0.46：批量写入通道 4 信号源。逐位复刻 add_signal_source → add_channel_source →
+## get_grid_position → add_source 的调用链：同一脚本内静态调用 get_grid_position，
+## 内联 add_source 的边界检查与写入，仅把 N 次跨对象动态 call 合成 1 次。
+## cell_indices 升序（来自 collect_signal_sources），累加顺序与原逐源循环完全一致。
+func add_signal_sources_batch(cell_indices: PackedInt32Array, pos_x: PackedFloat32Array,
+		pos_y: PackedFloat32Array, amounts: PackedFloat64Array) -> int:
+	var written: int = 0
+	var pending: PackedFloat32Array = _pending_sources[4]
+	for source_index in range(cell_indices.size()):
+		var cell_index: int = int(cell_indices[source_index])
+		var amount: float = float(amounts[source_index])
+		if amount <= 0.0 or not is_finite(amount):
+			continue
+		var grid: Vector2i = get_grid_position(Vector2(pos_x[cell_index], pos_y[cell_index]))
+		var x: int = grid.x
+		var y: int = grid.y
+		if x < 0 or y < 0 or x >= resolution or y >= resolution:
+			continue
+		var index: int = y * resolution + x
+		if not _is_active(index):
+			continue
+		pending[index] += amount
+		written += 1
+	return written
+
 func sample(position: Vector2) -> PackedFloat32Array:
 	var zero_result: PackedFloat32Array = PackedFloat32Array()
 	zero_result.resize(CHANNEL_COUNT)
