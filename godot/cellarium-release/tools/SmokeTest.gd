@@ -68,6 +68,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/PhysicsStepParityProbe.gd",
 	# v0.52.1：连接静止长度每 tick 派生的成本与语义闸门（原生/GDScript 逐位一致 + 跟随半径）。
 	"res://tools/LinkDeriveProbe.gd",
+	# v0.52.2：分裂轴与「分裂后朝向」解耦的几何闸门（位置只由分裂轴决定）。
+	"res://tools/SplitAxisProbe.gd",
 	"res://tools/BehaviorSignalParityProbe.gd",
 	"res://tools/RenderCacheParityProbe.gd",
 	"res://tools/CollectInputsGridParityProbe.gd",

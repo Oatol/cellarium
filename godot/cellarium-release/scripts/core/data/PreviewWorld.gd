@@ -223,6 +223,9 @@ func _collect_splits() -> void:
 			var mode_id: int = int(cells.call("get_mode", i))
 			var gene: Dictionary = _genes[clampi(mode_id, 0, _genes.size() - 1)]
 			# v0.50.0：Cell Lab d7 = cell.k + (镜像?-1:1)*Gene.d，分裂轴相对母细胞朝向。
+			# v0.52.2 注意：这里的 `get_orientation(i)` 是**分裂后**的母朝向（已被 Gene.e 覆盖），
+			# 所以本字段不是那次分裂的真实轴。它只用于里程碑计数与 `accumulated_splits` 记录，
+			# **不要拿去渲染**。真实分裂轴的正确性由 `tools/SplitAxisProbe.gd` 保证（瞬间 axis_dy=0）。
 			var axis_sign: float = -1.0 if bool(gene.get("child1_mirror", false)) else 1.0
 			var angle: float = float(cells.call("get_orientation", i)) 				+ axis_sign * TAU * clampf(float(gene.get("child2_angle", 0.0)), 0.0, 1.0)
 			_pending_splits.append({
