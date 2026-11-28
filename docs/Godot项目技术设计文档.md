@@ -602,11 +602,26 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 | 项 | 方案 |
 | --- | --- |
 | 积分 | Verlet：`p' = 2p − p_prev + a·dt²`，阻尼 0.98；无刚体、无 Godot 物理节点 |
-| 连接 | 弹性弹簧，每 tick 2 次约束迭代，防止拉伸爆炸 |
+| 连接 | **v0.52.1 起为 Cell Lab 式软弹簧**（旧为刚性 PBD 投影，每轮消除一半误差，等价不可伸长的杆）：① 静止长度每 tick 由当前半径派生 —— 端点位于 `中心 + (r − 0.4·min(r_a,r_b))` 沿连接方向，两端点重合时中心距 = `r_a + r_b − 0.8·min`（≈1.2r）；持久量只有 `CellArray.link_offset`（建连时「超出该基准的分离量」），`link_rest_length` 是派生缓存。② 每 tick 2 轮软投影，每轮只消除 `LINK_STIFFNESS(0.55) × hard × share` 比例，`hard = 1 + 2Δ²/(2.5·rest)²`（偏离越大越硬，对应 Cell Lab `d35`），`share = 1/max(linkCount)`（连接越多越软，对应 `d32`）；另加端点相对速度阻尼 `LINK_VELOCITY_DAMPING(0.12)`（`pos − prev` 即本 tick 速度，两端等量反向 → 质心不变）。③ 过拉伸撕裂：中心距 > `LINK_TEAR_RATIO(2.4) × rest` 时断连，内核只返回升序索引，调用方倒序 `remove_link`。**阈值必须按正常平衡距离定**：静止长度 1.2r 但接触排斥把平衡顶到 2r = 1.67 倍，取 1.75 会在分裂瞬间误断 |
 | 碰撞 | 空间哈希网格边长按 `2 × cell_radius × 存活细胞最大半径倍率` 自动推导（v0.47.0 起，旧为写死 64），仅查 3×3 邻格；所有活细胞（含同生物内部）按同一半径分离。**v0.47.0 起为 Cell Lab 式单轮软弹力**：每对只推开 `穿透 × 0.5 × stiffness × softness`，不迭代、不重建网格、不物化 pair 列表，剩余穿透留给后续 tick 松弛；旧「6 轮位置修正 + 每 3 轮重建 pair」保留为回滚路径 |
 | 边界 | 圆形皿壁与地形 mask：位置投影回合法区域，法向速度衰减 |
 | 复杂度 | 建表 O(n)，邻域查询 O(n·k)，k 为单格平均密度（软上限 16，超出分网格） |
-| 批处理 | 按网格行分区交给 `WorkerThreadPool.add_group_task`，边界格只读邻区数据 |
+| 批处理 | 按网格行分区交给 `WorkerThreadPool.add_group_task`，边界格只读相邻分区数据 |
+
+**分裂几何不变式（v0.52.2 定案，`tools/SplitAxisProbe.gd` 常驻闸门）**：
+
+> **分裂那一刻的排布只由分裂轴 `d7` 决定；`Gene.e` / `Gene.f`（子代分裂后朝向）只写 `cell_orientation`，不参与任何位置计算。**
+
+- `d7 = 母细胞分裂前朝向 + (child1_mirror ? −1 : 1) · TAU · Gene.d`（Cell Lab `CellWorld.e(double)`）。
+- 出生位置：母子各偏分裂轴 `0.1r`（中心距 `0.2r`），零力，靠下一 tick 接触排斥弹开成两个半圆。
+- `cell.k(母) = d7 + sign · TAU · Gene.e`、`cell.k(子) = d7 + sign · TAU · Gene.f` —— **只写朝向**。
+- 探针实测四用例（母朝向 0/0/90/0，`Gene.e` 0/111/0/111，`Gene.f` 0/0/0/240）瞬间几何**逐位相同**：
+  `axis_dx=1.400`、`axis_dy=0.000`、中点垂直偏移 `0.000`。
+- **分裂之后的相对偏移来自推进**（60 tick 后 `axis_dy` 25–36，其中 `Gene.e=111°` 相对 `0°` 只多 3.0）。
+  这与 Cell Lab 同构：`cell.k` 同时是分裂轴、连接端点方向与推进方向（`cell.g += cos(cell.k)·fA`），
+  不是缺陷。若将来要「朝向只影响旋转、不影响运动」，必须把推进方向拆成独立状态，属于语义分叉，需先修订本文。
+- **禁止**：在位置/排布计算里引用 `Gene.e` / `Gene.f`，或用「分裂后的 `cell_orientation`」反推分裂轴
+  （它已被 `Gene.e/f` 覆盖）。`PreviewWorld._collect_splits()` 的 `angle` 字段就是后者，只能用于里程碑计数，不得渲染。
 
 ### 4.6 分布式神经与行为
 

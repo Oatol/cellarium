@@ -4,6 +4,40 @@
 
 ---
 
+## v0.52.3 — 把「分裂排布只由分裂轴决定」固化成契约（2026-11-28）
+
+**类型**：文档契约 + 命名加固。**无行为变更**，state hash 基线保持 `3973609741`。
+
+### 契约
+
+技术设计文档 §4.5 新增不变式：
+
+> **分裂那一刻的排布只由分裂轴 `d7` 决定；`Gene.e` / `Gene.f`（子代分裂后朝向）只写 `cell_orientation`，不参与任何位置计算。**
+
+配套两条禁止项：
+
+1. 不得在位置/排布计算里引用 `Gene.e` / `Gene.f`。
+2. 不得用「分裂后的 `cell_orientation`」反推分裂轴 —— 它已被 `Gene.e/f` 覆盖。
+   `PreviewWorld._collect_splits()` 的 `angle` 字段正是后者，只能用于里程碑计数，不得渲染。
+
+### 代码加固（纯重命名，无逻辑改动）
+
+- `OrganismManager._apply_autonomous_lifecycle()` 的 `angle` → **`split_axis`**。这个变量同时喂
+  `divide_cell()`、`split_dir`、`set_orientation()` 与 `_redistribute_inherited_links()`，
+  改名前它和「朝向」在字面上无法区分，是最容易把 `Gene.e` 混进位置的入口。
+- `_redistribute_inherited_links()` 的形参 `split_angle` → **`split_axis`**（它收到的确实是 `d7`，
+  而 `split_mode.get("split_angle")` 才是 `Gene.e`，两者同名极易混淆）。
+
+### 闸门
+
+`SmokeTest: SCRIPTS=100 FAILURES=0`；`SplitAxisProbe: RESULT failures=0`（瞬间 `axis_dy=0.000`）；
+`NativeParityProbe: NATIVE_E2E: OK (failures=0)` —— 改名未改变任何 hash。
+
+`HANDOFF.md` 的固定流程新增「改物理/连接/分裂必须额外跑的三道」：`PhysicsStepParityProbe`、
+`LinkDeriveProbe`、`SplitAxisProbe`，并把「用分裂后朝向反推分裂轴」列入不要重试清单。
+
+---
+
 ## v0.52.2 — 分裂轴与分裂后朝向解耦：探针量清「位置偏」还是「推进偏」（2026-11-28）
 
 **类型**：诊断版本。**无产品行为变更**，state hash 基线保持 `3973609741`。

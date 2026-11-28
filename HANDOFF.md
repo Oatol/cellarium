@@ -248,6 +248,17 @@ eager 模式下 1025 细胞的分段：
 
 **任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + WorkerEngineProbe + FieldMirrorParityProbe + LedgerBatchParityProbe + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
 
+**改物理/连接/分裂时必须额外跑的三道**（v0.52 起）：
+- `PhysicsStepParityProbe`：`checked=2001 failures=0`，含 `break_links` 逐位一致。
+- `LinkDeriveProbe`：`failures=0`，`native_us` 应为个位数（1025 细胞 / 999 连接）。
+- `SplitAxisProbe`：`RESULT failures=0`，四用例瞬间 `axis_dy=0.000` —— **分裂排布只由分裂轴决定**（技术设计文档 §4.5 不变式）。
+
+**不要重试的路线（已证伪）**：
+- `beh_apply` / `apply_outputs_flat()` 下沉 C++（`Vector2.rotated` 与 `Math::sin/cos` 有 1 ULP 差异）。
+- GDScript 层多核分片（逐位一致但 0.35–0.42× 负收益，可并行占比 <11%）。
+- GPU 合成 / draw call 合批（4231→259 但帧时间不变）。
+- 用「分裂后的 `cell_orientation`」反推分裂轴（已被 `Gene.e/f` 覆盖，见 §4.5）。
+
 **测量纪律（本轮新增，务必遵守）**：
 - 跑真实窗口基准前先确认没有残留 Godot 进程（`Get-Process | Where ProcessName -like "Godot*"`）。一个残留进程就能让 `dispatch+sync` 从 567 µs 涨到 4787 µs。
 - 同会话背靠背跑 `off` 两遍界定噪声带，再跑目标变体；只承认超出噪声带的差值。

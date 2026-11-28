@@ -1005,11 +1005,13 @@ func _apply_autonomous_lifecycle() -> void:
 		# v0.20.0：移除「一个个体每 tick 最多分裂一次」的串行闸门。
 		# 每个合格细胞都在本 tick 分裂；能量按 Gene.c 减半 + 逐细胞 cooldown 提供自然节流。
 		var division_index: int = maxi(0, int(cell_counts[org_id]) - 1)
-		var angle: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
+		# v0.52.2：变量名从 `angle` 改成 `split_axis`，明确它是**唯一决定出生排布**的量
+		# （技术设计文档 §4.5 不变式）。Gene.e / Gene.f 只写朝向，任何位置计算都不得引用它们。
+		var split_axis: float = TAU * fposmod(float(cell_index * 47 + _sim_tick * 13), 360.0) / 360.0
 		if gene_mode and not has_modes:
 			var angles: PackedByteArray = genome.get("split_angles")
 			if division_index < angles.size():
-				angle = TAU * float(angles[division_index]) / 256.0
+				split_axis = TAU * float(angles[division_index]) / 256.0
 		var radius_scale: float = 1.0
 		var ratio: float = 0.5
 		var glue: bool = bool(GENOME_SCRIPT.call("has_glue_links", genome))
@@ -1028,7 +1030,7 @@ func _apply_autonomous_lifecycle() -> void:
 			# 母细胞镜像（Gene.q 语义）翻转整个分裂几何：轴与两侧朝向一起取反。
 			var axis_sign: float = -1.0 if bool(mode_data.get("child1_mirror", false)) else 1.0
 			var mother_orientation: float = float(cells.call("get_orientation", cell_index))
-			angle = mother_orientation + axis_sign * TAU * child2_angle
+			split_axis = mother_orientation + axis_sign * TAU * child2_angle
 			radius_scale = clampf(float(mode_data.get("cell_size", 1.0)), 0.5, 2.0)
 			ratio = clampf(float(mode_data.get("split_ratio", 0.5)), 0.05, 0.95)
 			if bool(mode_data.get("invert_split_mass", false)):
@@ -1049,7 +1051,7 @@ func _apply_autonomous_lifecycle() -> void:
 		# 连接静止长度仍为 2r，下一 tick 的接触排斥/弹簧把它们弹开。分裂本身零力。
 		var birth_separation: float = maxf(0.5, cell_radius * 0.2 * radius_scale)
 		var birth_origin: Vector2 = cells.call("get_position", cell_index)
-		var child_index: int = int(cells.call("divide_cell", cell_index, angle, birth_separation))
+		var child_index: int = int(cells.call("divide_cell", cell_index, split_axis, birth_separation))
 		if child_index < 0:
 			continue
 		var add_limit: int = maxi(int(cell_counts[org_id]) + 1, max_cells)
@@ -1058,7 +1060,7 @@ func _apply_autonomous_lifecycle() -> void:
 			continue
 		# v0.21.0：母子各沿分裂轴偏 0.1r（中心距 0.2r，中点在原母细胞位置）。
 		# 半径当帧保持母半径 → 高度重叠 → 共享弦渲染成两个贴靠半圆；下一 tick 接触排斥弹开。
-		var split_dir: Vector2 = Vector2.RIGHT.rotated(angle)
+		var split_dir: Vector2 = Vector2.RIGHT.rotated(split_axis)
 		var half_offset: float = birth_separation * 0.5
 		# v0.50.0：用零速度瞬移。`set_position` 会把 0.1r 的位移当成速度写进 Verlet 的
 		# `pos - prev`，等于每次分裂给母子各踢一脚 —— 这是「分裂后炸成一团」的主因之一。
@@ -1072,10 +1074,11 @@ func _apply_autonomous_lifecycle() -> void:
 			# 子代另受 child2_mirror 翻转（Gene.r 语义）。
 			var mother_sign: float = -1.0 if bool(split_mode.get("child1_mirror", false)) else 1.0
 			var child_sign: float = -1.0 if bool(split_mode.get("child2_mirror", false)) else 1.0
-			cells.call("set_orientation", cell_index, angle + mother_sign * TAU * clampf(float(split_mode.get("split_angle", 0.0)), 0.0, 1.0))
-			cells.call("set_orientation", child_index, angle + child_sign * TAU * clampf(float(split_mode.get("split_angle2", 0.0)), 0.0, 1.0))
+			# 只写朝向，不动位置：`split_axis` 是基准，Gene.e/f 只是相对偏转。
+			cells.call("set_orientation", cell_index, split_axis + mother_sign * TAU * clampf(float(split_mode.get("split_angle", 0.0)), 0.0, 1.0))
+			cells.call("set_orientation", child_index, split_axis + child_sign * TAU * clampf(float(split_mode.get("split_angle2", 0.0)), 0.0, 1.0))
 			# v0.29.0：先按旧连接的朝向分给母/子，再切换 Gene.i/j 模式槽。
-			_redistribute_inherited_links(cell_index, child_index, angle, ratio, split_mode)
+			_redistribute_inherited_links(cell_index, child_index, split_axis, ratio, split_mode)
 		if has_modes:
 			# v0.22.0：不再累加 depth。Cell Lab 无同模式分裂代数上限；depth 字段保留为只读谱系标记，
 			# 分裂次数由端粒控制。母/子 depth 均不随分裂递增（子细胞继承母细胞 depth）。
@@ -1492,7 +1495,7 @@ func _is_link_division_blocked(genome: RefCounted, cell_index: int) -> bool:
 
 ## v0.29.0：官方 CellWorld.e(double) 的旧连接重分配（Gene.m/n + ±0.2 双阈值）。
 ## 只处理分裂前母细胞已有的连接；亲子新连接在此之后建立，不会被重分配。
-func _redistribute_inherited_links(mother_index: int, child_index: int, split_angle: float,
+func _redistribute_inherited_links(mother_index: int, child_index: int, split_axis: float,
 		split_ratio: float, mode_data: Dictionary) -> void:
 	if mode_data.is_empty():
 		return
@@ -1505,7 +1508,7 @@ func _redistribute_inherited_links(mother_index: int, child_index: int, split_an
 	var link_b: PackedInt32Array = cells.get("link_cell_b")
 	var counts: PackedByteArray = cells.get("cell_link_count")
 	var mother_pos: Vector2 = cells.call("get_position", mother_index)
-	var axis: Vector2 = Vector2.RIGHT.rotated(split_angle)
+	var axis: Vector2 = Vector2.RIGHT.rotated(split_axis)
 	var inherited: Array[Dictionary] = []
 	for link_index in range(link_a.size()):
 		var a: int = link_a[link_index]
@@ -1531,12 +1534,12 @@ func _redistribute_inherited_links(mother_index: int, child_index: int, split_an
 	for entry in inherited:
 		var link_index: int = int(entry.get("link", -1))
 		var world_angle: float = _link_world_angle_from(link_index, mother_index)
-		var d14: float = cos(split_angle - world_angle) - (1.0 - 2.0 * split_ratio)
+		var d14: float = cos(split_axis - world_angle) - (1.0 - 2.0 * split_ratio)
 		if absf(d14) > 0.2:
 			continue
 		var other_pos: Vector2 = cells.call("get_position", int(entry.get("other", -1)))
 		var projection: float = (other_pos - mother_pos).dot(axis)
-		var cross_value: float = sin(world_angle - split_angle)
+		var cross_value: float = sin(world_angle - split_axis)
 		if cross_value > 0.0:
 			if projection > left_max_v:
 				left_max_v = projection; left_max = link_index
@@ -1555,7 +1558,7 @@ func _redistribute_inherited_links(mother_index: int, child_index: int, split_an
 			continue
 		var other: int = int(entry.get("other", -1))
 		var world_angle: float = _link_world_angle_from(link_index, mother_index)
-		var d14: float = cos(split_angle - world_angle) - (1.0 - 2.0 * split_ratio)
+		var d14: float = cos(split_axis - world_angle) - (1.0 - 2.0 * split_ratio)
 		var to_child: bool = keep_child and (d14 > 0.2 or (d14 > -0.2 \
 			and (link_index == left_max or link_index == right_max)))
 		var to_mother: bool = keep_mother and (d14 < -0.2 or (d14 < 0.2 \
