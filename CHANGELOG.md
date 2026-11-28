@@ -4,6 +4,86 @@
 
 ---
 
+## v0.52.0 — 渲染统一单 CanvasItem + 膜与细胞器搬进 shader（2026-11-28）
+
+**类型**：渲染架构重写（外观一致性）。**state hash 基线不变** `2825738337`（纯渲染改动，模拟侧逐位一致）。
+
+### 用户报的问题与根因
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | 细胞数 32 时每个细胞 11 个 CanvasItem，超过 48 后每个细胞 CanvasItem 变少、外观突变 | `CellSceneRenderer.max_instances = 48` 阈值把渲染切成两套画法：逐实例档（每细胞 11 个 CanvasItem）与三角批档（单 CanvasItem 合批）。两套画法外观不同 |
+| 2 | 「Cell Lab 细胞再多 Canvas 都没变，为什么我们需要切」 | Cell Lab **只有一条渲染路径**（`CellWorld.a(float[])`）：每对象固定 6 顶点写进扁平数组，一次 `glDrawArrays` 提交，超 32766 顶点才分批；圆/膜/接触弦/细胞器**全在 fragment shader 里算**，全代码无按缩放或细胞数切换的分支 |
+
+### Cell Lab 源码证据（`analysis/CellLab_细胞物理与外观_代码级分析.md` §6 已补）
+
+- 顶点数组 `ah` 是单位 quad 角、`ai` 是「世界中心 ± 半径」、`aj` 是 RGBA，每对象 6 顶点写死。
+- 几何形状（圆、被相邻细胞切平的膜、接触弦、细胞器）不在 CPU 侧展开三角，全部交给 fragment shader 用 `gl_FragCoord` / 距离场现算。
+- 因此「细胞变多」只影响顶点数组长度与批次数，**不影响每个细胞的绘制方式**。
+
+### 改动
+
+**第一步：删掉阈值，生产路径唯一（`CellSceneRenderer.gd`）**
+- 删除 `@export var max_instances: int = 48` 与所有按数量分支。生产路径与细胞数完全无关。
+- 新增 `use_instance_path: bool = false`（调试开关）+ `debug_max_instances = 512`（调试档容量）。
+  逐实例档（`CellBase.tscn`）只供 SmokeTest 与手感探针验证 `CellView` 行为，不再参与生产渲染。
+- `_rebuild()` 生产分支：隐藏全部 CellView 与 `CellBatch`，按 `shader_layer != null and ClassDB.class_exists("CellRenderCache")`
+  在 `CellMembrane`（shader 层）与 `CellBatchPoly`（三角批，原生缺失时的回退）之间二选一。
+
+**第二步：膜与细胞器搬进 canvas_item shader**
+- 新增 `shaders/cell_membrane.gdshader`（124 行）：`shader_type canvas_item`、`unshaded`。
+  - `sd = length(p) - 1.0`，再对最多 8 条接触弦取 `max(sd, half_plane(a, b))` —— 一条 SDF 同时表达圆与所有切平面。
+  - `aa = max(fwidth(sd), 0.0015) * 1.2`：抗锯齿宽度由屏幕导数决定，任意缩放下轮廓粗细一致。
+  - **轮廓画在 `|sd| < w` 上**（不是 `length(p) ≈ 1`），所以弦切面也有边、接触处不缺轮廓。
+  - 细胞体 / 轮廓 / 内膜环 / 细胞核 / 5 个细胞器全部 `over()` 叠加，一次 fragment 算完。
+  - `INSTANCE_CUSTOM` 必须在 `vertex()` 里转成 `varying vec4 v_custom` 再给 `fragment()` —— 在 `fragment()` 里直接读会得到零。
+  - `half_plane()` 法线方向要**保留包含原点的那一侧**（`if (dot(-a, n) > 0.0) n = -n;`），写反会让细胞中心被判到外侧、整颗只剩轮廓色。
+- 新增 `scripts/rendering/CellShaderLayer.gd`（177 行，`extends MultiMeshInstance2D`）：
+  - `QuadMesh.size = Vector2.ONE`，每实例 6 顶点，`Transform2D(Vector2(2r,0), Vector2(0,2r), center)`；
+  - 参数走 **RGBA32F 参数纹理**（每细胞 16 texel），`Image.set_data(params.to_byte_array())` + `texture.update(image)`；
+  - 容量按 256 粒度扩容（`CAPACITY_STEP`），`visible_instance_count` 跟随真实细胞数。
+- 原生 `CellRenderCache::rebuild(..., bool build_geometry = true)`：
+  - `build_geometry = false` 时**整段三角展开跳过**（弦裁剪、多边形生成、顶点/索引写入），只产
+    `cell_params` / `count` / `centers` / `radii` —— 这是该路线的主要收益。
+  - `cell_params` 布局（`PARAM_TEXELS = 16`，RGBA32F，每 texel 4 float）：
+    texel 0 体色 / 1 轮廓色 / 2 核色 / 3 细胞器色 + 数量 / 4–7 最多 8 条弦（偶 `a.xy,b.zw`、奇 `b.xy,a.zw`）/ 8–12 五个细胞器 `(cos·dist, sin·dist, size_ratio, 0)`。
+  - 返回值新增 `cell_params` / `count`，`active_count` 改为 `centers.size()`（原来取 `polygons.size()`，shader 路径下恒为 0）。
+- `scenes/main.tscn` 在 `CellBatch` 与 `CellBatchPoly` 之间新增 `CellMembrane`（`MultiMeshInstance2D`）。
+
+**UI（问题 C）**
+- `DevEditorPanel.gd` 两个滑杆更名：「母细胞分裂后朝向（Gene.e）」→「**子代1**分裂后朝向（Gene.e）」，
+  「子细胞分裂后朝向（Gene.f）」→「**子代2**分裂后朝向（Gene.f）」，提示语统一为「只旋转朝向，不改变两个子代的位置排布」。
+
+### 新增闸门
+
+- `tools/ShaderMembraneProbe.gd`（真实 Vulkan 窗口）：三细胞合成场景（两枚重叠产生弦 + 一枚独立对照），
+  7 条像素断言 —— body 可见、背景干净、弦面为轮廓色、弦外无 body 色、独立细胞完整、无洋红（shader 编译失败征兆）。
+- `tools/MembraneLayerProbe.gd`（真实 Vulkan 窗口）：加载 `main.tscn`，SPAWN 三枚细胞，断言
+  `CellMembrane` 是唯一可见路径、`CellBatchPoly` 与 `CellBatch` 都隐藏、shader 层收到 3 个细胞、细胞像素与背景差 > 0.15、无洋红。
+- 两者均已登记 `SmokeTest.SCRIPT_MANIFEST`。
+
+### 闸门
+
+双工程 SmokeTest `SCRIPTS=98 FAILURES=0`；`NativeParityProbe NATIVE_E2E: OK (failures=0)`（legacy + m1_photo 全 tick match）；
+`WorkerEngineProbe PROBE_SEQ hash=2825738337` / `PROBE_WORKER hash=2825738337` / `match=true`（基线不变）；
+`SplitBandProbe SPLIT_BAND RESULT checks=4 failures=0`；
+`ShaderMembraneProbe checks=7 failures=0`；
+`MembraneLayerProbe active=3 cell=(0.157,0.259,0.216) ref=(0.137,0.169,0.114) diff=0.212 checks=7 failures=0`。
+
+### 测试口径修正（如实记录）
+
+生产路径不再产出逐实例 `CellView`，`get_last_adhesion_count()` 恒为 0。三个验证 `CellView` 行为的用例
+（`_check_cell_scene_renderer` / `_check_shared_chords` / `_check_multicellular_cooperation`）改为显式
+`set("use_instance_path", true)` 走调试档，断言内容不变。
+
+### 未完成
+
+- **#40 连接软弹簧**：`link_rest_length` 仍未每 tick 由当前半径派生，求解器仍是刚性 PBD 投影。三步顺序已定，见 `analysis/架构诊断与重构路线.md` §5。
+- **#41 分裂轴与分裂后朝向解耦**：预览与 `OrganismManager` 的朝向写入仍以 `母细胞朝向 + axis_sign*TAU*split_angle` 为基准，需统一到 `d7` 并先用探针量清楚是位置偏还是推进偏。
+- 外观已确认可接受（体 + 深色核 + 细轮廓），但尚未把逐实例档的 5 个细胞器参数做成可编辑（当前由原生按细胞派生）。
+
+---
+
 ## v0.51.0 — 行为位移沿朝向 + 同个体合力推进 + 灭菌/存活计数 + 质量上限（2026-11-28）
 
 **类型**：玩法语义修正（运动 / 分裂门 / 质量上下限）+ UI 修正。**state hash 基线重建** `665147009` → `2825738337`。

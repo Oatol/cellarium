@@ -500,11 +500,11 @@ func _build_right_panel() -> Control:
 		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index,
 			"子代 %d 的朝向与分裂轴取相反方向（Gene.q/r 语义）" % child_index))
 		if child_index == 1:
-			box.add_child(_make_macro_slider("split_angle", "母细胞分裂后朝向（Gene.e）", 0.0, 360.0, 1.0,
-				"母细胞（Gene.i 那一个）分裂后朝向 = 分裂轴 + 该偏转。0° = 保持沿分裂轴。", 0, 360.0))
+			box.add_child(_make_macro_slider("split_angle", "子代1分裂后朝向（Gene.e）", 0.0, 360.0, 1.0,
+				"子代1（留在母细胞索引、进入「子代1模式」的那一个）分裂后朝向 = 分裂轴 + 该偏转。只旋转朝向，不改变两个子代的位置排布。", 0, 360.0))
 		else:
-			box.add_child(_make_macro_slider("split_angle2", "子细胞分裂后朝向（Gene.f）", 0.0, 360.0, 1.0,
-				"新细胞（Gene.j 那一个）分裂后朝向 = 分裂轴 + 该偏转。0° = 保持沿分裂轴。", 0, 360.0))
+			box.add_child(_make_macro_slider("split_angle2", "子代2分裂后朝向（Gene.f）", 0.0, 360.0, 1.0,
+				"子代2（新建细胞、进入「子代2模式」的那一个）分裂后朝向 = 分裂轴 + 该偏转。只旋转朝向，不改变两个子代的位置排布。", 0, 360.0))
 
 	box.add_child(_make_section_title("GENE · 当前模式分裂规则（无指令序列）"))
 	box.add_child(_make_macro_slider("child2_angle", "分裂轴角度（Gene.d）", 0.0, 360.0, 1.0,

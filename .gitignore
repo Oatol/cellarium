@@ -56,3 +56,6 @@ Thumbs.db
 native/godot-cpp/
 native/build/
 godot/cellarium-release/addons/*/bin/
+
+# Third-party reference source (BSD-3, chrxh/alien): local analysis only, never publish
+analysis/alien_src/

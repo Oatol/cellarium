@@ -15,6 +15,12 @@ using namespace godot;
 /// Mirrors CellPolygonBatchRenderer._rebuild_cache() but runs in C++.
 /// Output is rendering data only: never read by simulation, never in state hash,
 /// therefore float32 math is acceptable here.
+///
+/// v0.52.0: also emits `cell_params`, a flat float array laid out exactly as the
+/// per-cell parameter texture consumed by shaders/cell_membrane.gdshader
+/// (PARAM_TEXELS = 16 texels of RGBA32F per cell). Pass `build_geometry = false`
+/// to skip polygon/outline/triangle expansion entirely — that is the whole point
+/// of the shader path, and it removes the dominant render-cache cost.
 class CellRenderCache : public RefCounted {
 	GDCLASS(CellRenderCache, RefCounted)
 
@@ -41,5 +47,6 @@ public:
 			double dish_radius,
 			double cell_size,
 			int segments,
-			int max_cells);
+			int max_cells,
+			bool build_geometry = true);
 };

@@ -1,6 +1,6 @@
 extends Node2D
-## 阶段7/8：近景细胞用可复用 CellBase.tscn 实例渲染（程序化膜 + 细胞器）。
-## 超过 max_instances 时隐藏本层，退回 MultiMesh 色块 LOD（CellBatchRenderer）。
+## 细胞渲染调度层。v0.52.0 起只有一条生产路径：单 CanvasItem 三角批（CellBatchPoly）。
+## 逐实例档（CellBase.tscn）降级为 `use_instance_path` 调试开关，供 SmokeTest 与手感探针使用。
 ## 只读 SoA；不写模拟状态，不参与确定性 hash。
 ## Cell Lab 的接触点 A[] 在这里派生为三类：普通碰撞、同个体黏附连接、皿壁锚定。
 
@@ -16,17 +16,25 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 @export var batch_renderer_path: NodePath = ^"../CellBatch"
 ## v0.30.0：>max_instances 时用单 CanvasItem 批量画共享弦膜，取代纯色块 MultiMesh。
 @export var polygon_batch_path: NodePath = ^"../CellBatchPoly"
-## v0.50.0：512 → 48。逐实例档每个细胞是 11 个 CanvasItem（Body/InnerRing/Nucleus/
-## Outline/OrganelleRoot×5/SignalAnchor），512 细胞 = 5632 个 CanvasItem，比批渲染档
-## 贵两个数量级 —— 于是出现「细胞少反而卡、超过阈值反而顺」的倒挂。批渲染档已补内膜环，
-## 外观与近景一致，逐实例档只保留给极小规模（工具选中/拖拽手感）。
-@export var max_instances: int = 48
+## v0.52.0：生产路径。MultiMesh + fragment shader，每细胞恒定 6 顶点，
+## 膜/内膜/核/细胞器/接触弦全部在 shader 里造形（对齐 Cell Lab）。
+@export var shader_layer_path: NodePath = ^"../CellMembrane"
+## v0.52.0：**不再按细胞数切换画法**。Cell Lab 只有一条渲染路径（每对象固定 6 顶点 +
+## 一次 glDrawArrays，形状全在 fragment shader 里），细胞数只改变顶点总数，不改变管线。
+## 本项目此前的 48 细胞阈值会在临界点让细胞外观整体突变 —— 那是优化偷懒，不是必要。
+## 现在生产路径永远是单 CanvasItem 三角批（CellBatchPoly）；逐实例档只作调试/探针用，
+## 因为它每细胞 9 个绘制型 CanvasItem，节点数随细胞数线性爆炸。
+## 第二步会把膜与细胞器搬进 shader（每细胞顶点恒定），届时连三角批也不再需要。
+@export var use_instance_path: bool = false
+## 调试档的实例上限，仅 use_instance_path=true 时生效。
+@export var debug_max_instances: int = 512
 
 var organism_manager: Node = null
 var tick_core: Node = null
 var command_bus: Node = null
 var batch_renderer: CanvasItem = null
 var polygon_batch: CanvasItem = null
+var shader_layer: CanvasItem = null
 var _pool: Array[Node2D] = []
 var _active_count: int = 0
 var _last_contacts_sent: int = 0
@@ -41,6 +49,7 @@ func _ready() -> void:
 	command_bus = get_node_or_null(command_bus_path)
 	batch_renderer = get_node_or_null(batch_renderer_path) as CanvasItem
 	polygon_batch = get_node_or_null(polygon_batch_path) as CanvasItem
+	shader_layer = get_node_or_null(shader_layer_path) as CanvasItem
 	if tick_core != null and tick_core.has_signal("tick_advanced"):
 		var on_tick: Callable = Callable(self, "_on_tick_advanced")
 		if not tick_core.is_connected("tick_advanced", on_tick):
@@ -109,16 +118,26 @@ func _rebuild() -> void:
 	for cell_index in range(alive.size()):
 		if alive[cell_index] != 0:
 			indices.append(cell_index)
-	if indices.size() > maxi(1, max_instances):
-		# 大规模回退到单 CanvasItem 多边形批渲染，避免成百上千个 Control/Node2D 实例。
-		# v0.38.0 修复：此前同时打开 CellBatch（MultiMesh 色块）与 CellBatchPoly，
-		# 同一批细胞被画两次；色块层是 v0.30 之前的旧 LOD，多边形层已完整取代它。
-		# 两层同时可见会产生皿内精细多边形 + 皿外/重叠方块的重影，且多一倍 draw call。
+	if not use_instance_path:
+		# v0.52.0：唯一生产路径，与细胞数无关 —— 不存在「超过 N 个就换成简便画法」的突变点。
+		# 首选 shader 层（每细胞 6 顶点，膜/细胞器/接触弦全在 fragment 里造形）；
+		# C++ 扩展缺失时退回单 CanvasItem 三角批。
 		_hide_all()
 		if batch_renderer != null:
 			batch_renderer.visible = false
+		var use_shader: bool = shader_layer != null and ClassDB.class_exists("CellRenderCache")
+		if shader_layer != null:
+			shader_layer.visible = use_shader
 		if polygon_batch != null:
-			polygon_batch.visible = true
+			polygon_batch.visible = not use_shader
+		return
+	# 以下为调试档：逐细胞 CellBase.tscn 实例，供 SmokeTest / 工具手感探针验证 CellView。
+	if shader_layer != null:
+		shader_layer.visible = false
+	if indices.size() > maxi(1, debug_max_instances):
+		_hide_all()
+		if polygon_batch != null:
+			polygon_batch.visible = false
 		return
 	if batch_renderer != null:
 		batch_renderer.visible = false

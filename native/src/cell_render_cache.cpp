@@ -5,6 +5,7 @@
 #include <godot_cpp/variant/vector2.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -15,6 +16,24 @@ namespace {
 constexpr double kTau = 6.283185307179586476925286766559;
 constexpr int64_t kFlatKeyOffset = 1000000;
 constexpr int64_t kFlatKeySpan = 2000001;
+
+/// v0.52.0: must match PARAM_TEXELS / MAX_CHORDS / MAX_ORGANELLES in
+/// shaders/cell_membrane.gdshader. Each cell owns this many RGBA32F texels.
+constexpr int kParamTexels = 16;
+constexpr int kMaxShaderChords = 8;
+constexpr int kMaxShaderOrganelles = 5;
+
+/// Deterministic per-(org, type, slot) hash for organelle placement.
+/// Organelles are recomputed every frame for every cell, so a hash is cheaper
+/// than an RNG and does not depend on Godot's RNG implementation.
+inline uint32_t mix32(uint32_t value) {
+	value ^= value >> 16;
+	value *= 0x7feb352dU;
+	value ^= value >> 15;
+	value *= 0x846ca68bU;
+	value ^= value >> 16;
+	return value;
+}
 
 inline int64_t flat_key(int cell_x, int cell_y) {
 	return (static_cast<int64_t>(cell_x) + kFlatKeyOffset) * kFlatKeySpan
@@ -195,7 +214,8 @@ Dictionary CellRenderCache::rebuild(
 		double dish_radius,
 		double cell_size,
 		int segments,
-		int max_cells) {
+		int max_cells,
+		bool build_geometry) {
 	Array polygons;
 	Array outlines;
 	PackedVector2Array centers;
@@ -204,6 +224,7 @@ Dictionary CellRenderCache::rebuild(
 	PackedColorArray outline_colors;
 	PackedColorArray nucleus_colors;
 	PackedVector2Array links;
+	PackedFloat32Array cell_params;
 
 	const int total = alive.size();
 	const int limit = max_cells < total ? max_cells : total;
@@ -234,6 +255,8 @@ Dictionary CellRenderCache::rebuild(
 	const PackedVector2Array unit_circle_base = unit_circle(segments);
 	const Vector2 dish_center(static_cast<float>(dish_cx), static_cast<float>(dish_cy));
 	int chord_count = 0;
+	// v0.52.0：参数纹理按「存活细胞顺序」排列，与 GDScript 侧的 MultiMesh 实例顺序一致。
+	cell_params.resize(static_cast<int64_t>(indices.size()) * kParamTexels * 4);
 
 	for (const int cell_index : indices) {
 		const Vector2 center(pos_x[cell_index], pos_y[cell_index]);
@@ -277,24 +300,28 @@ Dictionary CellRenderCache::rebuild(
 			local_b.push_back(wall_b);
 		}
 		chord_count += static_cast<int>(local_a.size());
-		for (size_t chord_index = 0; chord_index < local_a.size(); ++chord_index) {
-			const PackedVector2Array clipped = clip_keep_origin(unit, local_a[chord_index], local_b[chord_index]);
-			if (clipped.size() >= 3) unit = clipped;
+		if (build_geometry) {
+			for (size_t chord_index = 0; chord_index < local_a.size(); ++chord_index) {
+				const PackedVector2Array clipped = clip_keep_origin(unit, local_a[chord_index], local_b[chord_index]);
+				if (clipped.size() >= 3) unit = clipped;
+			}
 		}
 
 		PackedVector2Array polygon;
 		PackedVector2Array outline;
-		polygon.resize(unit.size());
-		outline.resize(unit.size());
-		for (int point_index = 0; point_index < unit.size(); ++point_index) {
-			const Vector2 world_point = center + unit[point_index] * static_cast<float>(effective_radius);
-			polygon.set(point_index, world_point);
-			outline.set(point_index, world_point);
+		if (build_geometry) {
+			polygon.resize(unit.size());
+			outline.resize(unit.size());
+			for (int point_index = 0; point_index < unit.size(); ++point_index) {
+				const Vector2 world_point = center + unit[point_index] * static_cast<float>(effective_radius);
+				polygon.set(point_index, world_point);
+				outline.set(point_index, world_point);
+			}
+			if (polygon.size() < 3) continue;
 		}
-		if (polygon.size() < 3) continue;
 
 		const int type_id = cell_index < cell_type.size() ? static_cast<int>(cell_type[cell_index]) : 0;
-		const int org_id = cell_index < cell_org_id.size() ? cell_org_id[cell_index] : 0;
+		const int org_id = cell_index < cell_org_id.size() ? static_cast<int>(cell_org_id[cell_index]) : 0;
 		const double energy = cell_index < cell_energy.size() ? static_cast<double>(cell_energy[cell_index]) : 0.0;
 		const double vitality = clamp_d(energy / 1.2, 0.35, 1.0);
 		Color base_color(-1.0f, -1.0f, -1.0f, 1.0f);
@@ -312,58 +339,120 @@ Dictionary CellRenderCache::rebuild(
 			base_color = base_color.lerp(org_tint, 0.16f);
 		}
 
-		polygons.append(polygon);
-		outlines.append(outline);
+		const Color body_color(base_color.r, base_color.g, base_color.b,
+				static_cast<float>(0.30 * vitality + 0.10));
+		const Color outline_color(std::min(static_cast<double>(base_color.r) * 1.35, 1.0),
+				std::min(static_cast<double>(base_color.g) * 1.35, 1.0),
+				std::min(static_cast<double>(base_color.b) * 1.35, 1.0), 0.95);
+		const Color nucleus_color(0.08f, 0.16f, 0.15f, static_cast<float>(0.85 * vitality));
+
+		if (build_geometry) {
+			polygons.append(polygon);
+			outlines.append(outline);
+		}
 		centers.append(center);
 		radii.append(static_cast<float>(effective_radius));
-		body_colors.append(Color(base_color.r, base_color.g, base_color.b,
-				static_cast<float>(0.30 * vitality + 0.10)));
-		outline_colors.append(Color(std::min(static_cast<double>(base_color.r) * 1.35, 1.0),
-				std::min(static_cast<double>(base_color.g) * 1.35, 1.0),
-				std::min(static_cast<double>(base_color.b) * 1.35, 1.0), 0.95));
-		nucleus_colors.append(Color(0.08f, 0.16f, 0.15f, static_cast<float>(0.85 * vitality)));
+		body_colors.append(body_color);
+		outline_colors.append(outline_color);
+		nucleus_colors.append(nucleus_color);
+
+		// v0.52.0：排成 shader 参数纹理。槽位 = 本细胞在 centers 里的序号，
+		// 必须与 GDScript 侧 MultiMesh 实例下标一一对应。
+		const int param_base = (static_cast<int>(centers.size()) - 1) * kParamTexels * 4;
+		cell_params.set(param_base + 0, body_color.r);
+		cell_params.set(param_base + 1, body_color.g);
+		cell_params.set(param_base + 2, body_color.b);
+		cell_params.set(param_base + 3, body_color.a);
+		cell_params.set(param_base + 4, outline_color.r);
+		cell_params.set(param_base + 5, outline_color.g);
+		cell_params.set(param_base + 6, outline_color.b);
+		cell_params.set(param_base + 7, outline_color.a);
+		cell_params.set(param_base + 8, nucleus_color.r);
+		cell_params.set(param_base + 9, nucleus_color.g);
+		cell_params.set(param_base + 10, nucleus_color.b);
+		cell_params.set(param_base + 11, nucleus_color.a);
+		// texel 3：细胞器颜色 + 数量（数量以 count/255 编码，shader 侧还原）。
+		cell_params.set(param_base + 12, outline_color.r);
+		cell_params.set(param_base + 13, outline_color.g);
+		cell_params.set(param_base + 14, outline_color.b);
+		cell_params.set(param_base + 15, static_cast<float>(kMaxShaderOrganelles) / 255.0f);
+		// texel 4..7：最多 8 条接触弦，统一按 (a.xy, b.zw) 存放。
+		for (int chord_index = 0; chord_index < static_cast<int>(local_a.size())
+				&& chord_index < kMaxShaderChords; ++chord_index) {
+			const int offset = param_base + (4 + chord_index / 2) * 4;
+			const Vector2 a = local_a[chord_index];
+			const Vector2 b = local_b[chord_index];
+			if (chord_index % 2 == 0) {
+				cell_params.set(offset + 0, a.x);
+				cell_params.set(offset + 1, a.y);
+				cell_params.set(offset + 2, b.x);
+				cell_params.set(offset + 3, b.y);
+			} else {
+				cell_params.set(offset + 2, a.x);
+				cell_params.set(offset + 3, a.y);
+				cell_params.set(offset + 0, b.x);
+				cell_params.set(offset + 1, b.y);
+			}
+		}
+		// texel 8..12：5 个细胞器的局部偏移与半径比例（散列确定，跨帧稳定）。
+		for (int organelle = 0; organelle < kMaxShaderOrganelles; ++organelle) {
+			const uint32_t hashed = mix32(static_cast<uint32_t>(org_id) * 73856093U
+					^ static_cast<uint32_t>(type_id) * 19349663U
+					^ static_cast<uint32_t>(organelle + 1) * 83492791U);
+			const double angle = kTau * static_cast<double>(hashed & 0xFFFFU) / 65536.0;
+			const double distance = 0.22 + static_cast<double>((hashed >> 16) & 0xFFU) / 255.0 * 0.30;
+			const double size_ratio = 0.06 + static_cast<double>((hashed >> 8) & 0xFFU) / 255.0 * 0.06;
+			const int offset = param_base + (8 + organelle) * 4;
+			cell_params.set(offset + 0, static_cast<float>(std::cos(angle) * distance));
+			cell_params.set(offset + 1, static_cast<float>(std::sin(angle) * distance));
+			cell_params.set(offset + 2, static_cast<float>(size_ratio));
+			cell_params.set(offset + 3, 0.0f);
+		}
 	}
 
 	// v0.40.0 C 路线：把 GDScript _build_batched_commands() 的三角展开下沉到此处。
 	// 逐顶点 PackedVector2Array.append() 在 GDScript 下 1024 细胞约 32ms，
 	// 是 draw call 已降但帧时间未变的根因。此处与 GDScript 兜底路径逐点同构。
+	// v0.52.0：shader 路径传 build_geometry=false 时整段跳过 —— 这是该路线的主要收益。
 	PackedVector2Array batch_vertices;
 	PackedColorArray batch_colors;
 	PackedInt32Array batch_indices;
-	const PackedVector2Array nucleus_unit = unit_circle(12); // GDScript maxi(12, 8) == 12
-	const Color link_color(0.58f, 0.82f, 0.72f, 0.42f);
-	for (int index = 0; index < polygons.size(); ++index) {
-		const PackedVector2Array polygon = polygons[index];
-		if (polygon.size() < 3) continue;
-		const Color body_color = body_colors[index];
-		const Vector2 origin = polygon[0];
-		for (int point_index = 1; point_index < polygon.size() - 1; ++point_index) {
-			append_triangle(batch_vertices, batch_colors, origin,
-					polygon[point_index], polygon[point_index + 1], body_color);
+	if (build_geometry) {
+		const PackedVector2Array nucleus_unit = unit_circle(12); // GDScript maxi(12, 8) == 12
+		const Color link_color(0.58f, 0.82f, 0.72f, 0.42f);
+		for (int index = 0; index < polygons.size(); ++index) {
+			const PackedVector2Array polygon = polygons[index];
+			if (polygon.size() < 3) continue;
+			const Color body_color = body_colors[index];
+			const Vector2 origin = polygon[0];
+			for (int point_index = 1; point_index < polygon.size() - 1; ++point_index) {
+				append_triangle(batch_vertices, batch_colors, origin,
+						polygon[point_index], polygon[point_index + 1], body_color);
+			}
+			const PackedVector2Array outline = outlines[index];
+			const Color outline_color = outline_colors[index];
+			for (int point_index = 0; point_index < outline.size(); ++point_index) {
+				append_segment(batch_vertices, batch_colors, outline[point_index],
+						outline[(point_index + 1) % outline.size()], outline_color, 1.0);
+			}
+			const double nucleus_radius = std::max(1.0, static_cast<double>(radii[index]) * 0.15);
+			const Vector2 nucleus_center = centers[index];
+			const Color nucleus_color = nucleus_colors[index];
+			for (int point_index = 0; point_index < nucleus_unit.size(); ++point_index) {
+				append_triangle(batch_vertices, batch_colors, nucleus_center,
+						nucleus_center + nucleus_unit[point_index] * static_cast<float>(nucleus_radius),
+						nucleus_center + nucleus_unit[(point_index + 1) % nucleus_unit.size()] * static_cast<float>(nucleus_radius),
+						nucleus_color);
+			}
 		}
-		const PackedVector2Array outline = outlines[index];
-		const Color outline_color = outline_colors[index];
-		for (int point_index = 0; point_index < outline.size(); ++point_index) {
-			append_segment(batch_vertices, batch_colors, outline[point_index],
-					outline[(point_index + 1) % outline.size()], outline_color, 1.0);
+		for (int link_index = 0; link_index + 1 < links.size(); link_index += 2) {
+			append_segment(batch_vertices, batch_colors, links[link_index], links[link_index + 1], link_color, 2.0);
 		}
-		const double nucleus_radius = std::max(1.0, static_cast<double>(radii[index]) * 0.15);
-		const Vector2 nucleus_center = centers[index];
-		const Color nucleus_color = nucleus_colors[index];
-		for (int point_index = 0; point_index < nucleus_unit.size(); ++point_index) {
-			append_triangle(batch_vertices, batch_colors, nucleus_center,
-					nucleus_center + nucleus_unit[point_index] * static_cast<float>(nucleus_radius),
-					nucleus_center + nucleus_unit[(point_index + 1) % nucleus_unit.size()] * static_cast<float>(nucleus_radius),
-					nucleus_color);
+		const int vertex_count = batch_vertices.size();
+		batch_indices.resize(vertex_count);
+		for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
+			batch_indices.set(vertex_index, vertex_index);
 		}
-	}
-	for (int link_index = 0; link_index + 1 < links.size(); link_index += 2) {
-		append_segment(batch_vertices, batch_colors, links[link_index], links[link_index + 1], link_color, 2.0);
-	}
-	const int vertex_count = batch_vertices.size();
-	batch_indices.resize(vertex_count);
-	for (int vertex_index = 0; vertex_index < vertex_count; ++vertex_index) {
-		batch_indices.set(vertex_index, vertex_index);
 	}
 
 	Dictionary result;
@@ -378,7 +467,13 @@ Dictionary CellRenderCache::rebuild(
 	result["batch_vertices"] = batch_vertices;
 	result["batch_colors"] = batch_colors;
 	result["batch_indices"] = batch_indices;
-	result["active_count"] = polygons.size();
+	// centers 与 polygons 同序同长（build_geometry=true 时逐位相等）；shader 路径下
+	// polygons 为空，用 centers.size() 才能如实报告细胞数。
+	result["active_count"] = centers.size();
+	// v0.52.0：shader 路径的每细胞参数（RGBA32F，每细胞 kParamTexels 个 texel）
+	// 与细胞顺序表。count 与 centers.size() 一致，可直接用作 MultiMesh 实例数。
+	result["cell_params"] = cell_params;
+	result["count"] = centers.size();
 	result["chord_count"] = chord_count;
 	return result;
 }
@@ -387,6 +482,7 @@ void CellRenderCache::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("rebuild", "alive", "pos_x", "pos_y", "radius_scales",
 			"cell_type", "cell_org_id", "color_r", "color_g", "color_b", "cell_energy",
 			"link_a", "link_b", "base_radius", "dish_cx", "dish_cy", "dish_radius",
-			"cell_size", "segments", "max_cells"),
-			&CellRenderCache::rebuild);
+			"cell_size", "segments", "max_cells", "build_geometry"),
+			&CellRenderCache::rebuild,
+			DEFVAL(true));
 }

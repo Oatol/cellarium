@@ -40,6 +40,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://scripts/rendering/CellView.gd",
 	"res://scripts/rendering/CellSceneRenderer.gd",
 	"res://scripts/rendering/CellPolygonBatchRenderer.gd",
+	"res://scripts/rendering/CellShaderLayer.gd",
 	"res://scripts/rendering/CameraController.gd",
 	"res://scripts/rendering/CellMembrane.gd",
 	"res://scripts/rendering/CellContactChords.gd",
@@ -102,6 +103,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/ViewDragCostProbe.gd",
 	# v0.48：整场镜像查表与 GPU dispatch 采样的逐位对照（需 Vulkan 窗口，headless 打印 SKIP）。
 	"res://tools/FieldMirrorParityProbe.gd",
+	# v0.52：canvas_item shader + MultiMesh 参数纹理的膜造形可行性闸门（需 Vulkan 窗口）。
+	"res://tools/ShaderMembraneProbe.gd",
 ]
 
 func _initialize() -> void:
@@ -2194,6 +2197,9 @@ func _check_cell_scene_renderer() -> bool:
 	if layer == null or batch == null or manager == null or bus == null or tick_core == null:
 		push_error("SmokeTest: CellSceneLayer nodes missing")
 		instance.queue_free(); return false
+	# v0.52.0：生产路径是单 CanvasItem 三角批；逐实例档只作调试用。
+	# 本用例断言的是 CellView（CellBase.tscn）行为，因此显式打开调试档。
+	layer.set("use_instance_path", true)
 	# 冻结发育 tick，避免测试期间自动分裂改变预期细胞数。
 	tick_core.set("running", false)
 	var cells: RefCounted = manager.get("cells") as RefCounted
@@ -2481,6 +2487,8 @@ func _check_shared_chords() -> bool:
 	if layer == null or manager == null or tick_core == null:
 		push_error("SmokeTest: shared chord scene nodes missing")
 		instance.queue_free(); return false
+	# v0.52.0：弦端点分发断言的是 CellView，显式打开逐实例调试档。
+	layer.set("use_instance_path", true)
 	tick_core.set("running", false)
 	# 显式放两枚相切细胞（间距 2r），避免演示体发育时序影响断言。
 	var bus: Node = instance.get_node_or_null("Simulation/CommandBus")
@@ -2696,6 +2704,9 @@ func _check_multicellular_cooperation() -> bool:
 	var instance: Node = scene.instantiate()
 	instance.set("create_demo_organism", true)
 	root.add_child(instance)
+	# v0.52.0：生产路径是单 CanvasItem 三角批，不再产出逐细胞黏附计数。
+	# 本用例验证 CellView 的黏附方向派生，显式打开逐实例调试档。
+	(instance.get_node("DishView/CellSceneLayer") as Node).set("use_instance_path", true)
 	await process_frame
 	var tick_core: Node = instance.get_node("Simulation/TickCore")
 	var manager: Node = instance.get_node("Simulation/OrganismManager")
