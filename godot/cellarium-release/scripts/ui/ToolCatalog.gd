@@ -11,6 +11,7 @@ static func tools() -> Array[Dictionary]:
 		{"id":"DRAG","key":"3","name":"光学镊子","en":"Optical tweezers","group":"celllab","kind":"world","mode":"拖拽型","desc":"拖动落点附近细胞到新位置。"},
 		{"id":"BOOST","key":"4","name":"细胞强化","en":"Cell boost","group":"celllab","kind":"world","mode":"点击型","desc":"为落点附近细胞注入额外能量。"},
 		{"id":"INSPECT","key":"5","name":"细胞诊断","en":"Cell diagnostics","group":"celllab","kind":"world","mode":"点击型","desc":"读取落点细胞状态并显示在状态栏。"},
+		{"id":"STERILIZE","key":"X","name":"培养基灭菌","en":"Sterilize","group":"celllab","kind":"world","mode":"立即型","desc":"一次清除培养皿内全部细胞，不用「移除细胞」逐枚点。"},
 		{"id":"ADHERE","key":"6","name":"黏附连接","en":"Adhesion extruder","group":"macro","kind":"world","mode":"拖拽型","desc":"在落点附近两枚细胞间建立黏附连接。"},
 		{"id":"INJECT_GENOME","key":"7","name":"基因组注射","en":"Genome injector","group":"macro","kind":"world","mode":"点击型","desc":"把编辑草案写入落点细胞所属个体，并切换其表现类型。"},
 		{"id":"INJECT_SIGNAL","key":"8","name":"信号注射","en":"Signal injector","group":"macro","kind":"world","mode":"点击型","desc":"向信号通道注入化学信号 source。"},
@@ -24,7 +25,7 @@ static func tools() -> Array[Dictionary]:
 
 static func groups() -> Array[Dictionary]:
 	return [
-		{"k":"celllab","label":"Cell Lab · 5"},
+		{"k":"celllab","label":"Cell Lab · 6"},
 		{"k":"macro","label":"Macro · 5"},
 		{"k":"edit","label":"Edit · 4"}
 	]

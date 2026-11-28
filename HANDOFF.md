@@ -7,7 +7,7 @@
 
 ## 0. 一句话现状
 
-我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 把碰撞内核重构成 Cell Lab 式单轮软弹力**（真实皿 1024 细胞整 tick 墙钟 8801→6869 µs，碰撞段 1795→109.5 µs，16.4×），**v0.48.0 把场采样从「每 tick 两次 GPU 往返」改成「每 tick 一次整场回读 + 两次 C++ 本机查表」**（tick1 p50 −20% 量级），**v0.49.0 把 `metab_env` 的每 tick 重建表改成世代缓存 + 副作用循环下沉 C++**（3000 细胞 `metab_env` 2512.7→1301.5 µs，`metab_env_prep` 1232.3→5.1 µs）。state hash 基线 v0.47–v0.49 为 `114854044`，**v0.50.0 分裂语义修正后重建为 `665147009`**。**真实窗口当前实测：tick1 p50 4555–5214 µs、tick3 p50 12449–13396 µs，单 tick 已稳在 8 ms 预算内。** 下一个瓶颈是 `cache`（渲染缓存重建 p50 8531–8619 µs，把 3× 倍速相位帧时推到 16.66 ms）。
+我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 把碰撞内核重构成 Cell Lab 式单轮软弹力**（真实皿 1024 细胞整 tick 墙钟 8801→6869 µs，碰撞段 1795→109.5 µs，16.4×），**v0.48.0 把场采样从「每 tick 两次 GPU 往返」改成「每 tick 一次整场回读 + 两次 C++ 本机查表」**（tick1 p50 −20% 量级），**v0.49.0 把 `metab_env` 的每 tick 重建表改成世代缓存 + 副作用循环下沉 C++**（3000 细胞 `metab_env` 2512.7→1301.5 µs，`metab_env_prep` 1232.3→5.1 µs）。state hash 基线 v0.47–v0.49 为 `114854044`，v0.50.0 重建为 `665147009`，**v0.51.0 重建为 `2825738337`**。**真实窗口当前实测：tick1 p50 4555–5214 µs、tick3 p50 12449–13396 µs，单 tick 已稳在 8 ms 预算内。** 下一个瓶颈是 `cache`（渲染缓存重建 p50 8531–8619 µs，把 3× 倍速相位帧时推到 16.66 ms）。
 
 ---
 
@@ -93,7 +93,7 @@
 ### 闸门现状（接手后任何改动都要重跑）
 - `SmokeTest: SCRIPTS=95 FAILURES=0`（工作区 + D 盘双工程，新增脚本必须登记 manifest）。
 - `NativeParityProbe: NATIVE_E2E: OK (failures=0)`。
-- `WorkerEngineProbe`（场景，非 `--script`）：`PROBE_SEQ hash=665147009` / `PROBE_WORKER hash=665147009` / `match=true`（v0.50.0 基线）。
+- `WorkerEngineProbe`（场景，非 `--script`）：`PROBE_SEQ hash=2825738337` / `PROBE_WORKER hash=2825738337` / `match=true`（v0.51.0 基线）。
 - `SplitBandProbe`（headless）：`glue_off_d0 links=0`（未生成黏附素时零连接）。
 - `FieldMirrorParityProbe`（**需 Vulkan 窗口**）：`FIELD_MIRROR_PARITY values=10000 failures=0`。
 - `GpuSamplingTest`（**需 Vulkan 窗口**）：`GPU_SAMPLING PASS`，headless 打印 SKIP。

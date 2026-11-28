@@ -5,6 +5,58 @@ const INPUT_COUNT: int = 8
 const HIDDEN_COUNT: int = 4
 const OUTPUT_COUNT: int = 6
 const WEIGHT_COUNT: int = INPUT_COUNT * HIDDEN_COUNT + HIDDEN_COUNT * OUTPUT_COUNT
+## v0.51.0：输出[1]（转向）从「绝对世界朝向」改为「角速度」，积分进 `cell_orientation`，
+## 推力沿朝向施加 —— 对齐 Cell Lab `cell.k += cell.l * d` 与 `cell.g += cos(cell.k) * fA`。
+## 满舵 0.6 rad/s：全速 12 u/s 时转弯半径 20 u，链状群体只会缓慢弯曲，不会各自游成团。
+const TURN_RATE: float = 0.6
+
+## v0.51.0：同一群体的推进意图取均值（2 float/细胞：前进、转向）。
+## 根因证据（SplitBandProbe）：同一条 9 细胞链，`neural_weights` 清零时 span_x=112.0 span_y=0.0
+## （正好 8×2r 的完美直线），开神经就折成 32.8×19.4 的手风琴。原因是本项目连接是**刚性杆**，
+## 逐细胞推进速度不同 → 快的顶慢的 → 链条受压屈曲；Cell Lab 的质-弹簧求解器让同群体以合力前进。
+## 这里用「同个体平均推进」近似同一效果：有归属的细胞用本个体均值，孤立细胞用自身值。
+##
+## `intents` 必须显式传入**本 tick 刚算出的** 6 维输出（count*6），不能从 `behavior_intents` 读：
+## 原生路径先 `copy_outputs_to_intents` 再应用，纯 GDScript 路径在 `apply_outputs_flat` 内部才写，
+## 读 `behavior_intents` 会让两条路径相差一个 tick（NativeParityProbe m1_photo 抓到 5 处分叉）。
+static func build_organism_thrust(cells: RefCounted, organism_count: int, intents: PackedFloat32Array) -> PackedFloat32Array:
+	var thrust: PackedFloat32Array = PackedFloat32Array()
+	if cells == null or organism_count <= 0:
+		return thrust
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var org_ids: PackedInt32Array = cells.get("cell_org_id")
+	var count: int = mini(alive.size(), int(intents.size() / OUTPUT_COUNT))
+	if count <= 0:
+		return thrust
+	var sum_fwd: PackedFloat32Array = PackedFloat32Array()
+	var sum_steer: PackedFloat32Array = PackedFloat32Array()
+	var tally: PackedInt32Array = PackedInt32Array()
+	sum_fwd.resize(organism_count)
+	sum_steer.resize(organism_count)
+	tally.resize(organism_count)
+	var use_org: bool = org_ids.size() >= count
+	for cell_index in range(count):
+		if alive[cell_index] == 0 or not use_org:
+			continue
+		var org: int = int(org_ids[cell_index])
+		if org < 0 or org >= organism_count:
+			continue
+		var start: int = cell_index * OUTPUT_COUNT
+		sum_fwd[org] += intents[start]
+		sum_steer[org] += intents[start + 1]
+		tally[org] += 1
+	thrust.resize(count * 2)
+	for cell_index in range(count):
+		var start: int = cell_index * OUTPUT_COUNT
+		var org: int = int(org_ids[cell_index]) if use_org else -1
+		if org < 0 or org >= organism_count or tally[org] <= 0:
+			thrust[cell_index * 2] = intents[start]
+			thrust[cell_index * 2 + 1] = intents[start + 1]
+			continue
+		var inv: float = 1.0 / float(tally[org])
+		thrust[cell_index * 2] = sum_fwd[org] * inv
+		thrust[cell_index * 2 + 1] = sum_steer[org] * inv
+	return thrust
 ## v0.30.0：静态分区并行阈值。每个任务只写 outputs/pos 的不重叠切片，单写者语义不变。
 const PARALLEL_MIN_CELLS: int = 256
 const PARALLEL_MAX_TASKS: int = 16
@@ -193,22 +245,28 @@ static func compute_outputs_flat(
 	return true
 
 static func apply_outputs_flat_range(cells: RefCounted, outputs: PackedFloat32Array,
-		dt: float, max_speed: float, first: int, last: int) -> void:
+		dt: float, max_speed: float, first: int, last: int,
+		thrust: PackedFloat32Array = PackedFloat32Array()) -> void:
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
 	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
 	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	var orientations: PackedFloat32Array = cells.get("cell_orientation")
+	var use_thrust: bool = thrust.size() >= last * 2
 	for cell_index in range(first, last):
 		if alive[cell_index] == 0:
 			continue
 		var start: int = cell_index * OUTPUT_COUNT
 		for output_index in range(OUTPUT_COUNT):
 			intents[start + output_index] = outputs[start + output_index]
-		var angle: float = outputs[start + 1] * PI
-		var speed: float = outputs[start] * max_speed * dt
-		var movement: Vector2 = Vector2.RIGHT.rotated(angle) * speed
+		var forward: float = thrust[cell_index * 2] if use_thrust else outputs[start]
+		var steer: float = thrust[cell_index * 2 + 1] if use_thrust else outputs[start + 1]
+		var orientation: float = fposmod(float(orientations[cell_index]) + steer * TURN_RATE * dt, TAU)
+		orientations[cell_index] = orientation
+		var speed: float = forward * max_speed * dt
+		var movement: Vector2 = Vector2.RIGHT.rotated(orientation) * speed
 		prev_x[cell_index] = pos_x[cell_index]
 		prev_y[cell_index] = pos_y[cell_index]
 		pos_x[cell_index] += movement.x
@@ -219,7 +277,8 @@ static func apply_outputs_flat(
 	cells: RefCounted,
 	outputs: PackedFloat32Array,
 	dt: float,
-	max_speed: float = 12.0
+	max_speed: float = 12.0,
+	thrust: PackedFloat32Array = PackedFloat32Array()
 ) -> bool:
 	if cells == null or dt < 0.0 or max_speed < 0.0:
 		return false
@@ -227,7 +286,7 @@ static func apply_outputs_flat(
 	if outputs.size() < count * OUTPUT_COUNT:
 		return false
 	if count < PARALLEL_MIN_CELLS:
-		apply_outputs_flat_range(cells, outputs, dt, max_speed, 0, count)
+		apply_outputs_flat_range(cells, outputs, dt, max_speed, 0, count, thrust)
 	else:
 		var task_count: int = mini(PARALLEL_MAX_TASKS, maxi(1, OS.get_processor_count()))
 		task_count = mini(task_count, count)
@@ -236,12 +295,13 @@ static func apply_outputs_flat(
 			var first: int = int(float(count * task_index) / float(task_count))
 			var last: int = int(float(count * (task_index + 1)) / float(task_count))
 			task_ids.append(WorkerThreadPool.add_task(
-				apply_outputs_flat_range.bind(cells, outputs, dt, max_speed, first, last),
+				apply_outputs_flat_range.bind(cells, outputs, dt, max_speed, first, last, thrust),
 				false, "cellarium move %d" % task_index
 			))
 		for task_id in task_ids:
 			WorkerThreadPool.wait_for_task_completion(task_id)
 	cells.set("behavior_intents", cells.get("behavior_intents"))
+	cells.set("cell_orientation", cells.get("cell_orientation"))
 	cells.set("cell_pos_x", cells.get("cell_pos_x"))
 	cells.set("cell_pos_y", cells.get("cell_pos_y"))
 	cells.set("cell_prev_x", cells.get("cell_prev_x"))
@@ -257,20 +317,23 @@ static func apply_outputs(cells: RefCounted, outputs: Array[PackedFloat32Array],
 	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
 	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
 	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	var orientations: PackedFloat32Array = cells.get("cell_orientation")
 	for cell_index in range(alive.size()):
 		if alive[cell_index] == 0 or outputs[cell_index].size() != OUTPUT_COUNT:
 			continue
 		var output: PackedFloat32Array = outputs[cell_index]
 		for output_index in range(OUTPUT_COUNT):
 			intents[cell_index * OUTPUT_COUNT + output_index] = output[output_index]
-		var angle: float = output[1] * PI
+		var orientation: float = fposmod(float(orientations[cell_index]) + output[1] * TURN_RATE * dt, TAU)
+		orientations[cell_index] = orientation
 		var speed: float = output[0] * max_speed * dt
-		var movement: Vector2 = Vector2.RIGHT.rotated(angle) * speed
+		var movement: Vector2 = Vector2.RIGHT.rotated(orientation) * speed
 		prev_x[cell_index] = pos_x[cell_index]
 		prev_y[cell_index] = pos_y[cell_index]
 		pos_x[cell_index] += movement.x
 		pos_y[cell_index] += movement.y
 	cells.set("behavior_intents", intents)
+	cells.set("cell_orientation", orientations)
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
 	cells.set("cell_prev_x", prev_x)
@@ -279,7 +342,8 @@ static func apply_outputs(cells: RefCounted, outputs: Array[PackedFloat32Array],
 
 ## LOD 中间 tick：复用已存的 behavior_intents 推进运动，不重算神经（§2.6）。
 ## 输出与 apply_outputs 一致，只是跳过神经推理，保证降频档位下运动连续。
-static func apply_cached_intents(cells: RefCounted, dt: float, max_speed: float = 12.0) -> bool:
+static func apply_cached_intents(cells: RefCounted, dt: float, max_speed: float = 12.0,
+		thrust: PackedFloat32Array = PackedFloat32Array()) -> bool:
 	if dt < 0.0:
 		return false
 	var alive: PackedByteArray = cells.get("cell_alive")
@@ -288,20 +352,26 @@ static func apply_cached_intents(cells: RefCounted, dt: float, max_speed: float 
 	var prev_x: PackedFloat32Array = cells.get("cell_prev_x")
 	var prev_y: PackedFloat32Array = cells.get("cell_prev_y")
 	var intents: PackedFloat32Array = cells.get("behavior_intents")
+	var orientations: PackedFloat32Array = cells.get("cell_orientation")
 	var count: int = alive.size()
+	var use_thrust: bool = thrust.size() >= count * 2
 	for cell_index in range(count):
 		if alive[cell_index] == 0:
 			continue
 		var start: int = cell_index * OUTPUT_COUNT
 		if start + 1 >= intents.size():
 			continue
-		var angle: float = intents[start + 1] * PI
-		var speed: float = intents[start] * max_speed * dt
-		var movement: Vector2 = Vector2.RIGHT.rotated(angle) * speed
+		var forward: float = thrust[cell_index * 2] if use_thrust else intents[start]
+		var steer: float = thrust[cell_index * 2 + 1] if use_thrust else intents[start + 1]
+		var orientation: float = fposmod(float(orientations[cell_index]) + steer * TURN_RATE * dt, TAU)
+		orientations[cell_index] = orientation
+		var speed: float = forward * max_speed * dt
+		var movement: Vector2 = Vector2.RIGHT.rotated(orientation) * speed
 		prev_x[cell_index] = pos_x[cell_index]
 		prev_y[cell_index] = pos_y[cell_index]
 		pos_x[cell_index] += movement.x
 		pos_y[cell_index] += movement.y
+	cells.set("cell_orientation", orientations)
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
 	cells.set("cell_prev_x", prev_x)

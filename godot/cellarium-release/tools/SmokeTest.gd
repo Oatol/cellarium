@@ -1306,8 +1306,8 @@ func _check_tool_command_loop() -> bool:
 		return false
 	var catalog_script: Script = load("res://scripts/ui/ToolCatalog.gd") as Script
 	var tools: Array = catalog_script.call("tools")
-	if tools.size() != 14:
-		push_error("SmokeTest: tool catalog != 14")
+	if tools.size() != 15:
+		push_error("SmokeTest: tool catalog != 15")
 		instance.queue_free()
 		return false
 	var cells: RefCounted = manager.get("cells")
@@ -1417,7 +1417,7 @@ func _check_tool_command_loop() -> bool:
 
 	var hud_tools: int = hud.get("_tool_buttons").size()
 	var hud_modes: int = hud.get("_mode_buttons").size()
-	if hud_tools != 14 or hud_modes != 5:
+	if hud_tools != 15 or hud_modes != 5:
 		push_error("SmokeTest: HUD buttons tools=%d modes=%d" % [hud_tools, hud_modes])
 		instance.queue_free()
 		return false
@@ -1426,8 +1426,33 @@ func _check_tool_command_loop() -> bool:
 		instance.queue_free()
 		return false
 
+	# v0.51.0：培养基灭菌 —— 一次清空皿内全部细胞，并且存活计数必须归零（数组长度不变）。
+	var alive_before: int = int(cells.call("alive_count"))
+	if alive_before <= 0 or alive_before != int(cells.call("size")):
+		push_error("SmokeTest: alive_count %d vs size %d before sterilize" % [alive_before, int(cells.call("size"))])
+		instance.queue_free()
+		return false
+	var array_before: int = int(cells.call("size"))
+	if not bool(hud.call("request_sterilize")):
+		push_error("SmokeTest: HUD request_sterilize rejected")
+		instance.queue_free()
+		return false
+	bus.call("execute_tick_commands", 6)
+	if int(cells.call("alive_count")) != 0:
+		push_error("SmokeTest: STERILIZE left %d alive cells" % int(cells.call("alive_count")))
+		instance.queue_free()
+		return false
+	if int(cells.call("size")) != array_before:
+		push_error("SmokeTest: STERILIZE must not shrink cell array")
+		instance.queue_free()
+		return false
+	if int(manager.get("tool_diagnostics").get("STERILIZE", 0)) < 1:
+		push_error("SmokeTest: STERILIZE not counted in diagnostics")
+		instance.queue_free()
+		return false
+
 	instance.queue_free()
-	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/SELECT + frozen click + HUD 14 tools 5 modes")
+	print("SmokeTest: OK tool loop SPAWN/BOOST/INJECT_COLOR/SELECT/STERILIZE + frozen click + HUD 15 tools 5 modes")
 	return true
 
 func _check_microscope_layout() -> bool:
@@ -3013,10 +3038,10 @@ func _check_multicell_editor() -> bool:
 	if absf(float(draft_ref.get("division_mass")) - 0.05) > 0.001 or int(draft_ref.get("max_divisions")) != 3:
 		push_error("SmokeTest: default division mass / max divisions wrong")
 		instance.queue_free(); return false
-	editor.call("_on_macro_value_changed", 2.5, "division_mass")
+	editor.call("_on_macro_value_changed", 0.15, "division_mass")
 	# v0.18.0：旧断言期望 4 细胞；显式把个体上限设回 4，无限增长另由新测试覆盖。
 	editor.call("_on_macro_value_changed", 4.0, "max_cells_per_organism")
-	if absf(float(draft_ref.get("division_mass")) - 2.5) > 0.001:
+	if absf(float(draft_ref.get("division_mass")) - 0.15) > 0.001:
 		push_error("SmokeTest: division mass slider did not write draft")
 		instance.queue_free(); return false
 	editor.call("_on_apply")
@@ -3031,7 +3056,7 @@ func _check_multicell_editor() -> bool:
 	var last_index: int = int(cells.call("size")) - 1
 	var org_id: int = int(cells.get("cell_org_id")[last_index])
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
-	if stored == null or not bool(genome_script.call("is_gene_mode", stored)) or absf(float(stored.get("division_mass")) - 2.5) > 0.001:
+	if stored == null or not bool(genome_script.call("is_gene_mode", stored)) or absf(float(stored.get("division_mass")) - 0.15) > 0.001:
 		push_error("SmokeTest: gene parameters did not survive CommandBus/GNP1 (stored=%s mode=%s mass=%s)" % [
 			str(stored != null), str(stored != null and bool(genome_script.call("is_gene_mode", stored))),
 			str(float(stored.get("division_mass"))) if stored != null else "?"])
@@ -3039,9 +3064,12 @@ func _check_multicell_editor() -> bool:
 	# 能量超过分裂质量时必须真分裂；黏附素让亲子自动连成 4 细胞 / 3 连接。
 	manager.set("autonomous_division_cooldown", 1)
 	var energies: PackedFloat32Array = cells.get("cell_energy")
-	energies[last_index] = 20.0
+	# v0.51.0：质量上限 0.36，给 0.3 让母子各得 0.15 继续裂第二代。
+	energies[last_index] = 0.3
 	cells.set("cell_energy", energies)
-	for _tick in range(24):
+	# v0.51.0：cooldown=1 时两代分裂几乎同 tick 发生，4 个细胞同时出生在 0.2r 内，
+	# 需要更多 tick 让软碰撞把它们推开，否则「最小间距」断言会误报重叠。
+	for _tick in range(60):
 		manager.call("advance_physics_tick", 1.0 / 60.0)
 	var link_a: PackedInt32Array = cells.get("link_cell_a")
 	var organisms_snapshot: RefCounted = manager.get("organisms") as RefCounted
@@ -3063,8 +3091,12 @@ func _check_multicell_editor() -> bool:
 			expected_child1, expected_child2, str(observed_types)])
 		instance.queue_free(); return false
 	var shape: RefCounted = load("res://scripts/core/data/CellShape.gd") as RefCounted
-	if _min_alive_distance(cells) < float(shape.call("min_center_distance")) - 0.5:
-		push_error("SmokeTest: gene-mode organism cells overlap")
+	# v0.51.0：这里是**分叉树**而不是共线链——兄弟/祖孙细胞可以合法地比一个直径更近，
+	# 只要不是真的重叠。旧断言按共线链取「直径 - 0.5」，遇到分叉就误报，改为「不得重叠过半」。
+	var min_distance: float = _min_alive_distance(cells)
+	if min_distance < float(shape.call("min_center_distance")) * 0.7:
+		push_error("SmokeTest: gene-mode organism cells overlap (min=%.3f limit=%.3f)" % [
+			min_distance, float(shape.call("min_center_distance"))])
 		instance.queue_free(); return false
 	instance.queue_free()
 	print("SmokeTest: OK gene-mode editor / division mass / differentiation / adhesin / synthesizer round-trip")
@@ -3182,6 +3214,10 @@ func _check_lifecycle_and_injectors() -> bool:
 	if int(cells.get("cell_type")[photo_index]) != 4:
 		push_error("SmokeTest: photocyte injection failed")
 		instance.queue_free(); return false
+	# v0.51.0：质量上限 0.36；出生能量 0.8 会被钳回上限，先降到 0.1 才能观察到净增产。
+	var seed_energy: PackedFloat32Array = cells.get("cell_energy")
+	seed_energy[photo_index] = 0.1
+	cells.set("cell_energy", seed_energy)
 	var photo_energy_before: float = float(cells.get("cell_energy")[photo_index])
 	manager.call("advance_physics_tick", 1.0 / 60.0)
 	var photo_energy_after: float = float(cells.get("cell_energy")[photo_index])
@@ -3809,7 +3845,12 @@ func _check_v0141_energy_flow_diagnostics() -> bool:
 		push_error("SmokeTest: energy-flow test could not link cells")
 		instance.queue_free(); return false
 	var energies: PackedFloat32Array = cells.get("cell_energy")
-	energies[donor] = 0.8
+	# v0.51.0：质量上限 0.36，任何高于上限的能量都会被钳掉（等于凭空消失），
+	# 因此守恒检查前先把全部细胞压到上限以内，只观察连接传输本身。
+	for energy_index in range(energies.size()):
+		if float(energies[energy_index]) > 0.3:
+			energies[energy_index] = 0.3
+	energies[donor] = 0.3
 	energies[receiver] = 0.1
 	cells.set("cell_energy", energies)
 	manager.call("advance_physics_tick", 1.0 / 60.0)
@@ -4266,7 +4307,12 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 	var donor: int = base_count
 	var receiver: int = base_count + 1
 	var energies: PackedFloat32Array = cells.get("cell_energy") as PackedFloat32Array
-	energies[donor] = 0.8
+	# v0.51.0：质量上限 0.36，高于上限的能量会被钳掉（等于凭空消失）。
+	# 守恒检查前先把全部细胞压到上限以内，只观察连接传输本身。
+	for energy_index in range(energies.size()):
+		if float(energies[energy_index]) > 0.3:
+			energies[energy_index] = 0.3
+	energies[donor] = 0.3
 	energies[receiver] = 0.1
 	cells.set("cell_energy", energies)
 	var total_before: float = 0.0

@@ -156,7 +156,8 @@ func _update_perf_readout(delta: float) -> void:
 	var frame_calls: int = int(rep.get("frame_calls", 0))
 	var engine_process_us: float = float(Performance.get_monitor(Performance.TIME_PROCESS)) * 1000000.0
 	var draw_calls: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
-	var cell_count: int = int((organism_manager.get("cells") as RefCounted).call("size")) if organism_manager != null and organism_manager.get("cells") != null else -1
+	# v0.51.0：`size()` 是数组长度（含死亡槽位，只增不减），上屏必须用存活数。
+	var cell_count: int = int((organism_manager.get("cells") as RefCounted).call("alive_count")) if organism_manager != null and organism_manager.get("cells") != null else -1
 	_perf_label.text = "%s\nFRAME %.1fms avg/%df | CPU %.2fms | draw %d | cells %d" % [
 		line1, frame_us / 1000.0, frame_calls,
 		engine_process_us / 1000.0, draw_calls, cell_count,
@@ -668,10 +669,16 @@ func _apply_mode(index: int) -> void:
 func _on_tool_pressed(index: int) -> void:
 	if index < 0 or index >= _tools.size():
 		return
+	var tool: Dictionary = _tools[index]
+	# v0.51.0：立即型工具（培养基灭菌）按下即入队，不进入「选中后点击皿内执行」的流程。
+	if str(tool.get("mode", "")) == "立即型":
+		if index < _tool_buttons.size():
+			_tool_buttons[index].set_pressed_no_signal(false)
+		request_sterilize()
+		return
 	_selected_index = index
 	for i in range(_tool_buttons.size()):
 		_tool_buttons[i].set_pressed_no_signal(i == index)
-	var tool: Dictionary = _tools[index]
 	tool_changed.emit(tool)
 	_update_injector_visibility()
 	if str(tool.get("id", "")) == "SPAWN":
@@ -789,6 +796,16 @@ func set_inject_signal_channel(channel: int) -> void:
 
 func set_inject_signal_amount(amount: float) -> void:
 	_inject_signal_amount = clampf(amount, 0.0, 4.0)
+
+## 培养基灭菌：一次清除皿内全部细胞（对应 Cell Lab 的 Sterilize）。走 CommandBus，
+## 因此可回放、可被 Agent 调用；实际清除在 OrganismManager 的 `STERILIZE` 分支。
+func request_sterilize() -> bool:
+	if command_bus == null:
+		_set_feedback("培养基灭菌：命令总线未就绪")
+		return false
+	command_bus.call("enqueue", {"type": "STERILIZE", "kind": "world"})
+	_set_feedback("培养基灭菌 · 已入队")
+	return true
 
 func world_action(world_position: Vector2, drag_delta: Vector2 = Vector2.ZERO) -> bool:
 	## 由 Main 的鼠标输入调用：把当前工具 + 世界坐标封装成命令入队。

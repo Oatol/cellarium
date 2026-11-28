@@ -202,6 +202,9 @@ func _rebuild_mode_states(draft: Dictionary, raw_modes: Array) -> void:
 
 ## 用真实内核跑整段发育：记录里程碑快照（供只读索引），并把世界留在发育完成态。
 func _run_simulation(genes: Array[Dictionary], initial_slot: int, max_events: int) -> void:
+	# v0.51.0：改设置后重跑预览，但**保留时间轴位置**（Cell Lab 的发育预览刷新后不会跳回 t=0，
+	# 否则每改一个滑块都要重新拖时间刻度）。超出新时长时由 _init_timeline 钳到末态。
+	var previous_tick: int = _current_tick
 	_states.clear()
 	_cursor = 0
 	_genes = []
@@ -231,21 +234,22 @@ func _run_simulation(genes: Array[Dictionary], initial_slot: int, max_events: in
 		if bool(_world.is_grown()) or int(_world.get_tick()) - last_split_tick >= IDLE_STOP_TICKS:
 			break
 	_max_tick = int(_world.get_tick())
-	# 时间轴范围 = 本次发育收尾 tick；初始停在 t=0，拖到末态才需重跑。
-	_init_timeline()
+	# 时间轴范围 = 本次发育收尾 tick；停在改动前的时刻（首次构建即 t=0）。
+	_init_timeline(previous_tick)
 
 ## 连续时间定位：拖动滑块 → 真实模拟续跑/重置到该 tick → 渲染那一刻。
 ## 默认停在 t=0（合子）：先跑完整段只为拿 _max_tick/里程碑，拖到末态才需重跑 74 tick，
 ## 默认在末态时用户一拖就会触发重置+重跑而卡顿（Cell Lab Macro 也是从 0 小时开始）。
-func _init_timeline() -> void:
+func _init_timeline(target_tick: int = 0) -> void:
+	var restore: int = clampi(target_tick, 0, _max_tick)
 	if _timeline != null:
 		_timeline.min_value = 0.0
 		_timeline.max_value = float(maxi(1, _max_tick))
 		_timeline.step = 1.0
 		_syncing_timeline = true
-		_timeline.value = 0.0
+		_timeline.value = float(restore)
 		_syncing_timeline = false
-	_seek_to(0)
+	_seek_to(restore)
 
 func _on_timeline_changed(value: float) -> void:
 	if _syncing_timeline:

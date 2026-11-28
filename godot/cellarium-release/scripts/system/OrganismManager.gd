@@ -57,7 +57,7 @@ var selection: Array[int] = []
 var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
 var perf_probe: RefCounted = PERF_PROBE_SCRIPT.new() as RefCounted
 
-const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "CLEAR_SELECTION", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
+const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "STERILIZE", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "CLEAR_SELECTION", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
 ## AgentBridge 写入命令与开发者命令（阶段5），均走 CommandBus → apply_command。
 const AGENT_COMMAND_TYPES: Array[String] = ["SET_TEMP", "AGENT_SPAWN", "ERASE_AREA", "AGENT_TOOL", "GENE_SET_TRAIT", "GENE_SET_RESPIRATION", "DEV_FORCE_MUTATE", "DEV_FORCE_SPECIATE", "DEV_SPAWN_BATCH", "DEV_DUMP_WORLD"]
 
@@ -204,7 +204,7 @@ func _rebuild_native_metabolism_cache() -> void:
 				_native_org_max_cells[org_id] = -1
 			else:
 				_native_org_max_cells[org_id] = mini(cap, maxi(1, global_cell_capacity))
-			_native_org_default_division_mass[org_id] = maxf(0.05, float(genome.get("division_mass")))
+			_native_org_default_division_mass[org_id] = clampf(float(genome.get("division_mass")), 0.05, CELL_ENERGY_MAX)
 			_native_org_default_threshold[org_id] = _native_org_default_division_mass[org_id]
 		else:
 			_native_org_max_cells[org_id] = int(DEVELOPMENT_RULES_SCRIPT.call("expected_cell_count", genome))
@@ -219,7 +219,7 @@ func _rebuild_native_metabolism_cache() -> void:
 			var flat: int = org_id * stride + mode_id
 			_native_mode_dicts[flat] = mode
 			_native_org_mode_rates[flat] = clampf(float(mode.get("transfer_rate", 0.0)), 0.0, 1.0)
-			_native_org_mode_thresholds[flat] = maxf(0.05, float(mode.get("division_mass", 0.05)))
+			_native_org_mode_thresholds[flat] = clampf(float(mode.get("division_mass", 0.05)), 0.05, CELL_ENERGY_MAX)
 			_native_org_mode_link_limits[flat] = clampi(int(mode.get("link_division_limit", -1)), -1, 16)
 
 func _native_mode_for_cell(org_id: int, mode_index: int) -> Dictionary:
@@ -250,11 +250,22 @@ func _ready() -> void:
 @export var dish_center: Vector2 = Vector2.ZERO
 @export var dish_radius: float = 512.0
 @export_range(0.0, 1.0, 0.01) var boundary_normal_damping: float = 0.5
+## v0.51.0：对齐 Cell Lab 的质量上限。`CellWorld` 代谢段 `if (cell.w > 0.36) cell.w = 0.36;`
+## （LIPOCYTE 把溢出量存进 `cell.S`，上限 1.8）。旧实现没有上限，细胞会囤积远超分裂阈值的能量，
+## 一次分裂后亲子都还在阈值以上，于是连裂成一团。
+const CELL_ENERGY_MAX: float = 0.36
+## v0.51.0：分裂产物最小质量。Cell Lab 判死段是 `cell.w < 0.072`，而它的分裂阈值 Gene.b 约 0.2，
+## 即「低于阈值的 0.36 倍就不该存在」。本项目默认阈值 0.05，直接套 0.072 会杀死默认基因组，
+## 因此按同一比例取相对值，只在**分裂产物**上判定（不做每 tick 全局判死）。
+const MIN_DAUGHTER_MASS_RATIO: float = 0.36
 @export var cell_radius: float = CELL_SHAPE_SCRIPT.REST_RADIUS
 @export var base_metabolic_cost: float = 0.006
 @export var autonomous_division_enabled: bool = true
 @export var autonomous_division_energy: float = 0.16
-@export var autonomous_division_cooldown: int = 300
+## v0.51.0：Cell Lab `CellWorld.e(double)` 的分裂门没有「每 N tick 一次」的硬间隔，
+## 唯一的时间条件是 `cell.o > 0.5`（出生/上次分裂后 0.5 秒），分裂时母子 `cell.o` 都归零。
+## 60 Hz 下 0.5 s = 30 tick，旧默认 300 比 Cell Lab 严 10 倍。
+@export var autonomous_division_cooldown: int = 30
 ## v0.18.0：旧的 per-organism 硬上限已废弃；-1 表示不再按 8 细胞截断个体。
 @export var autonomous_max_cells_per_organism: int = -1
 ## v0.18.0：全局容量保护；达到后所有新增细胞/分裂路径一律拒绝。
@@ -419,6 +430,10 @@ func advance_physics_tick(dt: float) -> void:
 				CELL_BEHAVIOR_SCRIPT.call("compute_outputs_flat", cells, environment, _behavior_outputs_flat)
 		var applied_outputs: bool = false
 		var apply_native: RefCounted = _get_native_neural()
+		# v0.51.0：位移用「同个体平均推进」，避免刚性连杆被逐细胞速度差顶成屈曲。
+		var org_thrust: PackedFloat32Array = CELL_BEHAVIOR_SCRIPT.call("build_organism_thrust",
+			cells, (organisms.get("org_alive") as PackedByteArray).size(),
+			_behavior_outputs_flat) as PackedFloat32Array
 		if apply_native != null and apply_native.has_method("copy_outputs_to_intents"):
 			# v0.35.0：批量写回 6 个输出；Vector2.rotated 的位移仍由 GDScript 执行，
 			# 因为引擎内置三角与 godot-cpp std::cos 有 1 ULP 差异，会破坏 state hash。
@@ -429,13 +444,16 @@ func advance_physics_tick(dt: float) -> void:
 			if copied_intents.size() == cell_count * 6:
 				cells.set("behavior_intents", copied_intents)
 				perf_probe.call("begin", "beh_apply")
-				CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
+				CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed, org_thrust)
 				perf_probe.call("end", "beh_apply")
 				applied_outputs = true
 		if not applied_outputs:
-			CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed)
+			CELL_BEHAVIOR_SCRIPT.call("apply_outputs_flat", cells, _behavior_outputs_flat, dt, max_movement_speed, org_thrust)
 	else:
-		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed)
+		CELL_BEHAVIOR_SCRIPT.call("apply_cached_intents", cells, dt, max_movement_speed,
+			CELL_BEHAVIOR_SCRIPT.call("build_organism_thrust", cells,
+				(organisms.get("org_alive") as PackedByteArray).size(),
+				cells.get("behavior_intents")))
 	perf_probe.call("end", "behavior")
 	perf_probe.call("begin", "physics")
 	# v0.45 诊断：把 physics 段拆到 FFI 边界两侧，区分 GDScript 准备/写回与 C++ 内核。
@@ -684,7 +702,7 @@ func _apply_base_metabolism(dt: float) -> void:
 	var self_cost_size: int = self_cost_values.size()
 	for cell_index in range(energies.size()):
 		if alive[cell_index] != 0:
-			energies[cell_index] = maxf(0.0, energies[cell_index] + deltas[cell_index])
+			energies[cell_index] = clampf(energies[cell_index] + deltas[cell_index], 0.0, CELL_ENERGY_MAX)
 			if cell_index < self_cost_size:
 				self_cost_values[cell_index] += self_cost_amount
 	cells.set("cell_energy", energies)
@@ -919,7 +937,8 @@ func _apply_autonomous_lifecycle() -> void:
 			var genome: RefCounted = genomes[org_id] as RefCounted
 			var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
 			var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
-			var threshold: float = maxf(0.05, float(genome.get("division_mass"))) if gene_mode else autonomous_division_energy
+			# v0.51.0：Cell Lab 质量上限 0.36，阈值超过上限的模式永远裂不了，比较前先钳到上限。
+			var threshold: float = clampf(float(genome.get("division_mass")), 0.05, CELL_ENERGY_MAX) if gene_mode else autonomous_division_energy
 			var max_cells: int = _resolve_max_cells(genome)
 			var mode_data: Dictionary = {}
 			var mode_index: int = 0
@@ -928,7 +947,7 @@ func _apply_autonomous_lifecycle() -> void:
 				mode_index = 0 if cell_index >= mode_ids.size() else int(mode_ids[cell_index])
 				depth = 0 if cell_index >= mode_depths.size() else int(mode_depths[cell_index])
 				mode_data = GENOME_SCRIPT.call("get_mode", genome, mode_index)
-				threshold = maxf(0.05, float(mode_data.get("division_mass", threshold)))
+				threshold = clampf(float(mode_data.get("division_mass", threshold)), 0.05, CELL_ENERGY_MAX)
 				# v0.22.0：去掉 mode depth/max_divisions 分裂闸门，对齐 Cell Lab e(double)。
 				# Cell Lab 无「同模式分裂 N 代后锁死」机制；分裂次数由端粒 T 控制（-1 无限），
 				# 本项目 cell_telomere 已承担该角色。depth 字段保留仅为兼容存档/预览莫斯，不再限制分裂。
@@ -1053,6 +1072,18 @@ func _apply_autonomous_lifecycle() -> void:
 				var types_array: PackedByteArray = cells.get("cell_type")
 				types_array[child_index] = clampi(int(child_types[division_index]), 0, 255)
 				cells.set("cell_type", types_array)
+		# v0.51.0：Cell Lab 分裂后质量过低的子代直接死亡。没有这条时 split_ratio 0.9 这类设置
+		# 会产出「几乎看不见但仍在分裂」的细胞，越裂越多。按该模式阈值的 MIN_DAUGHTER_MASS_RATIO 判定。
+		var floor_mode: Dictionary = candidate.get("mode", {}) as Dictionary
+		var division_mass_for_floor: float = float(floor_mode.get("division_mass", genome.get("division_mass"))) if has_modes else float(genome.get("division_mass"))
+		var daughter_floor: float = clampf(division_mass_for_floor, 0.05, CELL_ENERGY_MAX) * MIN_DAUGHTER_MASS_RATIO
+		if float(energies[child_index]) < daughter_floor:
+			_remove_cell_with_cause(child_index, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_STARVATION"]))
+			continue
+		if float(energies[cell_index]) < daughter_floor:
+			_remove_cell_with_cause(cell_index, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_STARVATION"]))
+			continue
+
 		# v0.14.1：成熟后的自主分裂同样遵守黏附素语义，亲子自动建连。
 		# v0.16.0/v0.17.0：受当前模式 max_connections 上限约束；min_connections 为追加软补连。
 		var rest_length: float = maxf(division_separation, cell_radius * 2.0 * radius_scale)
@@ -1130,15 +1161,27 @@ func _apply_energy_radius_relaxation(dt: float) -> void:
 		var genome: RefCounted = genomes[int(org_ids[cell_index])] as RefCounted
 		if not bool(GENOME_SCRIPT.call("is_gene_mode", genome)):
 			continue
-		var reference: float = maxf(0.05, float(genome.get("division_mass")))
+		# v0.51.0：必须与 `_native_org_default_division_mass` / `_native_org_mode_thresholds` 同口径
+		# （clamp 到 [0.05, CELL_ENERGY_MAX]）。原生路径用缓存表、这里用实时基因组，口径不一致
+		# 会让两条路径算出不同的能量半径，NativeParityProbe 在 m1_photo tick=700 抓到分叉。
+		# 原生路径的 reference 来自 `PackedFloat32Array` 缓存表（float32 精度），这里必须过一遍
+		# float32 再参与除法，否则 0.05(double) vs 0.05f 的差别会在「未饱和」区间放大成半径分叉。
+		var reference: float = _as_float32(clampf(float(genome.get("division_mass")), 0.05, CELL_ENERGY_MAX))
 		if bool(GENOME_SCRIPT.call("has_modes", genome)) and cell_index < mode_ids.size():
 			var mode: Dictionary = GENOME_SCRIPT.call("get_mode", genome, int(mode_ids[cell_index]))
-			reference = maxf(0.05, float(mode.get("division_mass", reference)))
+			reference = _as_float32(clampf(float(mode.get("division_mass", reference)), 0.05, CELL_ENERGY_MAX))
 		var current: float = float(cells.call("get_energy_radius_scale", cell_index))
 		var current_power: float = current * current
 		var target_power: float = clampf(maxf(0.0, energies[cell_index]) / reference, min_power, max_power)
 		var next_scale: float = sqrt(maxf(0.0, current_power + (target_power - current_power) * step))
 		cells.call("set_energy_radius_scale", cell_index, next_scale)
+
+## v0.51.0：把 double 收窄成 float32（与 C++ 侧 PackedFloat32Array 读取同精度）。
+static func _as_float32(value: float) -> float:
+	var round_trip: PackedFloat32Array = PackedFloat32Array()
+	round_trip.resize(1)
+	round_trip[0] = value
+	return float(round_trip[0])
 
 func _apply_predation(dt: float) -> void:
 	if dt <= 0.0:
@@ -1734,6 +1777,23 @@ func _apply_tool_command(command: Dictionary) -> int:
 			last_tool_message = "颜色注射：#%d → 类型 %d" % [index, chosen]
 			tool_diagnostics["INJECT_COLOR"] = int(tool_diagnostics["INJECT_COLOR"]) + 1
 			return index
+		"STERILIZE":
+			# v0.51.0：培养基灭菌（Cell Lab 的 Sterilize）—— 一次清除皿内全部细胞，
+			# 不用「移除细胞」工具一枚枚点。逐细胞走统一死亡路径，账本 / 统计 / 物种记录
+			# 与其它死亡一致；走 CommandBus 单写者，因此可回放、可被 Agent 调用。
+			var sterilize_cause: int = int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_INTERVENTION"])
+			var removed: int = 0
+			for cell_index in range(int(cells.call("size")) - 1, -1, -1):
+				if int(cells.get("cell_alive")[cell_index]) == 0:
+					continue
+				_remove_cell_with_cause(cell_index, sterilize_cause)
+				removed += 1
+			selection = []
+			last_inspection = {}
+			adhesion_anchor = -1
+			last_tool_message = "培养基灭菌：清除 %d 枚细胞" % removed
+			tool_diagnostics["STERILIZE"] = int(tool_diagnostics.get("STERILIZE", 0)) + 1
+			return removed
 		"CLEAR_SELECTION":
 			# 纯视图解锁：只清 selection / 诊断快照，不改物理、能量或确定性 hash。
 			selection = []

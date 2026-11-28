@@ -4,6 +4,91 @@
 
 ---
 
+## v0.51.0 — 行为位移沿朝向 + 同个体合力推进 + 灭菌/存活计数 + 质量上限（2026-11-28）
+
+**类型**：玩法语义修正（运动 / 分裂门 / 质量上下限）+ UI 修正。**state hash 基线重建** `665147009` → `2825738337`。
+
+### 用户报的问题与根因
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | 相同设置应长成长带，实际成一团 | 三重叠加：推进力用**任意世界角**（Cell Lab 是沿 `cell.k`）；转向意图被当绝对朝向；**逐细胞推进速度不同 + 刚性连杆**把链条顶成屈曲 |
+| 2 | 细胞数一多外观突变 | `max_instances` 阈值把渲染切成两套画法（逐实例 11 个 CanvasItem vs 单 CanvasItem 批渲染） |
+| 3 | 左上角细胞计数只增不减 | 读的是 `CellArray.size()`（数组长度，含死亡槽位） |
+| 4 | 需要「培养基灭菌」 | 只有逐枚点的「移除细胞」 |
+| 5 | 能量无上限、分裂太频繁 | 代谢只 `max(0.0, ...)` 无上界；分裂门是 300 tick 硬冷却（Cell Lab 是 `cell.o > 0.5`） |
+| 6 | 分裂角度是小数字、位置在底部 | 存 0..1 的 TAU 分数，且母/子朝向都堆在 GENE 段 |
+| 7 | 改设置后预览跳回 t=0 | `_init_timeline()` 无条件 `_seek_to(0)` |
+
+### 关键证据（`tools/SplitBandProbe.gd`）
+
+同一条 9 细胞丝状链，同一份参数，只改 `neural_weights`：
+
+```
+chain_nobehavior  span_x=112.0 span_y=0.0  elongation=111.96   ← 8 条 14 单位连杆，完美直线
+chain_glue_on     span_x=32.8  span_y=19.4 elongation=1.69     ← 开神经就折成手风琴
+```
+
+`no_behavior_d0`（32 细胞、权重清零）同样是 `span_y=0.0`。结论：成团**不是**分裂几何的问题（v0.50.0 已修好），
+而是运动把共线的链揉皱了 —— 逐细胞推进速度不同，刚性连杆承受压差 → 欧拉屈曲。
+
+修复后 `chain_glue_on` = `span_x=107.7 span_y=6.9 elongation=15.60`（理想 112 / 0）。
+
+### 改动
+
+**行为运动（`CellBehavior.gd` / `OrganismManager.gd`）**
+- 新增 `TURN_RATE = 0.6`：输出[1]（转向）从「绝对世界朝向」改为**角速度**，积分进 `cell_orientation`，
+  推力沿朝向施加 —— 对齐 Cell Lab `cell.k += cell.l * d` 与 `cell.g += cos(cell.k) * fA`。
+  朝向进 state hash，因此每条位移路径（`apply_outputs` / `apply_outputs_flat_range` / `apply_cached_intents`）都必须更新它。
+- 新增 `build_organism_thrust()`：同一群体取**推进意图均值**（有归属的细胞用本个体均值，孤立细胞用自身值），
+  近似 Cell Lab 质-弹簧求解器「同群体以合力前进」的效果。`intents` 必须显式传入本 tick 刚算出的输出 ——
+  原生路径先 `copy_outputs_to_intents` 再应用，纯 GDScript 路径在 `apply_outputs_flat` 内部才写，
+  读 `behavior_instances` 会让两条路径差一个 tick。
+
+**质量上下限（`OrganismManager.gd`，对齐 Cell Lab）**
+- `CELL_ENERGY_MAX = 0.36`：代谢写回改为 `clampf(..., 0.0, 0.36)`（Cell Lab `if (cell.w > 0.36) cell.w = 0.36`）。
+  旧实现无上限，细胞囤积远超分裂阈值的能量，一次分裂后亲子都还在阈值以上 → 连裂成一团。
+- 分裂阈值比较前统一 `clampf(division_mass, 0.05, 0.36)`；阈值超上限的模式永远裂不了。
+- `MIN_DAUGHTER_MASS_RATIO = 0.36`：**分裂产物**低于「该模式阈值 × 0.36」直接走饥饿死亡
+  （Cell Lab `cell.w < 0.072`，其阈值 Gene.b 约 0.2）。不做每 tick 全局判死 —— 本项目能量刻度与 Cell Lab 不同，
+  全局套 0.072 会直接杀死默认基因组（默认阈值 0.05）。
+- `autonomous_division_cooldown` 300 → **30**：Cell Lab 的分裂门**没有**「每 N tick 一次」的硬间隔，
+  唯一时间条件是 `cell.o > 0.5`（秒），60 Hz 下即 30 tick。旧值比 Cell Lab 严 10 倍。
+
+**顺带修掉的口径 bug**：`_apply_energy_radius` 的 GDScript 回退路径用未钳制的 `genome.division_mass` 当半径参考值，
+原生路径用钳过的 `PackedFloat32Array` 缓存表 —— 上限生效后细胞能量落在「未饱和」区间，两条路径算出不同半径，
+`NativeParityProbe` 在 `m1_photo tick=700` 抓到分叉。修法：回退路径同样 `clampf(..., 0.05, CELL_ENERGY_MAX)`
+并过一遍 `_as_float32()`（原生读的是 float32）。
+
+**UI**
+- 左上角 `cells` 改读 `CellArray.alive_count()`（新增），不再累加死亡槽位。
+- 新增工具「培养基灭菌 / Sterilize」（`ToolCatalog` 第 15 项，`mode = 立即型`）：`GameHUD.request_sterilize()`
+  走 CommandBus 入队 `STERILIZE`，`OrganismManager` 逐细胞走统一死亡路径，可回放、可被 Agent 调用。
+- 分裂角度三控件改**度数**（0–360°，step 1）：`_make_macro_slider` 新增 `scale` 参数，
+  UI 值 = draft × scale，draft 仍存 0..1 的 TAU 分数（Gene.d/e/f 语义不变，GNP1 与存档不受影响）。
+  「母细胞分裂后朝向（Gene.e）」下放到 CHILD 1 段、「子细胞分裂后朝向（Gene.f）」下放到 CHILD 2 段。
+- 发育预览刷新后**保留时间轴位置**（`_init_timeline(target_tick)`），不再每次跳回 t=0。
+
+### 闸门
+
+双工程 SmokeTest `SCRIPTS=96 FAILURES=0`；`NativeParityProbe NATIVE_E2E: OK (failures=0)`；
+`WorkerEngineProbe PROBE_SEQ hash=2825738337` / `PROBE_WORKER hash=2825738337` / `match=true`；
+`SplitBandProbe SPLIT_BAND RESULT checks=4 failures=0`（新增 4 条断言，含 `chain_glue_on elongation >= 4.0`）。
+
+### 测试口径修正（如实记录）
+
+能量上限生效后有 4 条旧断言按「无上限」写成，已改到新不变式上：分裂质量用例 2.5 → 0.15（能量 20 → 0.3）、
+光合用例先把能量降到 0.1 再测净增产、连接守恒用例先把全部细胞压到 0.3 以内、分叉树「最小间距」断言从
+「直径 − 0.5」放宽到「直径 × 0.7」（兄弟/祖孙细胞合法地比一个直径更近）。
+
+### 未完成
+
+**#37 细胞外观全数量统一**：仍是 `max_instances = 48` 阈值切两套画法，未实现「任意数量外观一致」。
+批渲染档（`CellPolygonBatchRenderer`）已有体/内膜环/核/轮廓，缺逐实例档的 5 个细胞器与信号锚点；
+需先把这些补进单 CanvasItem 批绘制，再把阈值置 0 并让逐实例档只作调试开关。
+
+---
+
 ## v0.50.0 — 分裂语义对齐 Cell Lab + 预览分裂指示器 + 渲染档倒挂（2026-11-28）
 
 **类型**：玩法语义修正（分裂几何 / 黏附）+ 预览可视化 + 渲染 LOD 修正。**state hash 基线重建**。

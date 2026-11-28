@@ -494,18 +494,21 @@ func _build_right_panel() -> Control:
 	for child_index in range(1, 3):
 		# Cell Lab Gene 没有独立「子代类型」：f778r/s 指向 Gene 槽，子代类型 = 目标槽的 o0。
 		box.add_child(_make_macro_mode_option("child%d_mode" % child_index, "子代 %d 模式" % child_index, "选择该子代进入哪个模式槽；类型取该模式的「细胞类型」"))
+		# v0.51.0：分裂后朝向是「这一个子代」的属性，放进各自的子代段，不再堆在最下面。
 		box.add_child(_make_macro_check("child%d_glue" % child_index, "子代 %d 额外建连" % child_index,
 			"版本化追加开关，缺省关闭。黏附以「生成黏附素」（Gene.l）为准；勾选后即使未生成黏附素也为该子代建连"))
 		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index,
 			"子代 %d 的朝向与分裂轴取相反方向（Gene.q/r 语义）" % child_index))
+		if child_index == 1:
+			box.add_child(_make_macro_slider("split_angle", "母细胞分裂后朝向（Gene.e）", 0.0, 360.0, 1.0,
+				"母细胞（Gene.i 那一个）分裂后朝向 = 分裂轴 + 该偏转。0° = 保持沿分裂轴。", 0, 360.0))
+		else:
+			box.add_child(_make_macro_slider("split_angle2", "子细胞分裂后朝向（Gene.f）", 0.0, 360.0, 1.0,
+				"新细胞（Gene.j 那一个）分裂后朝向 = 分裂轴 + 该偏转。0° = 保持沿分裂轴。", 0, 360.0))
 
 	box.add_child(_make_section_title("GENE · 当前模式分裂规则（无指令序列）"))
-	box.add_child(_make_macro_slider("child2_angle", "分裂角度（Gene.d）", 0.0, 1.0, 0.01,
-		"相对**母细胞当前朝向**的分裂轴偏转 ÷ TAU。0 = 沿母细胞朝向直分，链条会延续成一条长带；0.25 = 转 90°。", 2))
-	box.add_child(_make_macro_slider("split_angle", "母细胞分裂后朝向（Gene.e）", 0.0, 1.0, 0.01,
-		"母细胞分裂后朝向 = 分裂轴 + 该偏转 ÷ TAU。0 = 保持沿分裂轴。", 2))
-	box.add_child(_make_macro_slider("split_angle2", "子细胞分裂后朝向（Gene.f）", 0.0, 1.0, 0.01,
-		"子细胞分裂后朝向 = 分裂轴 + 该偏转 ÷ TAU。0 = 保持沿分裂轴。", 2))
+	box.add_child(_make_macro_slider("child2_angle", "分裂轴角度（Gene.d）", 0.0, 360.0, 1.0,
+		"相对**母细胞当前朝向**的分裂轴偏转。0° = 沿母细胞朝向直分，链条会延续成一条长带；90° = 转直角。", 0, 360.0))
 	box.add_child(_make_macro_slider("division_mass", "分裂质量（能量阈值）", 0.05, 100.0, 0.05,
 		"Gene.b：该模式细胞能量达到该值即分裂。", 2))
 	box.add_child(_make_macro_slider("split_ratio", "分裂质量比（母细胞保留）", 0.05, 0.95, 0.01,
@@ -646,7 +649,9 @@ func _make_macro_type_option(key: String, label_text: String, tip: String) -> HB
 	row.add_child(option)
 	return row
 
-func _make_macro_slider(key: String, label_text: String, minimum: float, maximum: float, step: float, tip: String, digits: int) -> HBoxContainer:
+## v0.51.0：`scale` 把「draft 存储单位」换成「UI 显示单位」。
+## 分裂角度在 draft 里存 0..1 的 TAU 分数（Gene.d/e/f 语义），UI 用 0..360°，scale = 360。
+func _make_macro_slider(key: String, label_text: String, minimum: float, maximum: float, step: float, tip: String, digits: int, scale: float = 1.0) -> HBoxContainer:
 	var row: HBoxContainer = HBoxContainer.new()
 	var label: Label = Label.new()
 	label.text = label_text
@@ -662,7 +667,7 @@ func _make_macro_slider(key: String, label_text: String, minimum: float, maximum
 	slider.value_changed.connect(_on_macro_value_changed.bind(key))
 	var value_label: Label = Label.new()
 	value_label.custom_minimum_size = Vector2(42, 0)
-	_macro_controls[key] = {"slider": slider, "value_label": value_label, "digits": digits}
+	_macro_controls[key] = {"slider": slider, "value_label": value_label, "digits": digits, "scale": scale}
 	row.add_child(label)
 	row.add_child(slider)
 	row.add_child(value_label)
@@ -779,8 +784,10 @@ func _refresh_macro_controls() -> void:
 			(control["option"] as OptionButton).select(clampi(int(value), 0, (control["option"] as OptionButton).item_count - 1))
 		elif control.has("slider"):
 			var slider: HSlider = control["slider"] as HSlider
-			slider.set_value_no_signal(float(value))
-			(control["value_label"] as Label).text = _format_macro_value(key, float(value), int(control.get("digits", 2)))
+			var unit_scale: float = float(control.get("scale", 1.0))
+			var shown: float = float(value) * unit_scale
+			slider.set_value_no_signal(shown)
+			(control["value_label"] as Label).text = _format_macro_value(key, shown, int(control.get("digits", 2)))
 	# v0.18.0：个体上限不在 MACRO_FIELD_KEYS（它是 Genome 顶层字段），单独刷新。
 	_refresh_scale_control()
 
@@ -794,7 +801,12 @@ func _refresh_scale_control() -> void:
 	(control["slider"] as HSlider).set_value_no_signal(value)
 	(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 0)))
 
-func _format_macro_value(_key: String, value: float, digits: int) -> String:
+const INTEGER_MACRO_KEYS: Array[String] = ["max_connections", "min_connections", "mode_max_divisions", "max_cells_per_organism", "link_division_limit", "telomere"]
+const DEGREE_KEYS: Array[String] = ["child2_angle", "split_angle", "split_angle2"]
+
+func _format_macro_value(key: String, value: float, digits: int) -> String:
+	if key in DEGREE_KEYS:
+		return "%s°" % String.num(value, digits)
 	return String.num(value, digits)
 
 func _on_macro_bool_changed(value: bool, key: String) -> void:
@@ -885,12 +897,14 @@ func _on_macro_option_changed(index: int, key: String) -> void:
 	_queue_preview_sync()
 
 func _on_macro_value_changed(value: float, key: String) -> void:
-	if key == "max_connections" or key == "min_connections" or key == "mode_max_divisions" \
-		or key == "max_cells_per_organism" or key == "link_division_limit" or key == "telomere":
-		_macro_draft[key] = int(round(value))
-	else:
-		_macro_draft[key] = value
 	var control: Dictionary = _macro_controls.get(key, {})
+	# v0.51.0：滑块 UI 单位可以是度数（scale=360），draft 仍存 0..1 的 TAU 分数。
+	var unit_scale: float = float(control.get("scale", 1.0))
+	var stored_value: float = value / unit_scale if unit_scale != 1.0 else value
+	if key in INTEGER_MACRO_KEYS:
+		_macro_draft[key] = int(round(stored_value))
+	else:
+		_macro_draft[key] = stored_value
 	if control.has("value_label"):
 		(control["value_label"] as Label).text = _format_macro_value(key, value, int(control.get("digits", 2)))
 	_sync_macro_to_draft()

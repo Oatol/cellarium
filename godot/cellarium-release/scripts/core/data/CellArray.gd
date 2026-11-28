@@ -88,6 +88,15 @@ func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0
 func size() -> int:
 	return cell_org_id.size()
 
+## v0.51.0：`size()` 是数组长度（含已死亡槽位，只增不减）。UI 上的「cells」必须用存活数，
+## 否则死亡细胞会一直累加。死亡槽位由 `remove_cell()` 标记 `cell_alive = 0`。
+func alive_count() -> int:
+	var total: int = 0
+	for index in range(cell_alive.size()):
+		if cell_alive[index] != 0:
+			total += 1
+	return total
+
 func divide_cell(index: int, angle: float, separation: float = 1.0) -> int:
 	if index < 0 or index >= size() or separation <= 0.0:
 		return -1
