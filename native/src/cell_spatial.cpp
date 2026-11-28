@@ -352,6 +352,97 @@ Dictionary CellSpatial::resolve_collisions(const PackedFloat32Array &pos_x_in,
 	return result;
 }
 
+// v0.47：Cell Lab 式单轮软弹力碰撞。
+// 与 resolve_collisions 的结构性差别（性能与手感同时来自这里）：
+//   1. 只遍历一次固定网格，不迭代、不在中途重建网格（旧路径 6 轮 + 2 次重建）；
+//   2. 不物化 pairs 向量，直接在 9 格邻域里判定，省掉每 tick 数万次 push_back；
+//   3. 先比距离平方再开方，与 Cell Lab `d46 < d49*d49` 同序；
+//   4. 每对只推开穿透深度的一部分（softness），剩余穿透留到后续 tick 继续松弛，
+//      不做 Gauss-Seidel 反复修正 —— 这正是 Cell Lab 的软弹力手感，也避免多轮
+//      位置修正反复注入能量造成的抖动；
+//   5. cell_size <= 0 时按实际最大半径自动推导：9 格邻域只覆盖 Chebyshev 距离
+//      ≤ cell_size，而 |Δ|∞ ≤ |Δ|₂，所以要保证不漏对必须 cell_size ≥ 最大接触距离。
+//      旧路径写死 64.0，而典型细胞直径只有 14 —— 每桶挤 ~20 个细胞、9 桶扫 180 个
+//      候选却只有 ~6 个真邻居，这是碰撞成本的主因（实测 64→14 单项就有 2.5×）。
+Dictionary CellSpatial::resolve_collisions_soft(const PackedFloat32Array &pos_x_in,
+		const PackedFloat32Array &pos_y_in, const PackedByteArray &alive,
+		const PackedFloat32Array &radius_scales,
+		const PackedFloat32Array &stiffnesses, double cell_radius,
+		double cell_size, double softness) {
+	PackedFloat32Array pos_x = pos_x_in;
+	PackedFloat32Array pos_y = pos_y_in;
+	const int count = pos_x.size();
+	float *px = pos_x.ptrw();
+	float *py = pos_y.ptrw();
+	const uint8_t *alive_ptr = alive.ptr();
+	const float *scale_ptr = radius_scales.ptr();
+	const float *stiff_ptr = stiffnesses.ptr();
+	const int scale_count = radius_scales.size();
+	const int stiff_count = stiffnesses.size();
+	const double soft = clampd(softness, 0.0, 1.0);
+
+	double effective_cell_size = cell_size;
+	if (effective_cell_size <= 0.0) {
+		// 与 GDScript 回退路径完全同序：先求存活细胞的最大半径倍率，再乘 2×cell_radius。
+		double max_scale = 0.0;
+		for (int i = 0; i < count; ++i) {
+			if (alive_ptr[i] == 0 || i >= scale_count) continue;
+			const double s = static_cast<double>(scale_ptr[i]);
+			if (s > max_scale) max_scale = s;
+		}
+		if (max_scale <= 0.0) max_scale = 1.0;
+		effective_cell_size = 2.0 * cell_radius * max_scale;
+		if (effective_cell_size < 1.0) effective_cell_size = 1.0;
+	}
+
+	const GridBuckets grid = GridBuckets::build(pos_x, pos_y, alive, count, effective_cell_size);
+	int resolved = 0;
+	double max_penetration = 0.0;
+	for (int a = 0; a < count; ++a) {
+		if (alive_ptr[a] == 0) continue;
+		const int64_t cx = cell_coord(px[a], effective_cell_size);
+		const int64_t cy = cell_coord(py[a], effective_cell_size);
+		const double scale_a = (a < scale_count) ? static_cast<double>(scale_ptr[a]) : 1.0;
+		grid.for_each_neighbor(cx, cy, [&](int32_t bv) {
+			const int b = static_cast<int>(bv);
+			if (b <= a) return;
+			const double dx = static_cast<double>(px[b]) - static_cast<double>(px[a]);
+			const double dy = static_cast<double>(py[b]) - static_cast<double>(py[a]);
+			const double scale_b = (b < scale_count) ? static_cast<double>(scale_ptr[b]) : 1.0;
+			const double contact = cell_radius * (scale_a + scale_b);
+			const double distance_squared = dx * dx + dy * dy;
+			if (distance_squared >= contact * contact) return;
+			const double distance = std::sqrt(distance_squared);
+			double normal_x = 1.0;
+			double normal_y = 0.0;
+			if (distance > 0.000001) {
+				normal_x = dx / distance;
+				normal_y = dy / distance;
+			}
+			double stiffness = 1.0;
+			if (a < stiff_count && b < stiff_count) {
+				stiffness = clampd((static_cast<double>(stiff_ptr[a]) + static_cast<double>(stiff_ptr[b])) * 0.5, 0.25, 2.0);
+			}
+			const double penetration = contact - distance;
+			const double correction = penetration * 0.5 * stiffness * soft;
+			px[a] = static_cast<float>(static_cast<double>(px[a]) - normal_x * correction);
+			py[a] = static_cast<float>(static_cast<double>(py[a]) - normal_y * correction);
+			px[b] = static_cast<float>(static_cast<double>(px[b]) + normal_x * correction);
+			py[b] = static_cast<float>(static_cast<double>(py[b]) + normal_y * correction);
+			++resolved;
+			max_penetration = std::max(max_penetration, penetration);
+		});
+	}
+
+	Dictionary result;
+	result["pos_x"] = pos_x;
+	result["pos_y"] = pos_y;
+	result["resolved"] = resolved;
+	result["max_penetration"] = max_penetration;
+	result["cell_size"] = effective_cell_size;
+	return result;
+}
+
 Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
 		const PackedFloat32Array &pos_y, const PackedFloat32Array &prev_x,
 		const PackedFloat32Array &prev_y, const PackedByteArray &alive,
@@ -418,6 +509,8 @@ void CellSpatial::_bind_methods() {
 			&CellSpatial::collect_inputs_grid);
 	ClassDB::bind_method(D_METHOD("resolve_collisions", "pos_x", "pos_y", "alive", "radius_scales", "stiffnesses", "cell_radius", "cell_size", "iterations"),
 			&CellSpatial::resolve_collisions);
+	ClassDB::bind_method(D_METHOD("resolve_collisions_soft", "pos_x", "pos_y", "alive", "radius_scales", "stiffnesses", "cell_radius", "cell_size", "softness"),
+			&CellSpatial::resolve_collisions_soft);
 	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "damping", "constraint_iterations"),
 			&CellSpatial::step_verlet_and_links);
 }

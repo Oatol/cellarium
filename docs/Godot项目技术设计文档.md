@@ -408,6 +408,8 @@ Main (Node)                          # Main.tscn 根
 
 单帧 tick 上限 12，防止掉帧后"补帧雪崩"；超出部分记入 `carry`，并在 HUD 提示"模拟时间落后"。单步执行（`step_once`）绕过累加器，强制推进一帧并刷新全部调试视图。倍速切换不改变逻辑 dt，只改变 tick 频率与精度降级，因此同一存档在任何倍速下都能得到一致结果（精度降级本身作为存档元数据记录）。
 
+阶段 B3 起新增 `worker_target_mode`（默认关闭，作为 ≥8× 的可选权威模拟路径）：主线程不再逐 tick 跑模拟，只按倍速发布 `target_tick`；独立 worker 连续推进完整 tick，不再受主线程"每帧 12 tick"驱动约束。`carry = target_tick - worker_progress_tick`，仍用 HUD 提示落后。worker 权威态强制 CPU 场，主线程 GPU 场降级为视觉层；因此需要版本化重建 worker 路径的 state hash 基线。原主线程同步路径及 12 tick 上限保持不变，用于低倍速与兼容回退。
+
 ## 3. 数据契约
 
 ### 3.1 资源定义（编辑器期，`.tres`）
@@ -599,7 +601,7 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 | --- | --- |
 | 积分 | Verlet：`p' = 2p − p_prev + a·dt²`，阻尼 0.98；无刚体、无 Godot 物理节点 |
 | 连接 | 弹性弹簧，每 tick 2 次约束迭代，防止拉伸爆炸 |
-| 碰撞 | 空间哈希网格 64 世界单位，仅查 3×3 邻格；所有活细胞（含同生物内部）按同一半径分离，每 tick 最多 6 轮确定性位置修正（每 3 轮重建 pair），处理连锁重叠 |
+| 碰撞 | 空间哈希网格边长按 `2 × cell_radius × 存活细胞最大半径倍率` 自动推导（v0.47.0 起，旧为写死 64），仅查 3×3 邻格；所有活细胞（含同生物内部）按同一半径分离。**v0.47.0 起为 Cell Lab 式单轮软弹力**：每对只推开 `穿透 × 0.5 × stiffness × softness`，不迭代、不重建网格、不物化 pair 列表，剩余穿透留给后续 tick 松弛；旧「6 轮位置修正 + 每 3 轮重建 pair」保留为回滚路径 |
 | 边界 | 圆形皿壁与地形 mask：位置投影回合法区域，法向速度衰减 |
 | 复杂度 | 建表 O(n)，邻域查询 O(n·k)，k 为单格平均密度（软上限 16，超出分网格） |
 | 批处理 | 按网格行分区交给 `WorkerThreadPool.add_group_task`，边界格只读邻区数据 |
@@ -665,6 +667,8 @@ CPU 侧取值策略：**禁止每帧全量 `texture_get_data`**（会同步等�
 **v0.41.0 账本批量化**：微探针（§46）定位到 metab_env 的 90% 开销是 `energy_ledger.record()` 逐细胞创建 Dictionary entry（1142 细胞 3.42 ms），而非 consume 或数组累加；M1 光合细胞不调用 consume。`EnergyLedger.record_batch()` 两遍扫描、只为最后 `_max_entries` 条创建 entry；`OrganismManager._apply_environment_metabolism_ranges()` 两条路径按 intake_type 分组批量记账。真实窗口 1025 细胞 metab_env 5.27→2.56 ms（-51%）、tick1 22.9→19.5 ms，state hash 逐位不变。entries 顺序由 cell 交错改为按类型分组（账本不进 hash、守恒容差断言），有 `LedgerBatchParityProbe` 保证内容等价。纯 GDScript 改动，DLL 未变。≤8 ms/tick 仍未达成。
 
 **v0.42.0 场采样准备链路下沉**：四层分段定位把 v0.41 留下的 physics 段 2.4 ms 差额锁定为每 tick 两次场采样的准备开销，而非 GPU 同步（upload 0.08 / dispatch+sync 0.30 / readback 0.19 ms）；`sample_cells()` 为 1025 细胞各建一个临时 PackedFloat32Array 与字典项是单次 0.68 ms 的大头。`_field_sample_positions()` 直读 SoA 列替代逐细胞动态调用；`EnvironmentField.sample_cells_flat()` 的 GPU 路径改为把回读字节直写扁平缓冲，CPU 回退公式不变；兼容接口 `sample()` 不再命中批量缓存而走单元素 dispatch（同源 shader，数值逐位一致，且不再返回旧场值）。真实窗口 1025 细胞 `metab_fields` 2.24→1.02 ms、tick1 p50 18.0–18.5→15.4–16.7 ms；GPU 5125 个采样值逐位一致，state hash 不变。纯 GDScript 改动，DLL 未变。≤8 ms/tick 仍未达成。
+
+**v0.47.0 碰撞内核重构（架构级，§4.5 手感与哈希基线双变更）**：诊断（`analysis/架构诊断与重构路线.md`）显示碰撞是 3000 细胞最大单项且**超线性爆炸**（1024 细胞 3.5 µs/细胞 → 3000 细胞 36 µs/细胞），根因是「6 轮 Gauss-Seidel 位置修正 + 每 3 轮全量重建网格 + 物化 pair 向量 + 网格尺寸写死 64」。本版改为 Cell Lab 同构的**单轮软弹力**：新增 `CellSpatial.resolve_collisions_soft()`，单次固定网格遍历、不迭代、不物化 pairs、先比距离平方再开方、每对只推开 `穿透 × 0.5 × stiffness × softness`，剩余穿透由后续 tick 松弛。**`cell_size` 语义变更**：旧路径写死 64.0（典型细胞直径仅 14，每桶约 20 个细胞、9 桶扫 180 个候选却只有约 6 个真邻居，单项 2.5× 浪费），新路径 `cell_size <= 0` 时由内核按 `2 × cell_radius × 存活细胞最大半径倍率` 自动推导，并保证 ≥ 最大接触距离（9 格邻域只覆盖 Chebyshev 距离，`|Δ|∞ ≤ |Δ|₂`）。GDScript 回退 `CellPhysics.resolve_collisions_soft()` 与 C++ 逐位同序；`OrganismManager.soft_collision_enabled`（默认 true）可切回旧路径做同会话 A/B 与回滚。**实测（同会话）**：真实皿 1024 细胞 `phys_collision` 1795.1→109.5 µs（16.4×）、`physics` 整段 1970.6→275.0 µs、整 tick 墙钟 8800.6→6869.0 µs（TPS 113.6→145.6），**1024 细胞整 tick 首次进入 8 ms 预算**；等密度微基准 1024/3000/5000 细胞为 24.2×/40.9×/56.5×。**手感**：最坏重叠 4.62 单位（旧路径 8.44）、平均重叠 0.679 vs 0.437（contact 14 的 1.7%），细胞数与总能量两条路径一致。**确定性**：state hash 基线重建为 `114854044`（512 细胞 / 30 tick），旧基线 `4234109495` 作废；`NativeParityProbe` legacy 240 tick 与 m1_photo 700 tick 的 5 个检查点 native/GDScript 逐位一致。GNP1、tick 顺序、1/60 步长、单帧 12 tick 上限、CommandBus 单写者、五通道场 schema、存档 schema 均不改。碰撞此后仅占整 tick 1.6%，剩余压力在 metabolism（2541 µs）与 `metab_fields`（1069.8 µs），属阶段 2 范围。
 
 ### 5.3 场可视化
 
@@ -929,7 +933,7 @@ v2.0 扩展接口（不改动上游契约，单独列出）：`sim.step()`、`si
 | T08 | 存档 → 继续跑 → 读档 → 继续跑 | 两条路径 1000 tick 后状态哈希一致 |
 | T09 | 分支演化 | 父存档不被修改，父 ID 链正确 |
 | T10 | Agent 脚本端到端（§7.4） | 全程自动、结果可复现 |
-| T11 | 32× 倍速跑 10000 tick | 无补帧雪崩，模拟时间落后有提示，渲染不卡死 |
+| T11 | 32× 倍速跑 10000 tick | 同步路径无补帧雪崩；worker 路径 `carry=target-worker` 有提示、渲染不卡死。有效倍速必须按 OS 单调钟（`Time.get_ticks_usec()`）墙钟测，**不得用 `_process(delta)`**（被 vsync/max_fps 钳制会虚高 25–32×）。当前实测：512 worker 1.21× / 1024 0.83×，未达 32×，属未达标项 |
 | T12 | 禁用 compute 后重跑 T03/T10 | 功能一致，仅精度/性能下降 |
 | T13 | 连续应用 1000 次工具干预（营养投放 / 局部升温 / 隔离膜 / 擦除区域），逐项对账 `E_external ↔ E_env` 与 `E_bio → E_env` | 每一步借贷账目齐全，`E_total` 全程误差 < 0.1%；隔离膜/洋流类工具不产生能量增删 |
 | T14 | 同一皿内配置 2 个不同参数的 `EnvironmentPreset.layers[]`，跑 5000 tick | 跨区域场值连续无突变、全场总量守恒、同种子两次运行状态哈希一致；清空 `layers[]` 后结果与全局参数模式一致 |

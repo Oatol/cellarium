@@ -129,7 +129,7 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 				"channels": field.call("get_state_snapshot"),
 				"dish_mask": _copy_array(field.get("dish_mask")),
 				"terrain_mask": _copy_array(field.get("terrain_mask")),
-				"pending_sources": field.get("_pending_sources"),
+				"pending_sources": _copy_array(field.get("_pending_sources")),
 			}
 
 	var species_system: RefCounted = org_manager.get("species_system") as RefCounted

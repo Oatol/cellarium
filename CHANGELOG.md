@@ -4,6 +4,113 @@
 
 ---
 
+## 未发布 — v0.47.0 阶段 1：碰撞内核重构为 Cell Lab 式单轮软弹力（2026-11-28）
+
+**类型**：架构级热路径重构 + 手感变更（state hash 基线重建）。未打 tag、未 push。
+
+**目标**：按 `analysis/架构诊断与重构路线.md` 的阶段 1，消除碰撞的结构性过度刚性。旧路径是 6 轮 Gauss-Seidel 位置修正 + 每 3 轮全量重建网格 + 物化 pairs 向量，且网格尺寸写死 64.0。
+
+**手感变更（用户已确认）**：完全软弹力，Cell Lab 同款 —— 每对只推开穿透深度的一部分，剩余穿透留给后续 tick 松弛，不再反复迭代到硬分离。
+
+### 实现
+
+- `native/src/cell_spatial.cpp` 新增 `CellSpatial.resolve_collisions_soft(pos_x, pos_y, alive, radius_scales, stiffnesses, cell_radius, cell_size, softness)`：单次固定网格遍历、不迭代、不物化 pairs、先比距离平方再开方（与 Cell Lab `d46 < d49*d49` 同序）、修正量 `penetration * 0.5 * stiffness * softness`。返回 `pos_x/pos_y/resolved/max_penetration/cell_size`。旧 `resolve_collisions` 保留用于 A/B 与回放兼容。
+- **`cell_size <= 0` 时由内核自动推导**：`2 × cell_radius × 存活细胞最大半径倍率`。9 格邻域只覆盖 Chebyshev 距离 ≤ cell_size，而 |Δ|∞ ≤ |Δ|₂，所以 cell_size ≥ 最大接触距离才不漏对。旧路径写死 64.0 而典型细胞直径仅 14 —— 每桶挤约 20 个细胞、9 桶扫 180 个候选却只有约 6 个真邻居，这是碰撞成本的主因（单这一项就有 2.5×）。
+- `scripts/system/CellPhysics.gd` 新增 `resolve_collisions_soft()` 纯 GDScript 回退（与 C++ 逐位同序：`contact = cell_radius * (scale_a + scale_b)` 不拆乘法、自动 cell_size 同公式、修正量同顺序）；新增常量 `COLLISION_SOFTNESS = 1.0`。
+- `OrganismManager` 新增 `@export var soft_collision_enabled: bool = true`（回滚 / 同会话 A/B 开关）；`physics_constants` 提到外层作用域（原先只声明在 Verlet 的 if 块里，碰撞段取不到 `COLLISION_SOFTNESS`）。
+- 新增探针 `tools/CollisionSoftProbe.gd`（六方密堆等密度 A/B + cell_size 扫描 + 穿透收敛）与 `tools/CollisionRealProbe.gd`（真实皿密度 1024 细胞完整 tick 链 A/B），均登记 SmokeTest。
+
+### 实测（同会话 A/B，OS 单调钟）
+
+**隔离微基准**（`CollisionSoftProbe`，六方密堆、等填充率、contact 场景）：
+
+| N | r_eff | 旧路径 | 新路径 | 加速 |
+| --- | --- | --- | --- | --- |
+| 1024 | 6.64 | 1732.3 µs | 71.7 µs | **24.2×** |
+| 3000 | 3.88 | 9367.8 µs | 229.0 µs | **40.9×** |
+| 5000 | 3.01 | 22990.2 µs | 407.0 µs | **56.5×** |
+
+配对数量与旧路径一致（1024：17616 vs 2954，比值恰为 6 轮迭代），说明加速来自去掉迭代与缩小网格，不是漏检。
+
+**真实工程**（`CollisionRealProbe`，皿半径 240、cell_radius 7、六方密堆 spacing 13、1024 细胞、关闭自主分裂、60 tick 均值）：
+
+| 指标 | 旧路径 | 新路径 | 变化 |
+| --- | --- | --- | --- |
+| `phys_collision` | 1795.1 µs | 109.5 µs | **-93.9%（16.4×）** |
+| `physics` 整段 | 1970.6 µs | 275.0 µs | -86.0% |
+| PerfProbe `total` | 6156.2 µs | 4377.8 µs | -28.9% |
+| 墙钟 / tick | 8800.6 µs | 6869.0 µs | **-21.9%** |
+| TPS | 113.6 | 145.6 | +28.2% |
+
+**1024 细胞整 tick 墙钟首次进入 8 ms 预算内（6.87 ms）。** 碰撞已不再是主项（109.5 µs，占 1.6%），下一主项是 metabolism 2541 µs（`metab_fields` 1069.8 + `metab_env` 1047.1）。
+
+**重叠量对照**（`CREAL_OVERLAP`，独立网格重算，contact = 2×7×scale）：软弹力 `max_pen 4.62 / mean_pen 0.679 / pairs 2581`，旧路径 `max_pen 8.44 / mean_pen 0.437 / pairs 2663`。软弹力**最坏重叠反而更小**（4.62 vs 8.44），平均重叠略高 0.24 单位（contact 14 的 1.7%），肉眼不可辨。细胞数与总能量两条路径完全一致（1024 / 1118.711），无飞散、无堆死。
+
+### 闸门
+
+- 双工程 SmokeTest `SCRIPTS=84 FAILURES=0`。
+- NativeParityProbe `OK (failures=0)`：native（C++ 软弹力）与纯 GDScript（软弹力回退）在 legacy 240 tick 与 m1_photo 700 tick 的 5 个检查点上逐位一致，证明 GDScript 回退与 C++ 内核同序。
+- WorkerEngineProbe `PROBE_VERDICT OK`，worker 与主线程 hash 一致 `114854044`（512 细胞 / 30 tick）—— **这是 v0.47 的新 hash 基线**；旧基线 `4234109495` 随碰撞手感变更作废。
+- BenchTest（`CELLARIUM_NATIVE=1`）`FAILURES=0`：300/1000/3000 生物 1121/3503/9477 µs。注意该基准皿半径 4000 属稀疏场景，碰撞对极少，**不代表真实皿密度下的碰撞成本**，真实口径以 CollisionRealProbe 为准。
+
+### 已知限制
+
+- 旧路径 `resolve_collisions` 仍留在 DLL 与 GDScript 中，仅作 A/B 与回滚，生产默认不走。
+- `COLLISION_SOFTNESS = 1.0` 表示每 tick 消除一半穿透。调小会更软但残余重叠更多，调大趋近硬分离；当前取值使最坏重叠优于旧路径。
+- 碰撞已非瓶颈，`≤8 ms/tick` 的剩余压力在 metabolism（2541 µs）与场采样（`metab_fields` 1069.8 µs），属阶段 2（热路径 AoS 化）范围。
+
+---
+
+## 未发布 — 阶段 B3：独立模拟线程生产接入（2026-11-27）
+
+**类型**：架构级高倍速路径（默认关闭，可回退）。未打 tag、未 push。
+
+> **2026-11-28 重要纠正**：B3 初版宣称的「512 细胞 32× 有效 32.09–32.24×」**已被证伪，属测量 bug**。`HighSpeedPerfBenchmark` 用 `_process(delta)` 累加墙钟，而 delta 被渲染 vsync / max_fps 钳制在 16.7ms（HSPD_FRAME avg=16.83ms），60 帧只累计 1.0s；外部 PowerShell Stopwatch 实测进程真实运行 32.2s（`HSPD_WCLOCK real_wall_s=26s`）。改用 OS 单调钟（`Time.get_ticks_usec()`）为墙钟后，同会话真实 A/B：**512 细胞 32× 档，旧路径 effective 0.36×（720 tick/33.2s），worker 路径 1.21×（1910 tick/26.3s，85.3 tick/s）**；1024 细胞旧 0.86× / worker 0.83×（worker 无提升）。worker 相对旧路径确有约 3.4× 提升，但**两条路径都远未达到 32×，B3「突破 12×」结论作废**。根因是单 tick 成本（PerfProbe 权威：512 单 tick 6.2ms、1024 单 tick 12.1ms），worker 单 worker 理论上限 161/82 tick/s，与实测 85/60 tick/s 自洽。已修正基准墙钟口径，后续倍速数据以 OS 单调钟为准。
+
+### 实现
+- 新增 `scripts/system/WorkerSimEngine.gd`，扩展 `SimSnapshot.gd`：主线程构造同状态隔离世界（CPU 场、native 主线程预热），worker 连续跑完整 tick，三缓冲快照 + 短临界区整块拷贝，主线程每帧写回渲染所需 CellArray；跳过神经权重/行为缓冲的大数组拷贝。
+- `TickCore.worker_target_mode`：主线程只发布 `target_tick`，`carry = target_tick - worker_progress_tick`；旧主线程路径与 12 tick 上限不变。`Main.threaded_simulation_enabled` 默认 false；`HighSpeedPerfBenchmark --worker=1` 接入 A/B。
+- `SaveManager.capture()` 深拷 `field._pending_sources`；`WorkerSimEngine.repair_field_after_restore()` 修复 restore 后 64×64 场残留 32×32 源缓冲的越界问题。
+- 新增 `tools/WorkerEngineProbe.gd/.tscn`：生产规模完整 tick 链、worker vs 主线程 hash 逐位 + 快照首细胞坐标校验。
+
+### 基线 / 闸门
+- worker 路径 hash 基线重建：512 细胞 / CPU 场 32 / native / 30 tick = `4234109495`，主线程顺序执行与 worker 一致；legacy GPU 场基线 `3284848376` 不变。
+- 双工程 SmokeTest `SCRIPTS=81 FAILURES=0`、NativeParityProbe `OK (failures=0)`、WorkerEngineProbe `PROBE_VERDICT OK`。
+- 真实窗口 A/B（2026-11-28 修正，OS 单调钟墙钟，512 细胞，32× 档，60 帧）：旧路径 effective 0.36×（720 tick / 33.2s）、worker 路径 1.21×（1910 tick / 26.3s，85.3 tick/s）。worker 约 3.4× 提升，但均未达 32×。<br>（已作废的旧口径：delta 累加墙钟报旧 11.98–12.04× / worker 32.09–32.24×，因 delta 被钳制失效。）
+
+### 已知限制
+- **阶段 B3 未达成突破 12× 的目标**：修正墙钟后 512 仅 1.21×、1024 仅 0.83×（worker 相对旧路径无提升）。瓶颈是 worker 单 tick 成本（PerfProbe：512 6.2ms / 1024 12.1ms，以 metabolism 3.4/6.4ms 与 physics 1.9/4.0ms 为主），单 worker 理论上限 161/82 tick/s。要支撑高倍速需阶段 C 多核分片或阶段 D GPU 主体化实质降低单 tick 成本。worker 模式保持默认关闭。
+
+---
+
+## 未发布 — 阶段 A：高倍速调度修复（2026-11-27）
+
+**类型**：高倍速调度 bug 修复 + render_fps 接线，不改 tick 内容、不改 state hash、不改冻结规格。**已过双工程 SmokeTest 72/0 + T11 + NativeParityProbe OK。**
+
+### 诊断
+- 新增 `tools/HighSpeedPerfBenchmark.gd/.tscn`：真实 Vulkan 窗口、真实 `main.tscn` tick 链、固定 512/1024 细胞，测 1×/8×/16×/32× 各 12 帧预热 + 60 帧采样，落盘 `user://high_speed_perf_bench.txt`。
+- 实测确认：16×/32× 有效倍速封顶 ~12× 是 §2.6 冻结规格（"每帧 12 tick 余量结转"）+ T11 硬断言的结果，不是 bug；帧 p95 < 33 ms、>50ms 帧为 0，渲染帧时不是瓶颈。
+- 真问题：`TickCore._process()` 的 carry 双重计数——`_accumulator` 留下整数余量的同时 `carry_ticks` 又累加 `overflow`，二次增长瞬间顶 4096。
+
+### 实现
+- `TickCore._process()`：`_accumulator` 只保留不足 1 tick 的小数余量，整数部分全部并入唯一 carry 欠账来源，下一帧优先消化；单帧上限仍严格 ≤12。
+- `Main._on_speed_changed_render()`：接 `speed_changed`，按 `get_render_fps()` 同步 `Engine.max_fps` 与 `ProjectSettings run/max_fps`（32× 锁 30 fps）；放在 Main 而非 TickCore，避免无头 SmokeTest 裸 TickCore 污染全局 Engine 状态。
+- 未做：自适应 budget（实测 tick 成本 ~7ms/帧、无收益）、放宽单帧上限 24（原型 32× 12.15×→12.69× 但违反 §2.6/T11，已回退）、`should_update_field()`（改 state hash，待用户拍板）。
+
+### A/B（1024 细胞，同会话）
+| 档位 | 有效倍速 | carry max 前 → 后 |
+| --- | ---: | ---: |
+| 8× | 8.03× | 19 → 4 |
+| 16× | 12.13× | 4096 → 294 |
+| 32× | 12.15× | 4096 → 1456 |
+
+### 闸门
+- 双工程 SmokeTest `SCRIPTS=72 FAILURES=0`、T11 通过。
+- NativeParityProbe `OK (failures=0)`，state hash 全 match，DLL 未动。
+- **未打 tag、未 push**；是否作为 v0.46.1 发布由用户决定。
+
+---
+
 ## 0.46.0 — 2026-11-27
 
 **类型**：signal 分泌源批量写入（纯 GDScript，DLL 未动）。**同会话 A/B：sig_add 795 → 516 / 535 µs（-33%，524 源）、signal 段 834 → 559 / 577 µs（-31%）；state hash 与场值 flat parity 逐位不变。**

@@ -4,6 +4,9 @@ extends RefCounted
 const DAMPING: float = 0.98
 const CONSTRAINT_ITERATIONS: int = 2
 const COLLISION_ITERATIONS: int = 6
+## v0.47.0：单轮软弹力碰撞每对推开的穿透比例。1.0 = 每 tick 消除一半穿透，
+## 剩余由后续 tick 松弛（Cell Lab 手感：轻微重叠、不硬吸附）。
+const COLLISION_SOFTNESS: float = 1.0
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
 ## v0.30.0：扁平哈希键偏移。坐标经 64 单位取整后远小于该范围，int64 不会溢出。
@@ -94,6 +97,89 @@ static func resolve_collisions(cells: RefCounted, cell_radius: float, radius_sca
 		resolved += round_resolved
 		if max_correction < 0.001:
 			break
+	cells.set("cell_pos_x", pos_x)
+	cells.set("cell_pos_y", pos_y)
+	return resolved
+
+## v0.47.0：Cell Lab 式单轮软弹力碰撞（原生 `CellSpatial.resolve_collisions_soft` 的回退实现）。
+## 与 resolve_collisions 的差别：单轮、不迭代、不物化 pairs、先比平方再开方、
+## 每对只推开穿透深度的一部分（softness），剩余穿透留到后续 tick 松弛。
+## 必须与 C++ 版本逐位同序，否则 NativeParityProbe 的 native/CPU 对照会漂移：
+##   - contact 用 cell_radius * (scale_a + scale_b)，不要拆成两次乘法；
+##   - cell_size <= 0 时按存活细胞最大半径倍率推导，公式与 C++ 完全一致；
+##   - 修正量顺序固定为 penetration * 0.5 * stiffness * softness。
+static func resolve_collisions_soft(cells: RefCounted, cell_radius: float, radius_scales: PackedFloat32Array = PackedFloat32Array(), stiffnesses: PackedFloat32Array = PackedFloat32Array(), cell_size: float = 0.0, softness: float = 1.0) -> int:
+	if cells == null or cell_radius <= 0.0:
+		return -1
+	var count: int = int(cells.call("size"))
+	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
+	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
+	var alive: PackedByteArray = cells.get("cell_alive")
+	var effective_cell_size: float = cell_size
+	if effective_cell_size <= 0.0:
+		var max_scale: float = 0.0
+		for i in range(count):
+			if alive[i] == 0 or i >= radius_scales.size():
+				continue
+			var s: float = float(radius_scales[i])
+			if s > max_scale:
+				max_scale = s
+		if max_scale <= 0.0:
+			max_scale = 1.0
+		effective_cell_size = 2.0 * cell_radius * max_scale
+		if effective_cell_size < 1.0:
+			effective_cell_size = 1.0
+	var soft: float = clampf(softness, 0.0, 1.0)
+	# 固定网格（与 C++ GridBuckets 的桶内插入序一致：cell_index 升序）。
+	var buckets: Dictionary = {}
+	for i in range(count):
+		if alive[i] == 0:
+			continue
+		var key: int = _flat_key(floori(pos_x[i] / effective_cell_size), floori(pos_y[i] / effective_cell_size))
+		if not buckets.has(key):
+			buckets[key] = PackedInt32Array()
+		var bucket: PackedInt32Array = buckets[key]
+		bucket.append(i)
+		buckets[key] = bucket
+	var resolved: int = 0
+	for a in range(count):
+		if alive[a] == 0:
+			continue
+		var cell_x: int = floori(pos_x[a] / effective_cell_size)
+		var cell_y: int = floori(pos_y[a] / effective_cell_size)
+		var scale_a: float = float(radius_scales[a]) if a < radius_scales.size() else 1.0
+		for offset_y in range(-1, 2):
+			for offset_x in range(-1, 2):
+				var key: int = _flat_key(cell_x + offset_x, cell_y + offset_y)
+				if not buckets.has(key):
+					continue
+				var bucket: PackedInt32Array = buckets[key]
+				for b in bucket:
+					if b <= a:
+						continue
+					var dx: float = pos_x[b] - pos_x[a]
+					var dy: float = pos_y[b] - pos_y[a]
+					var scale_b: float = float(radius_scales[b]) if b < radius_scales.size() else 1.0
+					var contact: float = cell_radius * (scale_a + scale_b)
+					var distance_squared: float = dx * dx + dy * dy
+					if distance_squared >= contact * contact:
+						continue
+					var distance: float = sqrt(distance_squared)
+					var normal_x: float = 1.0
+					var normal_y: float = 0.0
+					if distance > 0.000001:
+						normal_x = dx / distance
+						normal_y = dy / distance
+					var stiffness: float = 1.0
+					if a < stiffnesses.size() and b < stiffnesses.size():
+						stiffness = clampf((float(stiffnesses[a]) + float(stiffnesses[b])) * 0.5, 0.25, 2.0)
+					var penetration: float = contact - distance
+					var correction: float = penetration * 0.5 * stiffness * soft
+					pos_x[a] -= normal_x * correction
+					pos_y[a] -= normal_y * correction
+					pos_x[b] += normal_x * correction
+					pos_y[b] += normal_y * correction
+					resolved += 1
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
 	return resolved

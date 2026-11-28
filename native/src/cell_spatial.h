@@ -45,6 +45,17 @@ public:
 			const PackedFloat32Array &stiffnesses, double cell_radius,
 			double cell_size, int iterations);
 
+	// v0.47.0: Cell Lab 式单轮软弹力碰撞。单次网格遍历、不迭代、不物化 pairs，
+	// 每对只推开穿透深度的一部分，剩余穿透由后续 tick 松弛。旧 resolve_collisions
+	// 保留用于 A/B 与回放兼容。
+	// cell_size <= 0 → 内核按「2 × cell_radius × 存活细胞最大半径倍率」自动推导，
+	// 保证 9 格邻域不漏对（推导公式与 GDScript 回退路径逐位同序）。
+	Dictionary resolve_collisions_soft(const PackedFloat32Array &pos_x,
+			const PackedFloat32Array &pos_y, const PackedByteArray &alive,
+			const PackedFloat32Array &radius_scales,
+			const PackedFloat32Array &stiffnesses, double cell_radius,
+			double cell_size, double softness);
+
 	// v0.34.0: exact port of CellPhysics.step() Verlet integration plus
 	// _solve_links() constraint iterations. Side-effect-free; returns new arrays.
 	Dictionary step_verlet_and_links(const PackedFloat32Array &pos_x,

@@ -46,6 +46,7 @@ Godot_v4.7.2-stable_win64_console.exe --headless --path <project> --script res:/
 
 - `HANDOFF.md`：会话交接（现状、路径、命令、铁律、已证伪清单）
 - `analysis/CellLab_细胞物理与外观_代码级分析.md` §48–§51：Cell Lab / Alien 防卡源码级结论 + v0.44–v0.46 性能专项
+- `analysis/高倍速真实窗口实测与架构判断.md`：1× / 8× / 16× / 32× 真实窗口实测（16× / 32× 封顶约 12×）、阶段 A carry 双重计数修复（未发布）与后续架构路线
 - `CHANGELOG.md`：逐版本 A/B 数据与闸门记录
 - `.workbuddy-ai/memory/MEMORY.md`：踩坑结论（接手必读）
 

@@ -195,6 +195,10 @@ func step() -> void:
 func _cells() -> RefCounted:
 	return _mgr.get("cells") as RefCounted
 
+## 阶段 B：只读访问隔离的 OrganismManager，供 SimWorker 在 worker 线程消费命令。
+func _manager() -> Node:
+	return _mgr
+
 func _live_indices(cells: RefCounted) -> Array[int]:
 	var result: Array[int] = []
 	var alive: PackedByteArray = cells.get("cell_alive")

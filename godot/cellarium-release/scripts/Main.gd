@@ -3,6 +3,7 @@ extends Node2D
 ## 依赖路径与培养基参数在 .tscn 中声明；脚本不硬编码节点名。
 
 const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd")
+const WorkerSimEngineScript: RefCounted = preload("res://scripts/system/WorkerSimEngine.gd")
 
 @export var tick_core_path: NodePath = ^"Simulation/TickCore"
 @export var command_bus_path: NodePath = ^"Simulation/CommandBus"
@@ -17,6 +18,10 @@ const FrameProfiler: RefCounted = preload("res://scripts/system/FrameProfiler.gd
 @export var agent_bridge_enabled: bool = false
 @export var agent_permission: String = "readonly"
 @export var agent_token: String = ""
+## 阶段 B3：默认关闭。打开后权威模拟进入独立 worker，主线程只做快照写回与渲染。
+@export var threaded_simulation_enabled: bool = false
+## worker 模式下 GPU 场只服务视觉层；性能 A/B 可关闭以隔离 worker 成本。
+@export var worker_visual_field_enabled: bool = true
 
 var tick_core: Node = null
 var command_bus: Node = null
@@ -28,6 +33,7 @@ var dish_view: Node2D = null
 var analysis_panel: Node = null
 var executed_commands: int = 0
 var agent_bridge: RefCounted = null
+var worker_engine: RefCounted = null
 var dev_mode: bool = false
 var _carry_notified: bool = false
 ## 光学镊子/地形笔刷等拖拽型工具的连续输入状态：按住左键时逐 motion 事件入队。
@@ -52,6 +58,9 @@ func _ready() -> void:
 	var on_carry: Callable = Callable(self, "_on_carry_changed")
 	if tick_core != null and tick_core.has_signal("carry_changed") and not tick_core.is_connected("carry_changed", on_carry):
 		tick_core.connect("carry_changed", on_carry)
+	var on_render_fps: Callable = Callable(self, "_on_speed_changed_render")
+	if tick_core != null and tick_core.has_signal("speed_changed") and not tick_core.is_connected("speed_changed", on_render_fps):
+		tick_core.connect("speed_changed", on_render_fps)
 	if organism_manager != null:
 		organism_manager.set("environment_manager", environment_manager)
 		organism_manager.set("tick_core", tick_core)
@@ -71,6 +80,8 @@ func _ready() -> void:
 		var org_id: int = int(organism_manager.call("register_zygote", 0, 0, -1, genome, Vector2(250, 250), 0.8, 0))
 		if org_id >= 0 and status_label != null:
 			status_label.text = "cellarium | tick 0 | demo multicellular organism"
+	if threaded_simulation_enabled:
+		start_threaded_simulation()
 	print("[cellarium] boot ok basal_autonomy=", get_basal_autonomy())
 
 func _setup_agent_bridge() -> void:
@@ -89,6 +100,98 @@ func _generate_token() -> String:
 
 func get_agent_bridge() -> RefCounted:
 	return agent_bridge
+
+## 阶段 B3：把权威模拟切入独立 worker。主线程保留原节点作为渲染镜像。
+func start_threaded_simulation() -> bool:
+	if worker_engine != null and bool(worker_engine.call("is_running")):
+		return true
+	var engine: RefCounted = WorkerSimEngineScript.new() as RefCounted
+	if not bool(engine.call("configure", organism_manager, environment_manager, tick_core)):
+		push_warning("[cellarium] worker engine configure failed: %s" % str(engine.get("diag_last_error")))
+		return false
+	worker_engine = engine
+	if tick_core != null:
+		tick_core.call("set_worker_target_mode", true)
+		tick_core.call("set_worker_progress", int(engine.call("get_worker_tick")))
+	engine.call("set_speed", float(tick_core.get("speed_scale")))
+	engine.call("set_target", int(tick_core.call("get_target_tick")))
+	if not bool(engine.call("start")):
+		push_warning("[cellarium] worker engine start failed: %s" % str(engine.get("diag_last_error")))
+		if tick_core != null:
+			tick_core.call("set_worker_target_mode", false)
+		worker_engine = null
+		return false
+	print("[cellarium] threaded simulation ON")
+	return true
+
+
+func stop_threaded_simulation() -> void:
+	if worker_engine == null:
+		return
+	worker_engine.call("dispose")
+	worker_engine = null
+	if tick_core != null:
+		tick_core.call("set_worker_target_mode", false)
+	print("[cellarium] threaded simulation OFF")
+
+
+func get_worker_tick() -> int:
+	if worker_engine == null:
+		return int(tick_core.get("tick_index")) if tick_core != null else 0
+	return int(worker_engine.call("get_worker_tick"))
+
+
+## 阶段 C 只读诊断：worker 世界 PerfProbe 的权威分段。
+func get_worker_stages() -> Dictionary:
+	if worker_engine == null:
+		return {}
+	return worker_engine.call("get_worker_stage_averages") as Dictionary
+
+
+func get_worker_stage_samples() -> int:
+	if worker_engine == null:
+		return 0
+	var probe_stages: Dictionary = get_worker_stages()
+	return int(probe_stages.get("__samples", 0))
+
+
+## 阶段 C 只读诊断：worker 线程累计的分段耗时与快照写入次数。
+func get_worker_diag() -> Dictionary:
+	if worker_engine == null:
+		return {}
+	return {
+		"org_us": int(worker_engine.get("diag_org_us")),
+		"dev_us": int(worker_engine.get("diag_dev_us")),
+		"nutrient_us": int(worker_engine.get("diag_nutrient_us")),
+		"food_us": int(worker_engine.get("diag_food_us")),
+		"field_us": int(worker_engine.get("diag_field_us")),
+		"snapshot_us": int(worker_engine.get("diag_snapshot_us")),
+		"worker_ticks": int(worker_engine.get("diag_worker_ticks")),
+		"snapshot_writes": int(worker_engine.get("diag_snapshot_writes")),
+		"neural_interval": int(worker_engine.get("diag_neural_interval")),
+		"field_interval": int(worker_engine.get("diag_field_interval")),
+	}
+
+
+func is_threaded_simulation_running() -> bool:
+	return worker_engine != null and bool(worker_engine.call("is_running"))
+
+
+func _exit_tree() -> void:
+	stop_threaded_simulation()
+
+
+func _process(_delta: float) -> void:
+	if worker_engine == null or not bool(worker_engine.call("is_running")):
+		return
+	worker_engine.call("sync_main_state")
+	# GPU 场降级为视觉层：按帧推进一次，不再参与权威 state hash / 回放。
+	if environment_manager != null and worker_visual_field_enabled:
+		environment_manager.call("apply_nutrient_sources", get_worker_tick())
+		environment_manager.call("advance_food_entities", _delta)
+		environment_manager.call("advance_field_tick")
+	if tick_core != null:
+		tick_core.call("set_worker_progress", get_worker_tick())
 
 ## 开发者模式开关（F9）：解锁 dev.* 命令入口，仅在当前进程生效。
 func toggle_dev_mode() -> bool:
@@ -111,6 +214,12 @@ func _on_tick_advanced(tick_index: int) -> void:
 	FrameProfiler.tick_begin()
 	if command_bus != null:
 		executed_commands += int(command_bus.call("execute_tick_commands", tick_index))
+	if worker_engine != null and bool(worker_engine.call("is_running")):
+		# worker 模式：signal 携带的是目标 tick，主线程不跑模拟链。
+		worker_engine.call("set_target", tick_index)
+		worker_engine.call("sync_main_state")
+		FrameProfiler.tick_end()
+		return
 	if organism_manager != null:
 		organism_manager.call("advance_physics_tick", 1.0 / 60.0)
 		organism_manager.call("advance_development_tick")
@@ -123,6 +232,20 @@ func _on_tick_advanced(tick_index: int) -> void:
 	if status_label != null and tick_index % 60 == 0:
 		status_label.text = "tick %d | organisms %d | basal %.3f" % [tick_index, int(organism_manager.call("get_organism_count")) if organism_manager != null else 0, get_basal_autonomy()]
 
+func _on_speed_changed_render(_speed: float, _lod: int) -> void:
+	## §8.1：倍速 ≥16× 渲染锁 30 fps。render_fps=0 恢复不锁帧。
+	## 放在 Main 而非 TickCore，避免无头 SmokeTest 创建裸 TickCore 时污染全局 Engine 状态。
+	if tick_core == null:
+		return
+	var render_fps: int = int(tick_core.call("get_render_fps"))
+	Engine.max_fps = render_fps
+	# 同步 ProjectSettings，部分平台（Windows Vulkan）运行时改 Engine 属性不足，
+	# 需一并改项目设置才能在主循环下一帧生效；0 表示恢复不锁帧。
+	ProjectSettings.set_setting("run/max_fps", render_fps)
+	if worker_engine != null:
+		worker_engine.call("set_speed", float(tick_core.get("speed_scale")))
+
+
 func _on_carry_changed(carry_ticks: int, lagging: bool) -> void:
 	## 模拟时间落后提示（§2.6 / T11）：只在状态切换时刷新，避免每帧刷屏。
 	if lagging and not _carry_notified:
@@ -133,6 +256,14 @@ func _on_carry_changed(carry_ticks: int, lagging: bool) -> void:
 
 func _on_command_executed(command: Dictionary, tick_index: int) -> void:
 	var result: int = -1
+	if worker_engine != null and bool(worker_engine.call("is_running")):
+		# 唯一写入口不变：CommandBus 仍是入口，只是写目标从主场景镜像换成 worker 权威世界。
+		worker_engine.call("submit_command", command)
+		result = 0
+		if game_hud != null and game_hud.has_method("apply_result"):
+			game_hud.call("apply_result", str(command.get("type", "?")), result)
+		print("[cellarium] cmd ", command.get("type", "?"), " queued to worker @tick ", tick_index)
+		return
 	if organism_manager != null:
 		result = int(organism_manager.call("apply_command", command))
 		if command.get("type", "") == "DIVIDE" and result < 0:

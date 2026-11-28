@@ -68,6 +68,10 @@ var _sim_tick: int = 0
 ## native 与 GDScript 的 state hash 逐位一致由 v0.31–v0.36 parity 探针保证。
 ## 置 false 可强制纯 GDScript 路径，用于 A/B 与逐位对照。
 @export var native_spatial_enabled: bool = true
+## v0.47.0 碰撞内核开关：true = Cell Lab 式单轮软弹力（默认），false = 旧的 6 轮迭代。
+## 保留旧路径用于同会话 A/B 与回滚；两条路径手感不同（软弹力 vs 硬分离），
+## 且 cell_size 由 64 改为按最大半径自动推导，所以切换会改变 state hash。
+@export var soft_collision_enabled: bool = true
 var _native_spatial: RefCounted = null
 var _native_spatial_checked: bool = false
 var _native_neural: RefCounted = null
@@ -425,9 +429,11 @@ func advance_physics_tick(dt: float) -> void:
 	# v0.45 诊断：把 physics 段拆到 FFI 边界两侧，区分 GDScript 准备/写回与 C++ 内核。
 	perf_probe.call("begin", "phys_args")
 	var native_spatial: RefCounted = _get_native_spatial()
+	# v0.47.0：物理常量提到外层作用域，碰撞与 Verlet 两段共用（原先只声明在 Verlet 的
+	# if 块里，碰撞段拿不到 COLLISION_SOFTNESS）。
+	var physics_constants: Dictionary = CELL_PHYSICS_SCRIPT.get_script_constant_map()
 	perf_probe.call("end", "phys_args")
 	if native_spatial != null and dt > 0.0:
-		var physics_constants: Dictionary = CELL_PHYSICS_SCRIPT.get_script_constant_map()
 		perf_probe.call("begin", "phys_verlet")
 		var stepped: Dictionary = native_spatial.call("step_verlet_and_links",
 			cells.get("cell_pos_x"), cells.get("cell_pos_y"),
@@ -447,17 +453,38 @@ func advance_physics_tick(dt: float) -> void:
 		CELL_PHYSICS_SCRIPT.call("step", cells, dt)
 		perf_probe.call("end", "phys_verlet_fallback")
 	if native_spatial != null:
-		# v0.31.0：C++ 碰撞求解，逐位等价已由 spatial_parity_probe 验证（SPATIAL_HASH_CELL_SIZE=64）。
+		# v0.47.0：Cell Lab 式单轮软弹力碰撞。旧 resolve_collisions 是 6 轮迭代 +
+		# 每 3 轮全量重建网格 + 物化 pairs，且网格尺寸写死 64（典型细胞直径仅 14）。
+		# 新路径单轮遍历、不物化 pairs、cell_size 由内核按实际最大半径推导。
+		# 实测（CollisionSoftProbe，六方密堆等密度）：1024 细胞 1732→72µs、
+		# 3000 细胞 9368→229µs。手感为软弹力，穿透残余与旧路径 6 轮后同量级。
 		perf_probe.call("begin", "phys_collision")
-		var coll: Dictionary = native_spatial.call("resolve_collisions",
-			cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"),
-			cells.get("cell_radius_scale"), cells.get("cell_stiffness"),
-			cell_radius, 64.0, 6)
-		perf_probe.call("end", "phys_collision")
-		perf_probe.call("begin", "phys_collision_write")
-		cells.set("cell_pos_x", coll["pos_x"])
-		cells.set("cell_pos_y", coll["pos_y"])
-		perf_probe.call("end", "phys_collision_write")
+		if soft_collision_enabled and native_spatial.has_method("resolve_collisions_soft"):
+			var coll: Dictionary = native_spatial.call("resolve_collisions_soft",
+				cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"),
+				cells.get("cell_radius_scale"), cells.get("cell_stiffness"),
+				cell_radius, 0.0, float(physics_constants.get("COLLISION_SOFTNESS", 1.0)))
+			perf_probe.call("end", "phys_collision")
+			perf_probe.call("begin", "phys_collision_write")
+			cells.set("cell_pos_x", coll["pos_x"])
+			cells.set("cell_pos_y", coll["pos_y"])
+			perf_probe.call("end", "phys_collision_write")
+		else:
+			var legacy: Dictionary = native_spatial.call("resolve_collisions",
+				cells.get("cell_pos_x"), cells.get("cell_pos_y"), cells.get("cell_alive"),
+				cells.get("cell_radius_scale"), cells.get("cell_stiffness"),
+				cell_radius, 64.0, int(physics_constants.get("COLLISION_ITERATIONS", 6)))
+			perf_probe.call("end", "phys_collision")
+			perf_probe.call("begin", "phys_collision_write")
+			cells.set("cell_pos_x", legacy["pos_x"])
+			cells.set("cell_pos_y", legacy["pos_y"])
+			perf_probe.call("end", "phys_collision_write")
+	elif soft_collision_enabled:
+		perf_probe.call("begin", "phys_collision_fallback")
+		CELL_PHYSICS_SCRIPT.call("resolve_collisions_soft", cells, cell_radius,
+			cells.get("cell_radius_scale"), cells.get("cell_stiffness"), 0.0,
+			float(physics_constants.get("COLLISION_SOFTNESS", 1.0)))
+		perf_probe.call("end", "phys_collision_fallback")
 	else:
 		perf_probe.call("begin", "phys_collision_fallback")
 		CELL_PHYSICS_SCRIPT.call("resolve_collisions", cells, cell_radius, cells.get("cell_radius_scale"), cells.get("cell_stiffness"))

@@ -1,13 +1,13 @@
 # 创生模拟器 · 会话交接文档
 
 > 面向**完全没有上下文的新对话**。读完本文件即可接手，不必翻历史聊天记录。
-> 本文件更新于 2026-11-27，对应工程 HEAD `f42eaa5` / 最新版本标签 `v0.46.0`，工作区干净。
+> 本文件更新于 2026-11-28，最新版本标签 `v0.46.0`；工作区有**阶段 A 高倍速调度修复**、**阶段 B3 独立模拟线程（默认关闭）**、**v0.47.0 阶段 1 碰撞内核重构（未发布）**，见 §4.1–§4.3。
 
 ---
 
 ## 0. 一句话现状
 
-我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐；**性能专项已于 v0.45 达成核心目标**——1025 细胞真实窗口裸 tick 同会话两轮 7.48 / 7.29 ms，稳定低于 ≤8 ms/tick（v0.46 又将 signal 段降 31%）。全程 state hash 与场值 flat parity 逐位不变。性能专项已到收益递减拐点，下一步建议转向高倍速真实体感或玩法完成度收尾（见 §5）。
+我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 阶段 1 把碰撞内核重构成 Cell Lab 式单轮软弹力，真实皿 1024 细胞整 tick 墙钟 8801→6869 µs（TPS 113.6→145.6），首次进入 ≤8 ms 预算**；碰撞段本身 1795→109.5 µs（16.4×），已从最大单项降到 1.6%。state hash 基线随之重建为 `114854044`。下一步压力在 metabolism（2541 µs，其中 `metab_fields` 1069.8）与 `metab_env`（1047.1），属阶段 2（热路径 AoS 化）。
 
 ---
 
@@ -96,21 +96,67 @@ v0.45 同会话两轮裸 tick **7.48 / 7.29 ms**（余量 0.5–0.7 ms），v0.4
 
 **注意物理限制**：机器长时间满载会过热蓝屏（`clock_watchdog_timeout`）。性能基准单次 ≤60 秒，禁止长跑满载扫描；并发编译 `-j 4`。
 
+### 4.1 阶段 A：高倍速调度修复（已实施，未发布）
+
+新增 `tools/HighSpeedPerfBenchmark.gd/.tscn`（真实 Vulkan 窗口、真实 main.tscn tick 链、固定细胞数、1×/8×/16×/32× 实测）。实测确认 16×/32× 有效倍速封顶 12× 是 §2.6 冻结规格（"每帧 12 tick 余量结转"）+ T11 硬断言的结果，**不是 bug**；真正的问题是 carry 双重计数。
+
+改动（不改 tick 内容、不改 hash、不改冻结规格）：
+- `TickCore._process()`：修复 carry 双重计数（`_accumulator` 只留小数余量，整数并入唯一 carry 欠账来源，下一帧优先消化）。1024 细胞 carry max 16× 4096→294、32× 4096→1456。
+- `Main._on_speed_changed_render()`：接 `speed_changed` → 按 `get_render_fps()` 设 `Engine.max_fps` + `ProjectSettings run/max_fps`，32× 锁 30 fps。
+- 未做：自适应 budget（无收益）、放宽单帧上限 24（违反 §2.6/T11）、`should_update_field()`（改 hash，需用户拍板）。
+
+闸门：SmokeTest `SCRIPTS=72 FAILURES=0` + T11、NativeParityProbe `OK (failures=0)`、state hash 全 match。详见 `analysis/高倍速真实窗口实测与架构判断.md` §5。
+
+### 4.2 阶段 B3：独立模拟线程生产接入（已实施，未发布，默认关闭）
+
+- 权威模拟进入 worker：`scripts/system/WorkerSimEngine.gd` + `SimSnapshot.gd` 扩展；主线程通过 `Main.start_threaded_simulation()` 建立隔离 CPU 场世界、native 主线程预热、worker 连续跑完整 tick，每帧把渲染所需 SoA 写回主场景 `CellArray`，现有渲染器零改动。
+- 调度：`TickCore.worker_target_mode` 发布 `target_tick`，不再走主线程每帧 12 tick；旧同步路径与 12 tick 上限保留。`Main.threaded_simulation_enabled` 默认 false；`HighSpeedPerfBenchmark --worker=1` 可启用 A/B。
+- 修复：`SaveManager.capture()` 深拷 `field._pending_sources`，否则 64×64 场 restore 后残留 32×32 源缓冲导致信号写入越界；`WorkerSimEngine.repair_field_after_restore()` 兜底重建场缓冲。
+- hash 基线：worker 路径采用 CPU 权威场，黄金值重建；`tools/WorkerEngineProbe.tscn` 512 细胞 / 32 场 / native / 30 tick，主线程顺序执行与 worker 同为 `4234109495`，快照首细胞坐标一致。旧主线程 GPU 场基线 `3284848376` 继续用于 legacy 路径。
+- **⚠️ 2026-11-28 重大纠正**：B3 初版宣称的「512 worker 32× 有效 32.09–32.24× / 连续 5 秒 32.02×」**全部作废**。根因是 `HighSpeedPerfBenchmark` 用 `_process(delta)` 累加墙钟，delta 被 vsync/max_fps 钳在 16.7ms，60 帧只累计 1.0s，而外部 Stopwatch 实测进程真实运行 32.2s。基准已改用 OS 单调钟为墙钟。
+- 修正墙钟后同会话真实 A/B（32× 档，60 帧）：**512** 旧 0.36×（720 tick/33.2s）→ worker **1.21×**（1910 tick/26.3s，85.3 tick/s）；**1024** 旧 0.86× → worker 0.83×（无提升）。worker 相对旧路径在 512 约 3.4× 提升，但两条路径都远未达 32×。**阶段 B3「突破 12×」目标未达成。**
+- 权威单 tick 成本（worker 世界 PerfProbe）：512 total 6.24ms（metabolism 3.45、physics 1.86、metab_fields 1.33、collision 1.62），1024 total 12.10ms（metabolism 6.38、physics 3.98）。各段近线性 2×，无单一病理热点；单 worker 理论上限 161/82 tick/s 与实测 85/60 自洽。
+- **未达标项**：worker 单 tick 成本是高倍速的真正瓶颈，需阶段 C（多核分片）或阶段 D（GPU 主体化）实质降低。worker 模式保持默认关闭，**不得对外宣称已达 32×**。
+
+闸门：双工程 SmokeTest `SCRIPTS=81 FAILURES=0`、NativeParityProbe `OK (failures=0)`、WorkerEngineProbe `PROBE_VERDICT OK`。详见 `analysis/阶段B_独立模拟线程方案.md` §10。
+
+### 4.3 v0.47.0 阶段 1：碰撞内核重构（已实施，未发布）
+
+按 `analysis/架构诊断与重构路线.md` 的阶段 1 落地。诊断结论是碰撞**超线性爆炸**（1024 细胞 3.5 µs/细胞 → 3000 细胞 36 µs/细胞），根因不是"迭代次数太多"而是**网格尺寸与细胞直径严重不匹配**。
+
+- 新增 `CellSpatial.resolve_collisions_soft()`：单轮固定网格遍历、不迭代、不物化 pairs、先比平方再开方、每对只推开 `穿透 × 0.5 × stiffness × softness`。旧 `resolve_collisions` 保留做 A/B 与回滚。
+- **`cell_size` 从写死 64.0 改为按 `2 × cell_radius × 存活细胞最大半径倍率` 自动推导**。旧值 64 而典型细胞直径 14，每桶约 20 个细胞、9 桶扫 180 个候选只有约 6 个真邻居 —— 单项就浪费 2.5×。这是本次收益的最大来源。
+- `CellPhysics.resolve_collisions_soft()` GDScript 回退与 C++ 逐位同序（`NativeParityProbe` 已验证）。
+- `OrganismManager.soft_collision_enabled`（默认 true）= 回滚 / 同会话 A/B 开关。
+
+实测（同会话，OS 单调钟）：
+
+| 指标 | 旧 | 新 | 变化 |
+| --- | ---: | ---: | --- |
+| `phys_collision`（真实皿 1024 细胞） | 1795.1 µs | 109.5 µs | 16.4× |
+| 整 tick 墙钟 | 8800.6 µs | 6869.0 µs | -21.9% |
+| TPS | 113.6 | 145.6 | +28.2% |
+| 等密度微基准 1024 / 3000 / 5000 | — | — | 24.2× / 40.9× / 56.5× |
+
+手感：最坏重叠 4.62 单位（旧 8.44）、平均重叠 0.679 vs 0.437（contact 14 的 1.7%），细胞数与总能量两条路径一致。
+
+闸门：双工程 SmokeTest `SCRIPTS=84 FAILURES=0`、NativeParityProbe `OK (failures=0)`、WorkerEngineProbe `PROBE_VERDICT OK`（**新 hash 基线 `114854044`**，旧 `4234109495` 作废）、BenchTest `FAILURES=0`。探针：`tools/CollisionSoftProbe.gd`（合成等密度 + cell_size 扫描）、`tools/CollisionRealProbe.gd`（真实皿完整 tick 链）。
+
 ---
 
-## 5. 下一步计划（性能专项已收尾，以下为可选方向）
+## 5. 下一步计划（v0.47 之后）
 
-性能核心 KPI 已达成，无明确的必做性能项。若继续开发，建议方向（由用户定优先级）：
+碰撞已不再是瓶颈（109.5 µs / 1.6%）。按 `analysis/架构诊断与重构路线.md` 的排序继续：
 
-1. **高倍速真实体感**（若用户关心倍速流畅度）：tick3 高倍速路径 p50 约 30 ms（3 tick 串行），尚未专项优化。先**只读确认它是否真是体感瓶颈**，再决定是否动 LOD 神经降频 / 单帧 tick 上限（当前 12）；**不要碰已通过的裸 tick 口径**。
+1. **阶段 2：热路径 AoS 化**（当前最高 ROI）。真实皿 1024 细胞剩余大头：`metabolism` 2541 µs（`metab_fields` 1069.8 + `metab_env` 1047.1 + `metab_base` 234.3）、`behavior` 990 µs（`beh_collect` 416.9 + `beh_eval` 312.3）、`signal` 457.6。`metab_fields` 与 `metab_env` 都是逐细胞 SoA + 动态字典访问，是 AoS 化的直接目标。**注意 `beh_apply` 的 `Vector2.rotated` 已两次验证不可下沉 C++（1 ULP 差异）**。
+2. **阶段 3：调度层降频 + 工作量硬上限**（低成本）：神经/行为按固定间隔更新（现有 `should_update_neural` 只在 ≥8× 生效）；每细胞接触数硬上限。
+3. **阶段 4：GPU 主体化**（长期）：collision 的 Gauss-Seidel 依赖已被阶段 1 消除，GPU 化前提已具备；behavior（8→4→6 网络）+ `collect_inputs_grid`（整数邻域计数可保位）可搬 compute。
+4. **高倍速真实体感**：worker 单 tick 成本降下来后（v0.47 后 512 细胞约 2.75 ms），B3 的 32× 才有实际可能；先用 OS 单调钟口径重测，不要用 delta。
+5. **玩法完成度收尾**：与 v1.1 合并稿逐条对照，列出剩余缺口。
 
-2. **玩法完成度收尾**：第一阶段复刻此前只是"基本完成"。做一次系统性的玩法对齐验收，与 v1.1 合并稿逐条对照，列出剩余缺口。
+**任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + 原型 spatial parity + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
 
-3. **若仍要扩性能余量**：只在有明确新热点证据时动手，**必走先测后改**（分段计时 → 同会话 A/B）。已证伪方向见 §7，别重复。
-
-4. **任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + 原型 spatial parity + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
-
-5. **不要重做已完成的事**：GPU 合批、consume、账本、场采样、碰撞/behavior 裸指针、signal 批量都已做；原生默认已开启。别再回头猜这些。
+**不要重做已完成的事**：GPU 合批、consume、账本、场采样、碰撞内核、behavior 裸指针、signal 批量都已做；原生默认已开启。别再回头猜这些。
 
 ---
 
@@ -150,6 +196,7 @@ git -C $ws -c credential.helper= push "https://Oatol:$tok@github.com/Oatol/cella
 
 ### 测量口径（关键，避免误判）
 - 真实窗口基准：`tools/WindowPerfBenchmark.tscn/.gd`，固定 1025 细胞冻结，手动 5 相位各 120 帧，读数**在场景内落盘**到 `user://window_perf_bench.txt`，不经 debugger/game_eval。
+- 高倍速体感基准：`tools/HighSpeedPerfBenchmark.tscn/.gd`，真实 `main.tscn` tick 链，固定 512 / 1024 细胞，测 1× / 8× / 16× / 32×，落盘 `user://high_speed_perf_bench.txt`。实测 16× / 32× 均封顶约 12×，carry 到 4096，帧时未爆；结论见 `analysis/高倍速真实窗口实测与架构判断.md`。
 - 实时诊断场景：`tools/WindowPerfScenario.tscn`（铺 1324 细胞冻结做 A/B）。
 - `FrameProfiler` 自写分段在 GUI/调试器下与 TPS 不自洽，**只保留采样不上屏**。
 - 真实窗口跑完会后台冻结，`game_eval` 报 `EVAL_GAME_NOT_READY` —— 这是正常的，分段读数必须落盘后再读文件。
@@ -181,5 +228,7 @@ git -C $ws -c credential.helper= push "https://Oatol:$tok@github.com/Oatol/cella
 - ❌ "碰撞远邻可全过滤" —— 会破坏连锁分离。
 - ❌ "behavior 的 `Vector2.rotated` 可下沉 C++" —— v0.35 判断，v0.46 第 6 专项原型 20000 组复验：godot-cpp `Math::sin/cos(float)` = `std::sin/cos(float)`，但与 GDScript rotated 有 53 处 1 ULP 差异，位移必须留 GDScript。
 - ❌ "metab_env 1.4–2.3 ms 波动是隐藏热点" —— v0.46 第 6 专项微探针（稳定态）证明是机器负载噪声：prep_typed 197 + group_flow 382 + ledger_batch 461 ≈ 1.04 ms，与低负载窗口吻合。
+- ❌ "碰撞贵是因为 6 轮迭代太多" —— v0.47 分解证明最大单项是**网格尺寸 64 vs 细胞直径 14**（约 2.5×），迭代+pairs 物化约 6×，两者相乘才有 16–56×。只减迭代只拿到 3–4×。
+- ⚠️ **写碰撞/密度探针的两个坑（v0.47 连踩三次）**：① 若 `r_eff` 从 `spacing` 反推，`pack` 系数会被抵消，永远刚好相切、零碰撞对；半径必须由**基准间距**决定。② 若铺点循环在点数不足时收缩间距重试，同样会把 `pack` 抵消掉。探针必须先打印 `pen_before`/`resolved` 确认真的产生了重叠，再相信耗时。
 - ⚠️ 拖拽卡顿真凶是每 tick 后 `_rebuild_cache()`（43.4 ms），已 C++ 降到 1.03 ms。
 - ⚠️ GDScript `PackedFloat32Array` 局部引用写回有效：`local = arr[0]` 后 `local[i] = v` 会写回原数组（v0.46 实测），批量缓冲直写可用。
