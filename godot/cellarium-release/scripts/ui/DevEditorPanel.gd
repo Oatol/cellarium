@@ -494,12 +494,18 @@ func _build_right_panel() -> Control:
 	for child_index in range(1, 3):
 		# Cell Lab Gene 没有独立「子代类型」：f778r/s 指向 Gene 槽，子代类型 = 目标槽的 o0。
 		box.add_child(_make_macro_mode_option("child%d_mode" % child_index, "子代 %d 模式" % child_index, "选择该子代进入哪个模式槽；类型取该模式的「细胞类型」"))
-		box.add_child(_make_macro_check("child%d_glue" % child_index, "子代 %d 保留黏附素" % child_index, "该子代保留/建立黏附连接"))
-		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index, "角度取相反方向（本项目版本化追加）"))
-		box.add_child(_make_macro_slider("child%d_angle" % child_index, "子代 %d 角度" % child_index, 0.0, 1.0, 0.01,
-			"seek_child%d_angle → Gene.f771k/f772l/z/A ÷ TAU" % child_index, 2))
+		box.add_child(_make_macro_check("child%d_glue" % child_index, "子代 %d 额外建连" % child_index,
+			"版本化追加开关，缺省关闭。黏附以「生成黏附素」（Gene.l）为准；勾选后即使未生成黏附素也为该子代建连"))
+		box.add_child(_make_macro_check("child%d_mirror" % child_index, "子代 %d 镜像角度" % child_index,
+			"子代 %d 的朝向与分裂轴取相反方向（Gene.q/r 语义）" % child_index))
 
 	box.add_child(_make_section_title("GENE · 当前模式分裂规则（无指令序列）"))
+	box.add_child(_make_macro_slider("child2_angle", "分裂角度（Gene.d）", 0.0, 1.0, 0.01,
+		"相对**母细胞当前朝向**的分裂轴偏转 ÷ TAU。0 = 沿母细胞朝向直分，链条会延续成一条长带；0.25 = 转 90°。", 2))
+	box.add_child(_make_macro_slider("split_angle", "母细胞分裂后朝向（Gene.e）", 0.0, 1.0, 0.01,
+		"母细胞分裂后朝向 = 分裂轴 + 该偏转 ÷ TAU。0 = 保持沿分裂轴。", 2))
+	box.add_child(_make_macro_slider("split_angle2", "子细胞分裂后朝向（Gene.f）", 0.0, 1.0, 0.01,
+		"子细胞分裂后朝向 = 分裂轴 + 该偏转 ÷ TAU。0 = 保持沿分裂轴。", 2))
 	box.add_child(_make_macro_slider("division_mass", "分裂质量（能量阈值）", 0.05, 100.0, 0.05,
 		"Gene.b：该模式细胞能量达到该值即分裂。", 2))
 	box.add_child(_make_macro_slider("split_ratio", "分裂质量比（母细胞保留）", 0.05, 0.95, 0.01,
@@ -516,10 +522,8 @@ func _build_right_panel() -> Control:
 		"seek_prio → Gene.f773m（运行时消费点未证实）；本项目调异养/光合摄能权重，0.5 等价旧版。", 2))
 	box.add_child(_make_macro_slider("transfer_rate", "连接传递率", 0.0, 1.0, 0.01,
 		"v0.17.0：按当前模式决定连接内能量流速度；0 关闭转移，默认 0.12。", 2))
-	box.add_child(_make_macro_slider("split_angle", "分裂角度 1", 0.0, 1.0, 0.01, "seek_splitangle → Gene.f770j ÷ TAU（仅草案）", 2))
-	box.add_child(_make_macro_slider("split_angle2", "分裂角度 2", 0.0, 1.0, 0.01, "seek_splitangle2 → Gene.B ÷ TAU（仅草案）", 2))
-	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i（仅草案）", 2))
-	box.add_child(_make_macro_slider("ratio2", "子代比例 2", 0.0, 1.0, 0.01, "seek_ratio2 → Gene.C（仅草案）", 2))
+	box.add_child(_make_macro_slider("ratio", "子代比例 1", 0.0, 1.0, 0.01, "seek_ratio → Gene.f769i（仅草案；运行时用上方「分裂质量比」）", 2))
+	box.add_child(_make_macro_slider("ratio2", "子代比例 2", 0.0, 1.0, 0.01, "seek_ratio2 → Gene.C（仅草案；运行时用上方「分裂质量比」）", 2))
 
 	box.add_child(_make_section_title("PHYSICAL / COLOR · v0.16.0 已落地"))
 	box.add_child(_make_macro_slider("stiffness", "细胞骨架强度", 0.0, 1.0, 0.01,

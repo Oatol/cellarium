@@ -222,9 +222,9 @@ func _collect_splits() -> void:
 		if now_tick >= 0 and now_tick != was_tick:
 			var mode_id: int = int(cells.call("get_mode", i))
 			var gene: Dictionary = _genes[clampi(mode_id, 0, _genes.size() - 1)]
-			var angle: float = TAU * clampf(float(gene.get("child2_angle", 0.25)), 0.0, 1.0)
-			if bool(gene.get("child2_mirror", false)):
-				angle = TAU * fposmod(-clampf(float(gene.get("child1_angle", 0.0)), 0.0, 1.0), 1.0)
+			# v0.50.0：Cell Lab d7 = cell.k + (镜像?-1:1)*Gene.d，分裂轴相对母细胞朝向。
+			var axis_sign: float = -1.0 if bool(gene.get("child1_mirror", false)) else 1.0
+			var angle: float = float(cells.call("get_orientation", i)) 				+ axis_sign * TAU * clampf(float(gene.get("child2_angle", 0.0)), 0.0, 1.0)
 			_pending_splits.append({
 				"pos": _local(Vector2(pos_x[i], pos_y[i])),
 				"angle": angle,
@@ -405,9 +405,9 @@ func snapshot_split_indicators() -> Array[Dictionary]:
 		var gene: Dictionary = get_gene(mode_id)
 		if gene.is_empty():
 			continue
-		var angle: float = TAU * clampf(float(gene.get("child2_angle", 0.25)), 0.0, 1.0)
-		if bool(gene.get("child2_mirror", false)):
-			angle = TAU * fposmod(-clampf(float(gene.get("child1_angle", 0.0)), 0.0, 1.0), 1.0)
+		# v0.50.0：Cell Lab d7 = cell.k + (镜像?-1:1)*Gene.d，分裂轴相对母细胞朝向。
+		var axis_sign: float = -1.0 if bool(gene.get("child1_mirror", false)) else 1.0
+		var angle: float = float(cells.call("get_orientation", i)) 			+ axis_sign * TAU * clampf(float(gene.get("child2_angle", 0.0)), 0.0, 1.0)
 		result.append({
 			"pos": _local(Vector2(pos_x[i], pos_y[i])),
 			"angle": angle,

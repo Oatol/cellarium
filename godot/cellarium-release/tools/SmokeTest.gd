@@ -94,6 +94,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/BehaviorStageProbe.gd",
 	"res://tools/BehaviorPhysicsBreakdownProbe.gd",
 	"res://tools/DivisionProbe.gd",
+	"res://tools/SplitBandProbe.gd",
 	"res://tools/GateProbe.gd",
 	"res://tools/GrowthProbe.gd",
 	"res://tools/HalfCircleProbe.gd",

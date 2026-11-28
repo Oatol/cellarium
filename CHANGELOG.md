@@ -4,6 +4,55 @@
 
 ---
 
+## v0.50.0 — 分裂语义对齐 Cell Lab + 预览分裂指示器 + 渲染档倒挂（2026-11-28）
+
+**类型**：玩法语义修正（分裂几何 / 黏附）+ 预览可视化 + 渲染 LOD 修正。**state hash 基线重建**。
+
+### 用户报的五个问题与根因
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | 未勾选「生成黏附素」，子代仍相连 | 多模式路径的 `glue` 取 `child1_glue \|\| child2_glue`，两者缺省都是 `true`，且**从不读 `make_glue`**（Gene.l） |
+| 2 | 子代角度与分裂角度两套控件 | `child1_angle` 只作镜像基准（近死字段）；`split_angle`/`split_angle2` 标着「仅草案」却真的在写母/子朝向 |
+| 3 | 发育预览与 Cell Lab 完全不同 | 只画了两个小圆点，没有编号、没有轴、看不出角度与质量比 |
+| 4 | 相同设置应长成一条长带，实际成一团 | 分裂轴用**绝对世界角** `TAU*child2_angle`，丢弃母细胞朝向；且 `child2_angle` 缺省 0.25=90°，链条每代转 90° |
+| 5 | 细胞少时反而卡，超过阈值反而顺 | 逐实例档每细胞 11 个 CanvasItem（512 细胞 = 5632 个），比批渲染档贵两个数量级 |
+
+### 修正
+
+- **分裂轴改为母细胞朝向相对**（`CellWorld.e(double)`：`d7 = cell.k + (镜像?-1:1)*Gene.d`）。`angle = 母细胞朝向 + axis_sign * TAU * Gene.d`。`Gene.d = 0` 时每个细胞沿自己的朝向分裂，母/子朝向由 `Gene.e/f` 保持，链条才会延续成一条长带。`PreviewWorld` 的两条派生路径同步修正。
+- **`child2_angle` 缺省 0.25 → 0**：Cell Lab `Gene()` 构造不写 `d/e/f`，Java float 缺省 0。
+- **零速度瞬移**：新增 `CellArray.set_position_instant()`。Verlet 用 `pos - prev` 当速度，`set_position` 会把分裂时母子各偏的 `0.1r` 当成速度注入（每 tick 凭空踢一脚）；Cell Lab 分裂位移的速度增量系数明确是 0.0（零力），故分裂重定位必须同时写 `prev`。
+- **黏附以 Gene.l 为准**：`glue = make_glue or child1_glue or child2_glue`，且 `child1_glue`/`child2_glue` 缺省改为 `false`（版本化追加的额外开关，缺省不再静默建连）。
+- **角度控件去重**：删掉「子代 1/2 角度」两个滑块（`child1_angle` 保留在 Genome 里做镜像基准，不再暴露）；把 `child2_angle`/`split_angle`/`split_angle2` 移进 GENE 段并正名为「分裂角度（Gene.d）」「母细胞分裂后朝向（Gene.e）」「子细胞分裂后朝向（Gene.f）」，去掉误导性的「仅草案」。
+- **预览分裂指示器复刻 `j4.I()`/`H()`**：标记半径 `max(0.006, q0*0.27)`、偏移 `q0+0.42*fMax`、两子位置 `center ± dir*dist`（`dist` 由质量比决定）、按子代槽 RGB 上色并带 1/2 编号；额外补一条**虚线分裂轴**与过中心的分裂面短线，让角度与质量比在画布上直接可读。
+- **渲染档倒挂**：`CellSceneRenderer.max_instances` 512 → 48；批渲染档 `CellPolygonBatchRenderer` 补一圈内膜环（走同一条三角批，不增加 draw call），使批渲染档与近景档外观一致。
+
+### 新增闸门
+
+`tools/SplitBandProbe.gd`（已登记 manifest，96 脚本）：四用例跑真实 tick 链，输出细胞数 / 连接数 / 沿轴与垂直跨度 / 伸长比。
+
+```
+SPLIT_BAND case=glue_on_d0      cells=32 links=29 span_x=55.8 span_y=39.9 elongation=1.40
+SPLIT_BAND case=glue_off_d0     cells=32 links=0  span_x=65.3 span_y=28.6 elongation=2.28
+SPLIT_BAND case=glue_on_d90     cells=32 links=29 span_x=43.3 span_y=42.5 elongation=1.02
+SPLIT_BAND case=chain_glue_on   cells=9  links=4  span_x=66.2 span_y=34.1 elongation=1.94
+```
+
+`glue_off_d0` 的 `links=0` 直接验证问题 1 已修；`glue_on_d0` 的伸长比从 1.02（`Gene.d=90°`）升到 1.40，方向正确。**注意该探针未关闭细胞自由游动**，游动会把垂直跨度撑大，所以伸长比是下界，不是长带形状的严格判据。
+
+### 闸门
+
+双工程 SmokeTest `SCRIPTS=96 FAILURES=0`；NativeParityProbe `NATIVE_E2E: OK (failures=0)`（legacy 240 tick + m1_photo 700 tick 全部 match）；WorkerEngineProbe `PROBE_SEQ hash=665147009` / `PROBE_WORKER hash=665147009` / `match=true`。
+
+**state hash 基线 `114854044` → `665147009`**（分裂轴与黏附语义变更必然改变连接拓扑，旧基线作废）。DLL 未改，SHA-256 仍 `C58878CECF49F76C7B66181ACE0738D1DE43C0B874EF18B8FCDEF9AB6ED54FD5`。
+
+### 仍然待确认
+
+- 长带形状还需真实窗口目视复核：自增殖单模式（`child1_mode = child2_mode = 自己`）在 Cell Lab 里也是二叉**树**，几何上会铺成二维团；线性长带需要**链式**分化（一个子代继续、另一个进终末模式），这与 `Gene.i/j` 的用法一致。用户若仍看到团，先核对基因组拓扑。
+
+---
+
 ## v0.49.0 — metab_env 三项下沉：世代缓存 + C++ 单遍副作用 + 账本单遍（2026-11-28）
 
 **类型**：热路径重构（metabolism 内部）。state hash 基线不变，手感不变。

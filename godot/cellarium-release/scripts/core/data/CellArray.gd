@@ -241,6 +241,19 @@ func set_position(index: int, position: Vector2) -> bool:
 	cell_pos_y[index] = position.y
 	return true
 
+## v0.50.0：零速度瞬移。Verlet 用 `pos - prev` 当速度，`set_position` 会把瞬移量
+## 当成速度注入（分裂时母子各偏 0.1r，等于每 tick 凭空获得 0.1r 的速度）。
+## Cell Lab `CellWorld.e(double)` 分裂时的速度增量系数明确是 0.0（零力），
+## 所以分裂重定位必须同时把 prev 写成新位置。
+func set_position_instant(index: int, position: Vector2) -> bool:
+	if index < 0 or index >= size():
+		return false
+	cell_prev_x[index] = position.x
+	cell_prev_y[index] = position.y
+	cell_pos_x[index] = position.x
+	cell_pos_y[index] = position.y
+	return true
+
 func get_orientation(index: int) -> float:
 	if index < 0 or index >= cell_orientation.size():
 		return 0.0

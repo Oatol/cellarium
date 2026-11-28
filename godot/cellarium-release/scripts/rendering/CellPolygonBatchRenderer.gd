@@ -131,6 +131,20 @@ func _build_batched_commands() -> void:
 				nucleus_center + nucleus_unit[(point_index + 1) % nucleus_unit.size()] * nucleus_radius,
 				nucleus_color
 			)
+		# v0.50.0：补一圈内膜环，让批渲染档与近景 CellBase.tscn 的「精细」外观一致。
+		# 走同一条三角批（_append_segment），不增加 draw call；这也是把逐实例档
+		# 的细胞数阈值降下来的前提 —— 少细胞时不再需要 512×11 个 CanvasItem 才有细节。
+		var inner_radius: float = _radii[cell_index] * 0.62
+		if inner_radius >= 2.0:
+			var inner_color: Color = outline_color
+			inner_color.a = clampf(outline_color.a * 0.45, 0.08, 0.5)
+			var ring_unit: PackedVector2Array = nucleus_unit
+			for point_index in range(ring_unit.size()):
+				_append_segment(
+					nucleus_center + ring_unit[point_index] * inner_radius,
+					nucleus_center + ring_unit[(point_index + 1) % ring_unit.size()] * inner_radius,
+					inner_color, 1.0
+				)
 	var link_color: Color = Color(0.58, 0.82, 0.72, 0.42)
 	for link_index in range(0, _links.size(), 2):
 		_append_segment(_links[link_index], _links[link_index + 1], link_color, 2.0)

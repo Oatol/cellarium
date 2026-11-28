@@ -454,32 +454,48 @@ func _on_canvas_draw() -> void:
 		_draw_split_indicator(entry as Dictionary)
 
 func _draw_split_indicator(indicator: Dictionary) -> void:
-	# Cell Lab J4.I()：指示的是「当前细胞下一次分裂的子代去向」，不是历史分裂点。
+	# Cell Lab Macro `j4.I()` 逐方法等价：指示的是「当前细胞下一次分裂的子代去向」。
+	#   d4  = 朝向 + (镜像?-1:1)*Gene.d          → 分裂轴
+	#   fMax= max(0.006, q0*0.27)                → 标记半径
+	#   f2  = q0 + 0.42*fMax ; f3 = f2*2
+	#   f4  = (1-ratio)*f3（子代 1 侧）; f5 = ratio*f3（子代 2 侧）
+	# 两个标记到中心的距离比 = 质量比，标记方向 = 分裂角。v0.50.0 额外补一条虚线分裂轴，
+	# 让「角度」和「质量比」在画布上直接可读（Cell Lab 靠标记位置表达，本项目把它画出来）。
 	var split_center: Vector2 = _to_screen(indicator.get("pos", Vector2.ZERO))
 	var angle: float = float(indicator.get("angle", 0.0))
 	var dir: Vector2 = Vector2(cos(angle), sin(angle))
+	var perp: Vector2 = Vector2(-dir.y, dir.x)
+	var unit: float = _view_scale * _zoom
 	var world_radius: float = float(indicator.get("radius", 7.0))
-	var r_norm: float = clampf(world_radius / 14.0, 0.1, 1.0)
-	var f_max: float = maxf(0.006, r_norm * 0.27)
-	var f2: float = r_norm + 0.42 * f_max
-	var ratio: float = clampf(float(indicator.get("ratio", 0.5)), 0.1, 0.9)
+	var f_max: float = maxf(0.006, world_radius * 0.27)
+	var f2: float = world_radius + 0.42 * f_max
 	var f3: float = f2 * 2.0
-	var d1: float = (1.0 - ratio) * f3
-	var d2: float = ratio * f3
-	var dot_radius_px: float = maxf(1.0, f_max * 14.0 * _view_scale * _zoom)
+	var ratio: float = clampf(float(indicator.get("ratio", 0.5)), 0.1, 0.9)
+	var d_child1: float = (1.0 - ratio) * f3
+	var d_child2: float = ratio * f3
 	var child1_slot: int = clampi(int(indicator.get("child1_mode", 0)), 0, 7)
 	var child2_slot: int = clampi(int(indicator.get("child2_mode", 1)), 0, 7)
 	var is_zygote: bool = bool(indicator.get("zygote", false))
-	var p_child: Vector2 = split_center + dir * d2 * 14.0 * _view_scale * _zoom
-	var p_mother: Vector2 = split_center - dir * d1 * 14.0 * _view_scale * _zoom
-	var child_color: Color = _slot_color(child2_slot, 1)
-	var mother_color: Color = _slot_color(child1_slot, 0)
-	_canvas.draw_circle(p_child, dot_radius_px, Color(child_color.r, child_color.g, child_color.b, 0.9))
-	_canvas.draw_circle(p_mother, dot_radius_px, Color(mother_color.r, mother_color.g, mother_color.b, 0.9))
+	var p_child1: Vector2 = split_center + dir * d_child1 * unit
+	var p_child2: Vector2 = split_center - dir * d_child2 * unit
+	var child1_color: Color = _slot_color(child1_slot, 0)
+	var child2_color: Color = _slot_color(child2_slot, 1)
+	var dot_radius_px: float = maxf(2.0, f_max * unit)
+	# 虚线分裂轴：从子代 2 标记穿过细胞中心到子代 1 标记，长度比即质量比。
+	var axis_color: Color = Color(0.95, 0.88, 0.45, 0.85)
+	_canvas.draw_dashed_line(p_child2, p_child1, axis_color, maxf(1.0, 1.2 * unit),
+		maxf(2.0, 2.0 * unit), true, true)
+	# 分裂面：过中心垂直于分裂轴的短线，提示「细胞在这里被切开」。
+	var plane_half: float = maxf(2.0, 0.35 * f_max * unit)
+	_canvas.draw_line(split_center - perp * plane_half, split_center + perp * plane_half,
+		Color(axis_color.r, axis_color.g, axis_color.b, 0.6), maxf(1.0, 1.0 * unit), true)
+	_draw_split_marker(p_child1, dot_radius_px, child1_color, 1)
+	_draw_split_marker(p_child2, dot_radius_px, child2_color, 2)
 	if is_zygote:
-		# 合子四条去向：本项目运行时只有两个子代模式，第三/第四槽未来加入时自动生效。
+		# 合子四条去向：第二分裂轴取 Gene.B（本项目 `split_angle2` 的第二轴语义），
+		# 比例取 ratio2。第三/第四槽未来加入时自动生效。
 		var gene: Dictionary = _world.get_gene(clampi(int(indicator.get("gene_slot", 0)), 0, 7)) if _world != null else {}
-		var axis2: float = TAU * clampf(float(gene.get("split_angle2", 0.25)), 0.0, 1.0)
+		var axis2: float = TAU * clampf(float(gene.get("split_angle2", 0.0)), 0.0, 1.0)
 		var dir2: Vector2 = Vector2(cos(axis2), sin(axis2))
 		var f10: float = 1.5 * f_max
 		var slots: Array[int] = [
@@ -491,8 +507,21 @@ func _draw_split_indicator(indicator: Dictionary) -> void:
 			var gcol: Color = _slot_color(slots[k], k % 2)
 			var sign: float = 1.0 if k % 2 == 0 else -1.0
 			var dist: float = (1.0 - ratio) * f10 if k < 2 else ratio * f10
-			var pp: Vector2 = split_center + dir2 * dist * 14.0 * _view_scale * _zoom * sign
+			var pp: Vector2 = split_center + dir2 * dist * unit * sign
 			_canvas.draw_circle(pp, dot_radius_px * 0.8, Color(gcol.r, gcol.g, gcol.b, 0.85))
+
+## Cell Lab `H()`：带编号的子代标记，颜色取该子代目标 Gene 槽的 RGB。
+func _draw_split_marker(center: Vector2, radius: float, color: Color, index: int) -> void:
+	_canvas.draw_circle(center, radius, Color(color.r, color.g, color.b, 0.9))
+	_canvas.draw_arc(center, radius, 0.0, TAU, 16, Color(0.05, 0.08, 0.09, 0.9), 1.0, true)
+	var font: Font = ThemeDB.fallback_font
+	if font == null:
+		return
+	var text: String = str(index)
+	var font_size: int = maxi(7, int(radius * 1.5))
+	var width: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	_canvas.draw_string(font, center + Vector2(-width * 0.5, font_size * 0.35), text,
+		HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0.05, 0.08, 0.09, 0.95))
 
 func _slot_color(slot: int, fallback: int) -> Color:
 	var gene: Dictionary = _world.get_gene(slot) if _world != null else {}

@@ -16,7 +16,11 @@ const CHORDS: RefCounted = preload("res://scripts/rendering/CellContactChords.gd
 @export var batch_renderer_path: NodePath = ^"../CellBatch"
 ## v0.30.0：>max_instances 时用单 CanvasItem 批量画共享弦膜，取代纯色块 MultiMesh。
 @export var polygon_batch_path: NodePath = ^"../CellBatchPoly"
-@export var max_instances: int = 512
+## v0.50.0：512 → 48。逐实例档每个细胞是 11 个 CanvasItem（Body/InnerRing/Nucleus/
+## Outline/OrganelleRoot×5/SignalAnchor），512 细胞 = 5632 个 CanvasItem，比批渲染档
+## 贵两个数量级 —— 于是出现「细胞少反而卡、超过阈值反而顺」的倒挂。批渲染档已补内膜环，
+## 外观与近景一致，逐实例档只保留给极小规模（工具选中/拖拽手感）。
+@export var max_instances: int = 48
 
 var organism_manager: Node = null
 var tick_core: Node = null

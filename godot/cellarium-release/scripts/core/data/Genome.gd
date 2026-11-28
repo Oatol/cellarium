@@ -133,15 +133,20 @@ static func normalized_mode(value: Variant, index: int = 0) -> Dictionary:
 	result["child2_type"] = clampi(int(source.get("child2_type", 2)), 0, 255)
 	result["child1_mode"] = clampi(int(source.get("child1_mode", 0)), 0, MAX_GENOME_MODES - 1)
 	result["child2_mode"] = clampi(int(source.get("child2_mode", 0)), 0, MAX_GENOME_MODES - 1)
-	result["child1_glue"] = bool(source.get("child1_glue", true))
-	result["child2_glue"] = bool(source.get("child2_glue", true))
+	# v0.50.0：Cell Lab 只有 Gene.l（make_glue）一个黏附开关，由母细胞基因决定分裂时
+	# 母子是否新建 Link。child1_glue / child2_glue 是本项目版本化追加的**额外**开关，
+	# 缺省必须为 false —— 原先缺省 true 会让「生成黏附素」未勾选时仍然静默建连。
+	result["child1_glue"] = bool(source.get("child1_glue", false))
+	result["child2_glue"] = bool(source.get("child2_glue", false))
 	result["child1_mirror"] = bool(source.get("child1_mirror", false))
 	result["child2_mirror"] = bool(source.get("child2_mirror", false))
 	for key in ["child1_angle", "child2_angle", "split_angle", "split_angle2", "ratio", "ratio2",
 			"nutrition_priority", "cell_stiffness", "color_r", "color_g", "color_b"]:
 		result[key] = clampf(float(source.get(key, 0.5)), 0.0, 1.0)
 	result["child1_angle"] = clampf(float(source.get("child1_angle", 0.0)), 0.0, 1.0)
-	result["child2_angle"] = clampf(float(source.get("child2_angle", 0.25)), 0.0, 1.0)
+	# v0.50.0：Gene.d 默认 0（Cell Lab `Gene()` 构造不写 d/e/f，Java float 缺省 0）。
+	# 原先缺省 0.25 = 90°，配合「相对母细胞朝向」会让链条每代转 90° → 织成一团。
+	result["child2_angle"] = clampf(float(source.get("child2_angle", 0.0)), 0.0, 1.0)
 	result["split_angle"] = clampf(float(source.get("split_angle", 0.0)), 0.0, 1.0)
 	result["split_angle2"] = clampf(float(source.get("split_angle2", 0.25)), 0.0, 1.0)
 	result["ratio"] = clampf(float(source.get("ratio", 0.5)), 0.0, 1.0)

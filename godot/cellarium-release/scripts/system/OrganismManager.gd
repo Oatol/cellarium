@@ -974,16 +974,25 @@ func _apply_autonomous_lifecycle() -> void:
 			# Cell Lab Gene.i/j：母细胞切到 i（child1_mode），新细胞切到 j（child2_mode）。
 			var gene_i: int = clampi(int(mode_data.get("child1_mode", 0)), 0, max_mode_slot)
 			var gene_j: int = clampi(int(mode_data.get("child2_mode", 0)), 0, max_mode_slot)
-			var child1_angle: float = clampf(float(mode_data.get("child1_angle", 0.0)), 0.0, 1.0)
+			# v0.50.0：Cell Lab `CellWorld.e(double)` 的 d7 = cell.k + (镜像?-1:1)*Gene.d。
+			# 分裂轴是**母细胞当前朝向**加上相对角 Gene.d，不是绝对世界角。
+			# 这一条决定「同一份设置分裂成一条长带」：Gene.d=0 时每个细胞都沿自己的朝向
+			# 分裂，母/子朝向又被 Gene.e/f 保持，于是链条一路延续下去。
+			# 旧实现用绝对角 TAU*child2_angle 并把朝向覆盖成该绝对角，链不延续 → 成团。
 			var child2_angle: float = clampf(float(mode_data.get("child2_angle", 0.25)), 0.0, 1.0)
-			if bool(mode_data.get("child2_mirror", false)):
-				child2_angle = fposmod(-child1_angle, 1.0)
-			angle = TAU * child2_angle
+			# 母细胞镜像（Gene.q 语义）翻转整个分裂几何：轴与两侧朝向一起取反。
+			var axis_sign: float = -1.0 if bool(mode_data.get("child1_mirror", false)) else 1.0
+			var mother_orientation: float = float(cells.call("get_orientation", cell_index))
+			angle = mother_orientation + axis_sign * TAU * child2_angle
 			radius_scale = clampf(float(mode_data.get("cell_size", 1.0)), 0.5, 2.0)
 			ratio = clampf(float(mode_data.get("split_ratio", 0.5)), 0.05, 0.95)
 			if bool(mode_data.get("invert_split_mass", false)):
 				ratio = 1.0 - ratio
-			glue = bool(mode_data.get("child1_glue", false)) or bool(mode_data.get("child2_glue", true))
+			# v0.50.0：黏附以 Gene.l（生成黏附素）为准。child1_glue / child2_glue 是
+			# 版本化追加的额外开关，缺省 false，不再参与默认建连。
+			glue = bool(mode_data.get("make_glue", true)) \
+				or bool(mode_data.get("child1_glue", false)) \
+				or bool(mode_data.get("child2_glue", false))
 			# 子代模式槽在 divide_cell 之后确定：母细胞索引切到 Gene.i，新细胞切到 Gene.j。
 			candidate["child1_mode"] = gene_i
 			candidate["child2_mode"] = gene_j
@@ -1006,11 +1015,16 @@ func _apply_autonomous_lifecycle() -> void:
 		# 半径当帧保持母半径 → 高度重叠 → 共享弦渲染成两个贴靠半圆；下一 tick 接触排斥弹开。
 		var split_dir: Vector2 = Vector2.RIGHT.rotated(angle)
 		var half_offset: float = birth_separation * 0.5
-		cells.call("set_position", cell_index, birth_origin - split_dir * half_offset)
-		cells.call("set_position", child_index, birth_origin + split_dir * half_offset)
+		# v0.50.0：用零速度瞬移。`set_position` 会把 0.1r 的位移当成速度写进 Verlet 的
+		# `pos - prev`，等于每次分裂给母子各踢一脚 —— 这是「分裂后炸成一团」的主因之一。
+		# Cell Lab e(double) 的分裂位移速度增量系数是 0.0（零力）。
+		cells.call("set_position_instant", cell_index, birth_origin - split_dir * half_offset)
+		cells.call("set_position_instant", child_index, birth_origin + split_dir * half_offset)
 		var split_mode: Dictionary = candidate.get("mode", {}) as Dictionary
 		if gene_mode and not split_mode.is_empty():
 			# Cell Lab e(double)：k = sign*Gene.e/f + 分裂轴；朝向是方向型连接语义的真相源。
+			# 母细胞用与分裂轴相同的符号（Cell Lab 的 y 同时缩放 Gene.d/e/f），
+			# 子代另受 child2_mirror 翻转（Gene.r 语义）。
 			var mother_sign: float = -1.0 if bool(split_mode.get("child1_mirror", false)) else 1.0
 			var child_sign: float = -1.0 if bool(split_mode.get("child2_mirror", false)) else 1.0
 			cells.call("set_orientation", cell_index, angle + mother_sign * TAU * clampf(float(split_mode.get("split_angle", 0.0)), 0.0, 1.0))
