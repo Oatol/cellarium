@@ -79,6 +79,7 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/ShardProbe.gd",
 	"res://tools/CollisionSoftProbe.gd",
 	"res://tools/CollisionRealProbe.gd",
+	"res://tools/Stage2BreakdownProbe.gd",
 	"res://tools/MetabEnvMicroProbe.gd",
 	"res://tools/LedgerBatchParityProbe.gd",
 	# v0.47 清理：以下探针此前从未登记，解析闸门对它们完全失效。补登记，
