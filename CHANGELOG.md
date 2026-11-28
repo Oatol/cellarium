@@ -59,6 +59,13 @@
 - `COLLISION_SOFTNESS = 1.0` 表示每 tick 消除一半穿透。调小会更软但残余重叠更多，调大趋近硬分离；当前取值使最坏重叠优于旧路径。
 - 碰撞已非瓶颈，`≤8 ms/tick` 的剩余压力在 metabolism（2541 µs）与场采样（`metab_fields` 1069.8 µs），属阶段 2（热路径 AoS 化）范围。
 
+### 清理（同批）
+
+- 删除被 `WorkerSimEngine` + `WorkerEngineProbe` 取代的 B3 原型：`scripts/system/SimWorker.gd`、`tools/ThreadPrototype.gd/.tscn`、`tools/ThreadPrototypeSnapshot.gd`、`tools/WorkerSimProbe.gd/.tscn`、`tools/SimWorkerProbe.gd/.tscn`（其 `preload` 指向已删模块）、`tools/ProdSimWorkerProbe.gd/.tscn`。结论与数据仍保留在 `analysis/阶段B_独立模拟线程方案.md`，该文件已加映射说明。
+- 删除孤儿 `scripts/ui/CellEditorPanel.gd.uid`（对应 `.gd` 已不存在）。
+- **补齐解析闸门缺口**：此前有 15 个探针从未登记到 `SCRIPT_MANIFEST`，闸门对它们完全失效。登记后立刻暴露 `SimWorkerProbe.gd` 的失效 `preload`（已删）。清单 84 → 93，`SCRIPTS=93 FAILURES=0`（双工程）。
+- 顺带修复 D 盘运行工程与源工程的工具目录漂移（缺 `DivisionProbe.gd` 等），已按 `tools/` 与 `scripts/` 两棵子树整体同步。
+
 ---
 
 ## 未发布 — 阶段 B3：独立模拟线程生产接入（2026-11-27）

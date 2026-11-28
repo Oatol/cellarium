@@ -73,12 +73,6 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/WindowPerfScenario.gd",
 	"res://tools/WindowPerfBenchmark.gd",
 	"res://tools/HighSpeedPerfBenchmark.gd",
-	"res://tools/ThreadPrototype.gd",
-	"res://tools/ThreadPrototypeSnapshot.gd",
-	"res://tools/WorkerSimProbe.gd",
-	"res://tools/SimWorkerProbe.gd",
-	"res://tools/ProdSimWorkerProbe.gd",
-	"res://scripts/system/SimWorker.gd",
 	"res://scripts/system/SimSnapshot.gd",
 	"res://scripts/system/WorkerSimEngine.gd",
 	"res://tools/WorkerEngineProbe.gd",
@@ -87,6 +81,23 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/CollisionRealProbe.gd",
 	"res://tools/MetabEnvMicroProbe.gd",
 	"res://tools/LedgerBatchParityProbe.gd",
+	# v0.47 清理：以下探针此前从未登记，解析闸门对它们完全失效。补登记，
+	# 避免探针自身语法错误要等到手动运行时才暴露。
+	"res://tools/BenchTest.gd",
+	"res://tools/RealWorldTpsProbe.gd",
+	"res://tools/T12FallbackTest.gd",
+	"res://tools/SpeedProbe.gd",
+	"res://tools/GpuFieldParityTest.gd",
+	"res://tools/GpuFieldCompareTest.gd",
+	"res://tools/GpuThroughputTest.gd",
+	"res://tools/BehaviorStageProbe.gd",
+	"res://tools/BehaviorPhysicsBreakdownProbe.gd",
+	"res://tools/DivisionProbe.gd",
+	"res://tools/GateProbe.gd",
+	"res://tools/GrowthProbe.gd",
+	"res://tools/HalfCircleProbe.gd",
+	"res://tools/TextureProbe.gd",
+	"res://tools/ViewDragCostProbe.gd",
 ]
 
 func _initialize() -> void:

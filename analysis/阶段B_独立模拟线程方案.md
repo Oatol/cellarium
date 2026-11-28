@@ -168,6 +168,8 @@ worker 跑 organism + CPU 场，主线程保持 GPU 场作视觉层；hash 以 w
 
 ## 8. B1 落地成果（2026-11-27，已完成）
 
+> **2026-11-28 v0.47 清理说明**：本节列出的 `scripts/system/SimWorker.gd`、`tools/ThreadPrototype.gd/.tscn`、`tools/ThreadPrototypeSnapshot.gd`、`tools/WorkerSimProbe.gd/.tscn`、`tools/ProdSimWorkerProbe.gd/.tscn` 已被 `scripts/system/WorkerSimEngine.gd` + `tools/WorkerEngineProbe.gd` 完全取代，已从工作区删除（可从 git 历史取回）。下面的结论与数据仍成立，仅文件名需按上述映射理解。
+
 ### 8.1 新增文件
 - `scripts/system/SimWorker.gd`：独立模拟线程基础设施（Thread + Mutex + 三缓冲快照 + 本地缓冲 + 短临界区拷贝 + 命令队列 + stop/wait）。
 - `scripts/system/SimSnapshot.gd`：快照单元（pos_x/pos_y/alive/cell_type/checksum/tick）。
