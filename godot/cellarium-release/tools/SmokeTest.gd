@@ -66,6 +66,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/MetabolismBreakdownProbe.gd",
 	"res://tools/MetabolismHotspotsParityProbe.gd",
 	"res://tools/PhysicsStepParityProbe.gd",
+	# v0.52.1：连接静止长度每 tick 派生的成本与语义闸门（原生/GDScript 逐位一致 + 跟随半径）。
+	"res://tools/LinkDeriveProbe.gd",
 	"res://tools/BehaviorSignalParityProbe.gd",
 	"res://tools/RenderCacheParityProbe.gd",
 	"res://tools/CollectInputsGridParityProbe.gd",
@@ -343,8 +345,10 @@ func _check_cell_physics() -> bool:
 		physics_script.call("step", cells, 1.0 / 60.0)
 	var first_distance: float = first.call("get_position", 0).distance_to(first.call("get_position", 1))
 	var second_distance: float = second.call("get_position", 0).distance_to(second.call("get_position", 1))
-	if not is_equal_approx(first_distance, 4.0) or first.get("cell_pos_x") != second.get("cell_pos_x"):
-		push_error("SmokeTest: spring constraints must converge deterministically")
+	# v0.52.1：连接改成软弹簧，不再像刚性 PBD 那样精确收敛到静止长度。
+	# 断言改为「从 10 明显收敛到 4 附近且残差有界」，确定性仍要求逐位一致。
+	if first_distance < 3.0 or first_distance > 6.0 or first.get("cell_pos_x") != second.get("cell_pos_x"):
+		push_error("SmokeTest: soft spring constraints must converge deterministically toward rest length (got %.4f)" % first_distance)
 		return false
 	if not is_equal_approx((float(first.get("cell_pos_x")[0]) + float(first.get("cell_pos_x")[1])) * 0.5, 5.0):
 		push_error("SmokeTest: symmetric spring correction must preserve center of mass")
@@ -3922,8 +3926,8 @@ func _check_v0150_gene_save_roundtrip() -> bool:
 		push_error("SmokeTest: gene save roundtrip registration failed")
 		instance.queue_free(); return false
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 8:
-		push_error("SmokeTest: save schema must be version 7")
+	if int(snapshot.get("schema_version", -1)) != int(save_script.get_script_constant_map()["SCHEMA_VERSION"]):
+		push_error("SmokeTest: save schema must match SaveManager.SCHEMA_VERSION")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.set("division_mass", 99.0)
@@ -4123,8 +4127,8 @@ func _check_v0160_runtime_phenotype() -> bool:
 		instance.queue_free(); return false
 	# 新 schema 保存表型数组；旧快照缺字段时按 1.0/-1 恢复。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 8 or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
-		push_error("SmokeTest: schema v8 must persist phenotype arrays")
+	if int(snapshot.get("schema_version", -1)) != int(save_script.get_script_constant_map()["SCHEMA_VERSION"]) or not (snapshot.get("cells", {}) as Dictionary).has("cell_radius_scale"):
+		push_error("SmokeTest: current schema must persist phenotype arrays")
 		instance.queue_free(); return false
 	var legacy_snapshot: Dictionary = snapshot.duplicate(true)
 	for array_name in ["cell_radius_scale", "cell_stiffness", "cell_color_r", "cell_color_g", "cell_color_b"]:
@@ -4354,10 +4358,11 @@ func _check_v0170_runtime_transfer_and_modes() -> bool:
 		instance.queue_free(); return false
 
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 8 \
+	if int(snapshot.get("schema_version", -1)) != int(save_script.get_script_constant_map()["SCHEMA_VERSION"]) \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_mode") \
+		or not (snapshot.get("cells", {}) as Dictionary).has("link_offset") \
 		or (snapshot.get("genomes", []) as Array).is_empty():
-		push_error("SmokeTest: schema v8 must persist modes and cell_mode")
+		push_error("SmokeTest: current schema must persist modes, cell_mode and link_offset")
 		instance.queue_free(); return false
 	var stored: RefCounted = (manager.get("genomes") as Dictionary).get(org_id) as RefCounted
 	stored.call("set_modes", [])
@@ -4566,10 +4571,10 @@ func _check_v0180_population_limits() -> bool:
 	var save_script: Script = load("res://scripts/system/SaveManager.gd") as Script
 	var codec_script: Script = load("res://scripts/core/data/GenomeCodec.gd") as Script
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 8 \
+	if int(snapshot.get("schema_version", -1)) != int(save_script.get_script_constant_map()["SCHEMA_VERSION"]) \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_telomere") \
 		or not (snapshot.get("cells", {}) as Dictionary).has("cell_energy_scale"):
-		push_error("SmokeTest: schema v8 must persist telomere and energy-radius arrays")
+		push_error("SmokeTest: current schema must persist telomere and energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	(legacy.get("cells", {}) as Dictionary).erase("cell_telomere")
@@ -4733,9 +4738,9 @@ func _check_v0190_energy_radius_relaxation() -> bool:
 	# 5) schema v8 保存两个新数组；删掉后旧档回填 baseline=旧有效倍率、factor=1.0。
 	var snapshot: Dictionary = save_script.call("capture", manager, env, tick_core) as Dictionary
 	var snap_cells: Dictionary = snapshot.get("cells", {}) as Dictionary
-	if int(snapshot.get("schema_version", -1)) != 8 \
+	if int(snapshot.get("schema_version", -1)) != int(save_script.get_script_constant_map()["SCHEMA_VERSION"]) \
 		or not snap_cells.has("cell_radius_baseline") or not snap_cells.has("cell_energy_scale"):
-		push_error("SmokeTest: schema v8 must persist energy-radius arrays")
+		push_error("SmokeTest: current schema must persist energy-radius arrays")
 		instance.queue_free(); return false
 	var legacy: Dictionary = snapshot.duplicate(true)
 	var legacy_cells: Dictionary = legacy.get("cells", {}) as Dictionary

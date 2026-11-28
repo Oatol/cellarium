@@ -49,6 +49,11 @@ var cell_division_tick: PackedInt32Array = PackedInt32Array()
 ## 方向语义；用于分裂旧连接重分配与 FLAGELLOCYTE 后向连接校验。进 hash/存档。
 var cell_orientation: PackedFloat32Array = PackedFloat32Array()
 var link_angle: PackedFloat32Array = PackedFloat32Array()
+## v0.52.1：连接的静止长度偏移（世界单位）。Cell Lab 的静止目标不是常量 ——
+## 端点位于「中心 + (r − 0.4·min(r_a,r_b)) 沿连接方向」，两端点重合时中心距 = r_a + r_b − 0.8·min，
+## 因此静止长度必须每 tick 由当前半径派生（`CellPhysics.derive_link_rest_lengths`）。
+## `link_rest_length` 降级为派生缓存；真正持久的是本数组（创建时的额外分离量）。
+var link_offset: PackedFloat32Array = PackedFloat32Array()
 
 func append_cell(org_id: int, position: Vector2, energy: float, type_id: int = 0) -> int:
 	if org_id < 0 or type_id < 0 or type_id > 255 or energy < 0.0:
@@ -293,13 +298,18 @@ func remove_cell(index: int) -> float:
 			link_cell_a.remove_at(link_index)
 			link_cell_b.remove_at(link_index)
 			link_rest_length.remove_at(link_index)
+			if link_index < link_offset.size():
+				link_offset.remove_at(link_index)
 			if link_index < link_angle.size():
 				link_angle.remove_at(link_index)
 	cell_alive[index] = 0
 	cell_energy[index] = 0.0
 	return released_energy
 
-func link_cells(a: int, b: int, rest_length: float, angle_world: float = NAN) -> bool:
+## v0.52.1：`base_length` 是「Cell Lab 派生的静止中心距」（`r_a + r_b − 0.8·min`）。
+## 传入时存 `rest_length − base_length` 作为偏移，之后每 tick 由当前半径重新派生；
+## 不传时偏移记 0（静止目标就是两端点重合）。缺省保持向后兼容，行为与旧实现逐位一致。
+func link_cells(a: int, b: int, rest_length: float, angle_world: float = NAN, base_length: float = NAN) -> bool:
 	if a < 0 or b < 0 or a >= size() or b >= size() or a == b or rest_length <= 0.0:
 		return false
 	if cell_org_id[a] != cell_org_id[b] or int(cell_link_count[a]) >= MAX_LINKS_PER_CELL or int(cell_link_count[b]) >= MAX_LINKS_PER_CELL:
@@ -310,9 +320,13 @@ func link_cells(a: int, b: int, rest_length: float, angle_world: float = NAN) ->
 	if is_nan(stored_angle):
 		var delta: Vector2 = get_position(b) - get_position(a)
 		stored_angle = atan2(delta.y, delta.x) if delta.length_squared() > 0.0 else 0.0
+	var stored_offset: float = 0.0
+	if not is_nan(base_length):
+		stored_offset = maxf(0.0, rest_length - base_length)
 	link_cell_a.append(a)
 	link_cell_b.append(b)
 	link_rest_length.append(rest_length)
+	link_offset.append(stored_offset)
 	link_angle.append(stored_angle)
 	cell_link_count[a] += 1
 	cell_link_count[b] += 1
@@ -362,6 +376,8 @@ func remove_link(link_index: int) -> bool:
 	link_cell_a.remove_at(link_index)
 	link_cell_b.remove_at(link_index)
 	link_rest_length.remove_at(link_index)
+	if link_index < link_offset.size():
+		link_offset.remove_at(link_index)
 	if link_index < link_angle.size():
 		link_angle.remove_at(link_index)
 	return true

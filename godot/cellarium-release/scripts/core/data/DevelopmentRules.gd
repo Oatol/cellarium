@@ -4,6 +4,7 @@ extends RefCounted
 const ORGANISM_STORE_SCRIPT: Script = preload("res://scripts/core/data/OrganismStore.gd")
 const GENOME_SCRIPT: Script = preload("res://scripts/core/data/Genome.gd")
 const CELL_SHAPE_SCRIPT: Script = preload("res://scripts/core/data/CellShape.gd")
+const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
 
 static func division_count(genome: RefCounted) -> int:
 	if genome == null:
@@ -130,6 +131,8 @@ static func execute_divide(genome: RefCounted, cells: RefCounted, organisms: Ref
 	if bool(GENOME_SCRIPT.call("has_glue_links", genome)):
 		var rest_radius: float = float(CELL_SHAPE_SCRIPT.get_script_constant_map().get("REST_RADIUS", 7.0))
 		var rest_length: float = maxf(float(command.get("separation", 1.0)), rest_radius * 2.0)
-		cells.call("link_cells", source_index, child_index, rest_length)
+		# v0.52.1：静止长度之后每 tick 由当前半径派生，建连只记录超出基准的偏移。
+		var rest_base: float = float(CELL_PHYSICS_SCRIPT.call("link_rest_base", rest_radius, rest_radius))
+		cells.call("link_cells", source_index, child_index, rest_length, NAN, rest_base)
 	organisms.get("org_instruction_mask")[org_id] = int(organisms.get("org_instruction_mask")[org_id]) | instruction_bit
 	return child_index

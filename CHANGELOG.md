@@ -4,6 +4,121 @@
 
 ---
 
+## v0.52.1 — 连接从刚性杆换成 Cell Lab 式软弹簧 + 派生静止长度 + 过拉伸撕裂（2026-11-28）
+
+**类型**：物理语义修正（多细胞连接）。**state hash 基线重建** `2825738337` → `3973609741`。
+
+### 用户报的问题
+
+> 分裂快了很多，但目前的连接方式会出现问题，细胞因为刚性杆连接拉在一起了，变成一大团。Cell Lab 中的连接是刚性杆吗，Alien 里面呢，哪个更好。
+
+### 源码级答案：两家都不是刚性杆
+
+**Cell Lab**（`CellWorld` 约 1198–1280 行）的连接求解是「软弹簧 + 双端力矩臂 + 角弹簧」：
+
+```java
+double d16 = dMin * 0.4d;                      // 端点内缩量 = 0.4 · min(r_a, r_b)
+double dCos5 = Math.cos(cell.k + d17);         // 端点方向 = 本侧朝向 + 本侧局部角
+double d23 = dCos5 * ((cell.d - d4) + link.l);// 端点相对中心的偏移（随半径实时重算）
+double d31 = ((25.0d * cell.w) * cell4.w) / (cell.w + cell4.w);      // 质量项
+double d32 = d31 / max(cell.C, cell4.C);                              // 连接越多越软
+double d35 = 1.0d + ((2.0d * (d33*d33 + d34*d34)) / 0.0036d);         // 偏离越大越硬
+double d36 = (30.0d * Cell.a) / (Cell.a + (link.l * 2.0f));           // 静止长度越长越软
+double d37 = ((d29 - d27) * d32) + (d33 * d35 * d36);                 // 端点相对速度阻尼 + 弹簧
+cell.j += ((-d37) * (d40 - cell.c)) + ((d39 - cell.b) * d38);         // 力作用在端点 → 力矩
+double d41 = (d24 * d25) - (d23 * d26);                               // 两臂叉积 → 角弹簧
+```
+
+关键点：**静止目标不是常量，而是「两端点重合」**（端点位于 `中心 + (r − 0.4·min)`，随半径每 tick 重算）；
+弹簧是软性的、越远越硬、连接多的细胞更软；力作用在端点上产生力矩；另加角弹簧。
+**端点距 > 2·max(r) 时删除连接对**（约 1242 行）。
+
+**Alien**（`ObjectProcessor::calcConnectionForces`）是 Verlet + 线性距离弹簧
+`force += direction * deviation * (stiffness1² + stiffness2²)/6`，角约束用每细胞「连接角序环」
+（`angleFromPrevious`），`tearOverstretchedConnections()` 在距离 > `maxBindingDistance`（默认 3.6，半径 1.0）时断连。
+两家断连阈值同量级（Cell Lab ≈1.6 倍直径，Alien ≈1.8 倍直径）。
+
+**本项目原来的实现是纯 PBD 位置投影**：每轮消除一半距离误差、2 轮迭代 → 连接等价于**不可伸长的杆**；
+`link_angle` 存了但求解器从不读；`link_rest_length` 在建连时写死，细胞随能量长大/缩小时不跟随。
+逐细胞推进速度差被杆件转成压差 → 欧拉屈曲 → 成团。
+
+### 改动（三步，顺序不可颠倒）
+
+**① 静止长度每 tick 由当前半径派生**
+
+- 新增 `CellArray.link_offset`：建连时存「超出 Cell Lab 静止基准的分离量」，是**唯一持久量**；
+  `link_rest_length` 降级为派生缓存。
+- `CellPhysics.link_rest_base(r_a, r_b) = r_a + r_b − 2·LINK_GAP_RATIO·min(r_a, r_b)`，`LINK_GAP_RATIO = 0.4`，
+  即 Cell Lab 的端点内缩语义（两侧端点重合时的中心距 = 1.2r）。
+- 新增 `CellPhysics.derive_link_rest_lengths()` / 原生 `CellSpatial::derive_link_rest_lengths()`，
+  物理段每 tick 调一次（新埋点 `phys_link_derive`）。
+- `link_cells(a, b, rest_length, angle_world, base_length)` 新增可选 `base_length`；四处建连点全部传基准。
+
+**② 求解器换成软弹簧 + 端点相对速度阻尼**
+
+- `_solve_links` / `step_verlet_and_links` 不再「每轮消除一半误差」，改为每轮消除
+  `stiffness × hard × share` 比例：
+  - `LINK_STIFFNESS = 0.55`；
+  - `hard = 1 + LINK_HARDEN_GAIN·Δ²/(LINK_HARDEN_RATIO·rest)²`（对应 Cell Lab `d35`，偏离越大越硬）；
+  - `share = 1/max(linkCount_a, linkCount_b)`（对应 Cell Lab `d32` 除以 `max(cell.C)`）。
+- 新增端点相对速度阻尼：Verlet 的 `pos − prev` 即本 tick 速度，沿连接方向消减
+  `LINK_VELOCITY_DAMPING = 0.12` 的相对分量；两端等量反向，质心不变。
+- 原生函数签名扩展为 16 参数（新增 `link_counts` / `stiffness` / `harden_gain` / `harden_ratio` / `velocity_damping` / `tear_ratio`）。
+
+**③ 过拉伸自动断连**
+
+- `LINK_TEAR_RATIO = 2.4`（中心距 / 静止长度），内核只返回 `break_links` 升序索引，
+  由 `OrganismManager` 倒序 `remove_link` —— **内核不改连接数组**。
+- 计数进新诊断容器 `link_diagnostics["torn"]`（纯诊断，不进 hash）。
+- 阈值推导：静止长度 1.2r，实际平衡距离被接触排斥顶到 2r = **1.67 倍静止长度**，
+  所以阈值必须 > 1.67 才有余量。初版取 1.75 实测在分裂瞬间误断
+  （`no_behavior_d0` 32 细胞丢 2 条连接），改 2.4（比 Cell Lab 的 2.67 略早）。
+
+### 存档
+
+`SCHEMA_VERSION` 8 → 9；新增 `link_offset` 数组。旧快照缺该字段时用旧 `link_rest_length`
+与恢复后的 `cell_radius_scale` 反推偏移，保证读档后静止长度不突变。
+
+### 闸门
+
+- `SmokeTest: SCRIPTS=99 FAILURES=0`（新增 `LinkDeriveProbe` 登记）
+- `PhysicsStepParityProbe: checked=2001 failures=0`（含 `break_links count=152` 逐位一致）
+- `NativeParityProbe: NATIVE_E2E: OK (failures=0)`，legacy + m1_photo 全 tick match
+- `WorkerEngineProbe: PROBE_SEQ hash=2825738337 / PROBE_WORKER hash=2825738337 / match=true`（该场景无连接，未受影响）
+- `SplitBandProbe: checks=4 failures=0`
+- `LinkDeriveProbe: native_us=2 script_us=299 links=999 failures=0`（原生 2 µs，相对 8 ms 预算可忽略）
+
+### 行为变化（`tools/SplitBandProbe.gd`）
+
+| 用例 | v0.52.0（刚性） | v0.52.1（软弹簧 + 撕裂） |
+| --- | --- | --- |
+| `glue_on_d0` elongation | 0.84 | **1.32** |
+| `glue_on_d90` elongation | 0.66 | **0.84** |
+| `chain_glue_on` | 18.30 | **18.91** |
+| `chain_nobehavior`（对照） | 84.51 | 83.30 |
+| `no_behavior_d0` | 91.70 | **161.16** |
+
+`chain_glue_on` 的 `span_x=81.6 span_y=4.3`：已是一条近乎笔直的链（垂直偏移 5%），
+与对照 `chain_nobehavior` 的 83.3 只差 1.7 —— 屈曲基本消除。
+`glue_on_d0` 是「32 细胞全部继续分裂」的菌落用例（探针文件头已注明不是长带指标），
+从竖向拉伸（0.84）变成横向展开（1.32）。
+
+### 测试口径修正（如实记录）
+
+1. `SmokeTest._check_cell_physics` 原断言「两细胞从 10 收敛到**精确** 4.0」是按刚性约束写的，
+   软弹簧不精确收敛，改为「从 10 明显收敛到 4 附近（3.0–6.0）且两次运行逐位一致」。
+2. 五处存档断言把 `schema_version` 硬编码成 `8`，改为引用
+   `SaveManager.SCHEMA_VERSION`，并在其中一处追加 `link_offset` 存在性断言。
+
+### 未完成
+
+**#41 分裂轴与分裂后朝向解耦**：预览与 `OrganismManager` 的朝向写入仍以
+`母细胞朝向 + axis_sign·TAU·split_angle` 为基准；按 Cell Lab 应为
+`cell.k = sign·Gene.e + d7`（`d7` 是纯分裂轴）。落地前先用探针量清楚：两子代偏离
+「一左一右」是**位置**本身偏，还是分裂后各自沿自己朝向**推进**造成的剪切。
+
+---
+
 ## v0.52.0 — 渲染统一单 CanvasItem + 膜与细胞器搬进 shader（2026-11-28）
 
 **类型**：渲染架构重写（外观一致性）。**state hash 基线不变** `2825738337`（纯渲染改动，模拟侧逐位一致）。

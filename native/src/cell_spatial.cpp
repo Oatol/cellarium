@@ -449,8 +449,10 @@ Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
 		const PackedFloat32Array &pos_y, const PackedFloat32Array &prev_x,
 		const PackedFloat32Array &prev_y, const PackedByteArray &alive,
 		const PackedInt32Array &link_a, const PackedInt32Array &link_b,
-		const PackedFloat32Array &rest_lengths, double damping,
-		int constraint_iterations) {
+		const PackedFloat32Array &rest_lengths,
+		const PackedByteArray &link_counts, double damping,
+		int constraint_iterations, double stiffness, double harden_gain,
+		double harden_ratio, double velocity_damping, double tear_ratio) {
 	PackedFloat32Array next_pos_x = pos_x;
 	PackedFloat32Array next_pos_y = pos_y;
 	PackedFloat32Array next_prev_x = prev_x;
@@ -467,8 +469,10 @@ Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
 		next_pos_x.set(i, static_cast<float>(x + vx * damping));
 		next_pos_y.set(i, static_cast<float>(y + vy * damping));
 	}
+	const int link_total = link_a.size();
+	const int link_count_size = link_counts.size();
 	for (int iteration = 0; iteration < constraint_iterations; ++iteration) {
-		for (int link_index = 0; link_index < link_a.size(); ++link_index) {
+		for (int link_index = 0; link_index < link_total; ++link_index) {
 			const int a = link_a[link_index];
 			const int b = link_b[link_index];
 			if (a < 0 || b < 0 || a >= count || b >= count ||
@@ -481,25 +485,112 @@ Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
 					static_cast<double>(next_pos_y[a]);
 			const double distance = std::sqrt(dx * dx + dy * dy);
 			if (distance <= 0.000001) continue;
-			const double correction = (distance -
-					static_cast<double>(rest_lengths[link_index])) / distance;
-			const double half = correction * 0.5;
-			const double ax = static_cast<double>(next_pos_x[a]) + dx * half;
-			const double ay = static_cast<double>(next_pos_y[a]) + dy * half;
-			const double bx = static_cast<double>(next_pos_x[b]) - dx * half;
-			const double by = static_cast<double>(next_pos_y[b]) - dy * half;
-			next_pos_x.set(a, static_cast<float>(ax));
-			next_pos_y.set(a, static_cast<float>(ay));
-			next_pos_x.set(b, static_cast<float>(bx));
-			next_pos_y.set(b, static_cast<float>(by));
+			const double rest = static_cast<double>(rest_lengths[link_index]);
+			const double delta = distance - rest;
+			// 非线性硬化：偏离越大越硬（Cell Lab d35 = 1 + 2Δ²/0.0036，特征长度约 3r）。
+			const double feature = harden_ratio * (rest > 0.000001 ? rest : 0.000001);
+			const double hard = 1.0 + harden_gain * (delta * delta) / (feature * feature);
+			// 连接数分摊：一个细胞连得越多，单条连接越软（Cell Lab d32 除以 max(linkCount)）。
+			const int count_a = (a < link_count_size) ? static_cast<int>(link_counts[a]) : 1;
+			const int count_b = (b < link_count_size) ? static_cast<int>(link_counts[b]) : 1;
+			const int max_count = (count_a > count_b ? count_a : count_b);
+			const double share = 1.0 / static_cast<double>(max_count > 1 ? max_count : 1);
+			double k = stiffness * hard * share;
+			if (k > 0.9) k = 0.9;
+			const double inverse = 1.0 / distance;
+			const double nx = dx * inverse;
+			const double ny = dy * inverse;
+			const double correction = delta * k * 0.5;
+			next_pos_x.set(a, static_cast<float>(static_cast<double>(next_pos_x[a]) + nx * correction));
+			next_pos_y.set(a, static_cast<float>(static_cast<double>(next_pos_y[a]) + ny * correction));
+			next_pos_x.set(b, static_cast<float>(static_cast<double>(next_pos_x[b]) - nx * correction));
+			next_pos_y.set(b, static_cast<float>(static_cast<double>(next_pos_y[b]) - ny * correction));
 		}
+	}
+	// 端点相对速度阻尼：`pos − prev` 是本 tick 速度，沿连接方向消减相对分量。
+	// v0.52.1：同时做过拉伸判定，超过静止长度 tear_ratio 倍的连接记入 break_links
+	// （升序），由调用方倒序 remove_link —— 内核不改连接数组本身。
+	PackedInt32Array break_links;
+	for (int link_index = 0; link_index < link_total; ++link_index) {
+		const int a = link_a[link_index];
+		const int b = link_b[link_index];
+		if (a < 0 || b < 0 || a >= count || b >= count ||
+				alive[a] == 0 || alive[b] == 0) {
+			continue;
+		}
+		const double dx = static_cast<double>(next_pos_x[b]) -
+				static_cast<double>(next_pos_x[a]);
+		const double dy = static_cast<double>(next_pos_y[b]) -
+				static_cast<double>(next_pos_y[a]);
+		const double distance = std::sqrt(dx * dx + dy * dy);
+		if (distance <= 0.000001) continue;
+		const double rest = static_cast<double>(rest_lengths[link_index]);
+		if (tear_ratio > 0.0 && rest > 0.000001 && distance > tear_ratio * rest) {
+			break_links.append(link_index);
+			continue;
+		}
+		const double inverse = 1.0 / distance;
+		const double nx = dx * inverse;
+		const double ny = dy * inverse;
+		const double rel_vx =
+				(static_cast<double>(next_pos_x[b]) - static_cast<double>(next_prev_x[b])) -
+				(static_cast<double>(next_pos_x[a]) - static_cast<double>(next_prev_x[a]));
+		const double rel_vy =
+				(static_cast<double>(next_pos_y[b]) - static_cast<double>(next_prev_y[b])) -
+				(static_cast<double>(next_pos_y[a]) - static_cast<double>(next_prev_y[a]));
+		const double along = (rel_vx * nx + rel_vy * ny) * velocity_damping * 0.5;
+		next_pos_x.set(a, static_cast<float>(static_cast<double>(next_pos_x[a]) + nx * along));
+		next_pos_y.set(a, static_cast<float>(static_cast<double>(next_pos_y[a]) + ny * along));
+		next_pos_x.set(b, static_cast<float>(static_cast<double>(next_pos_x[b]) - nx * along));
+		next_pos_y.set(b, static_cast<float>(static_cast<double>(next_pos_y[b]) - ny * along));
 	}
 	Dictionary result;
 	result["pos_x"] = next_pos_x;
 	result["pos_y"] = next_pos_y;
 	result["prev_x"] = next_prev_x;
 	result["prev_y"] = next_prev_y;
+	result["break_links"] = break_links;
 	return result;
+}
+
+// v0.52.1: 每 tick 派生连接静止长度。逐位同序于 GDScript 回退：
+//   radius = cell_radius * radius_scale（缺省 1.0）
+//   rest   = r_a + r_b - 2 * gap_ratio * min(r_a, r_b) + offset（缺省 0.0）
+// 全程 double 计算、写回 float32，与 derive_link_rest_lengths 的 GDScript 版本一致。
+PackedFloat32Array CellSpatial::derive_link_rest_lengths(
+		const PackedFloat32Array &radius_scales,
+		const PackedInt32Array &link_a, const PackedInt32Array &link_b,
+		const PackedFloat32Array &link_offsets, double cell_radius,
+		double gap_ratio) {
+	const int link_count = link_a.size();
+	PackedFloat32Array rest;
+	rest.resize(link_count);
+	if (link_count <= 0) {
+		return rest;
+	}
+	const float *scales = radius_scales.ptr();
+	const int scale_count = radius_scales.size();
+	const int *la = link_a.ptr();
+	const int *lb = link_b.ptr();
+	const float *offsets = link_offsets.ptr();
+	const int offset_count = link_offsets.size();
+	float *out = rest.ptrw();
+	const double base_radius = cell_radius;
+	for (int i = 0; i < link_count; ++i) {
+		const int a = la[i];
+		const int b = lb[i];
+		const double scale_a = (a >= 0 && a < scale_count)
+				? static_cast<double>(scales[a]) : 1.0;
+		const double scale_b = (b >= 0 && b < scale_count)
+				? static_cast<double>(scales[b]) : 1.0;
+		const double radius_a = base_radius * scale_a;
+		const double radius_b = base_radius * scale_b;
+		const double min_radius = radius_a < radius_b ? radius_a : radius_b;
+		const double offset = (i < offset_count) ? static_cast<double>(offsets[i]) : 0.0;
+		out[i] = static_cast<float>(radius_a + radius_b -
+				2.0 * gap_ratio * min_radius + offset);
+	}
+	return rest;
 }
 
 // v0.48.0: 整场镜像查表。逐位复刻 SAMPLE_SOURCE 的索引推导：
@@ -565,8 +656,10 @@ void CellSpatial::_bind_methods() {
 			&CellSpatial::resolve_collisions);
 	ClassDB::bind_method(D_METHOD("resolve_collisions_soft", "pos_x", "pos_y", "alive", "radius_scales", "stiffnesses", "cell_radius", "cell_size", "softness"),
 			&CellSpatial::resolve_collisions_soft);
-	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "damping", "constraint_iterations"),
+	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "link_counts", "damping", "constraint_iterations", "stiffness", "harden_gain", "harden_ratio", "velocity_damping", "tear_ratio"),
 			&CellSpatial::step_verlet_and_links);
 	ClassDB::bind_method(D_METHOD("sample_fields_nearest", "field_flat", "positions", "resolution", "center", "radius"),
 			&CellSpatial::sample_fields_nearest);
+	ClassDB::bind_method(D_METHOD("derive_link_rest_lengths", "radius_scales", "link_a", "link_b", "link_offsets", "cell_radius", "gap_ratio"),
+			&CellSpatial::derive_link_rest_lengths);
 }

@@ -4,8 +4,9 @@ extends RefCounted
 ## 纯 RefCounted，无 class_name，调用方 preload。schema_version 只升不降。
 ## 不修改 GNP1 冻结格式；species_id / lineage_id 作为运行时元数据随基因组池一起保存。
 
-const SCHEMA_VERSION: int = 8
+const SCHEMA_VERSION: int = 9
 const SAVE_FORMAT: String = "cellarium.gsave.v1"
+const CELL_PHYSICS_SCRIPT: Script = preload("res://scripts/system/CellPhysics.gd")
 
 const CELL_ARRAY_NAMES: Array[String] = [
 	"cell_pos_x", "cell_pos_y", "cell_prev_x", "cell_prev_y",
@@ -34,6 +35,9 @@ const DIVISION_TICK_ARRAY_NAMES: Array[String] = ["cell_division_tick"]
 
 ## v0.29.0：schema 1–7 没有细胞朝向与连接方向；恢复时朝向填 0、连接方向按两端位置重算。
 const LINK_DIRECTION_ARRAY_NAMES: Array[String] = ["cell_orientation", "link_angle"]
+
+## v0.52.1：schema 1–8 没有连接静止长度偏移；恢复时按旧 `link_rest_length` 反推（见 apply_snapshot）。
+const LINK_OFFSET_ARRAY_NAMES: Array[String] = ["link_offset"]
 
 const ORGANISM_ARRAY_NAMES: Array[String] = [
 	"org_alive", "org_genome_id", "org_species_id", "org_parent_id",
@@ -73,6 +77,8 @@ static func capture(org_manager: Node, env_manager: Node, tick_core: Node) -> Di
 	for array_name in DIVISION_TICK_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 	for array_name in LINK_DIRECTION_ARRAY_NAMES:
+		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
+	for array_name in LINK_OFFSET_ARRAY_NAMES:
 		snapshot["cells"][array_name] = _copy_array(cells.get(array_name))
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
@@ -274,6 +280,37 @@ static func restore(snapshot: Dictionary, org_manager: Node, env_manager: Node, 
 			else:
 				restored_link_angles.append(0.0)
 	cells.set("link_angle", restored_link_angles)
+
+	# v0.52.1：连接静止长度改为每 tick 由半径派生，持久量变成「超出 Cell Lab 静止基准的偏移」。
+	# 旧档没有 link_offset：用旧 link_rest_length 反推，保证读档后静止长度不突变。
+	var restored_offsets: PackedFloat32Array = PackedFloat32Array()
+	if cell_data.has("link_offset"):
+		var raw_offsets: Variant = _copy_array(cell_data["link_offset"])
+		if raw_offsets is PackedFloat32Array:
+			restored_offsets = raw_offsets as PackedFloat32Array
+		elif raw_offsets is Array:
+			for value in raw_offsets as Array:
+				restored_offsets.append(float(value))
+	else:
+		var legacy_rest: PackedFloat32Array = cells.get("link_rest_length") as PackedFloat32Array
+		var legacy_a: PackedInt32Array = cells.get("link_cell_a") as PackedInt32Array
+		var legacy_b: PackedInt32Array = cells.get("link_cell_b") as PackedInt32Array
+		var legacy_scales: PackedFloat32Array = cells.get("cell_radius_scale") as PackedFloat32Array
+		var base_radius: float = float(org_manager.get("cell_radius"))
+		var gap_ratio: float = float(CELL_PHYSICS_SCRIPT.get_script_constant_map().get("LINK_GAP_RATIO", 0.4))
+		for link_index in range(legacy_a.size()):
+			var scale_a: float = 1.0
+			var scale_b: float = 1.0
+			if legacy_a[link_index] >= 0 and legacy_a[link_index] < legacy_scales.size():
+				scale_a = float(legacy_scales[legacy_a[link_index]])
+			if legacy_b[link_index] >= 0 and legacy_b[link_index] < legacy_scales.size():
+				scale_b = float(legacy_scales[legacy_b[link_index]])
+			var radius_a: float = base_radius * scale_a
+			var radius_b: float = base_radius * scale_b
+			var base: float = radius_a + radius_b - 2.0 * gap_ratio * minf(radius_a, radius_b)
+			var legacy_length: float = float(legacy_rest[link_index]) if link_index < legacy_rest.size() else base
+			restored_offsets.append(maxf(0.0, legacy_length - base))
+	cells.set("link_offset", restored_offsets)
 
 	var organisms: RefCounted = org_manager.get("organisms") as RefCounted
 	var organism_data: Dictionary = snapshot.get("organisms", {}) as Dictionary

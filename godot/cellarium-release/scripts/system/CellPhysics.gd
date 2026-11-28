@@ -7,6 +7,30 @@ const COLLISION_ITERATIONS: int = 6
 ## v0.47.0：单轮软弹力碰撞每对推开的穿透比例。1.0 = 每 tick 消除一半穿透，
 ## 剩余由后续 tick 松弛（Cell Lab 手感：轻微重叠、不硬吸附）。
 const COLLISION_SOFTNESS: float = 1.0
+## v0.52.1：Cell Lab 连接的端点间隙比例。`CellWorld` 连接求解里
+## `d16 = min(r_a, r_b) * 0.4`，端点位于「中心 + (r − d16) 沿连接方向」，
+## 两端点重合时中心距 = r_a + r_b − 0.8·min(r_a, r_b)。这是**静止目标**，
+## 不是硬约束 —— 实际平衡距离由接触排斥决定。
+const LINK_GAP_RATIO: float = 0.4
+## v0.52.1：连接从「刚性 PBD 投影」换成软弹簧。Cell Lab 的连接力是
+## `f = Δ·d35·d36·d32 + 端点相对速度·d32`，其中 d35 让偏离越大越硬、d32 除以
+## max(linkCount) 让连接多的细胞更软。这里用位置空间的等价形式表达同一组性质：
+## 每轮只消除 `stiffness × hard × share` 比例的误差，而不是像旧实现那样每轮消除一半。
+## `hard = 1 + gain·Δ²/(harden_ratio·rest)²` 对应 Cell Lab `d35 = 1 + 2Δ²/0.0036`，
+## 其特征长度 0.06 约为 3 倍细胞半径。
+const LINK_STIFFNESS: float = 0.55
+const LINK_HARDEN_GAIN: float = 2.0
+const LINK_HARDEN_RATIO: float = 2.5
+## 端点相对速度阻尼：沿连接方向消减的相对速度比例（Cell Lab `(d29−d27)·d32`）。
+const LINK_VELOCITY_DAMPING: float = 0.12
+## v0.52.1：过拉伸自动断连。Cell Lab 在「两侧端点距 > 2·max(r)」时删掉连接对
+## （`CellWorld` 约 1242 行），换成中心距约为 3.2r；Alien 的 `maxBindingDistance`
+## 默认 3.6（半径 1.0）也是同量级。
+## 阈值必须按**静止长度**而非直径来定，因为静止长度是 1.2r 而实际平衡距离由接触排斥
+## 顶到 2r（= 1.67 倍静止长度）。取 2.4 倍：比正常平衡高 44%，比 Cell Lab 的 2.67 倍略早。
+## 取 1.75 会在分裂瞬间误断（实测 `no_behavior_d0` 32 细胞丢 2 条连接）。
+## <= 0 关闭撕裂。
+const LINK_TEAR_RATIO: float = 2.4
 const SPATIAL_HASH_CELL_SIZE: float = 64.0
 const SPATIAL_HASH_SOFT_LIMIT: int = 16
 ## v0.30.0：扁平哈希键偏移。坐标经 64 单位取整后远小于该范围，int64 不会溢出。
@@ -405,6 +429,41 @@ static func build_collision_pairs_flat(cells: RefCounted, cell_radius: float = 0
 					pairs.append(b)
 	return pairs
 
+## v0.52.1：Cell Lab 语义的静止中心距 —— 两侧端点重合时的中心距。
+## `CellWorld` 用 `d16 = min(r_a,r_b)*0.4` 作端点内缩量，端点位于
+## 「中心 + (r − d16) 沿连接局部角方向」，故静止中心距 = r_a + r_b − 2·0.4·min。
+static func link_rest_base(radius_a: float, radius_b: float) -> float:
+	return radius_a + radius_b - 2.0 * LINK_GAP_RATIO * minf(radius_a, radius_b)
+
+## v0.52.1：每 tick 由当前半径重新派生全部连接的静止长度（原生 `derive_link_rest_lengths` 的回退）。
+## 半径随能量低通变化，而旧实现把 `link_rest_length` 在创建时写死 —— 细胞长大/缩小时连接长度不跟随，
+## 群体被锁成刚性骨架。派生后 `link_rest_length` 是缓存，持久量只有 `link_offset`。
+static func derive_link_rest_lengths(cells: RefCounted, cell_radius: float) -> void:
+	if cells == null:
+		return
+	var scales: PackedFloat32Array = cells.get("cell_radius_scale")
+	var link_a: PackedInt32Array = cells.get("link_cell_a")
+	var link_b: PackedInt32Array = cells.get("link_cell_b")
+	var offsets: PackedFloat32Array = cells.get("link_offset")
+	var rest: PackedFloat32Array = cells.get("link_rest_length")
+	var link_count: int = link_a.size()
+	if rest.size() != link_count:
+		rest.resize(link_count)
+	if offsets.size() != link_count:
+		offsets.resize(link_count)
+	var scale_count: int = scales.size()
+	for link_index in range(link_count):
+		var a: int = link_a[link_index]
+		var b: int = link_b[link_index]
+		var radius_a: float = cell_radius * (float(scales[a]) if a >= 0 and a < scale_count else 1.0)
+		var radius_b: float = cell_radius * (float(scales[b]) if b >= 0 and b < scale_count else 1.0)
+		rest[link_index] = link_rest_base(radius_a, radius_b) + offsets[link_index]
+	cells.set("link_rest_length", rest)
+
+## v0.52.1：软弹簧连接求解（原生 `step_verlet_and_links` 的回退实现）。
+## 与旧实现的区别：不再每轮消除一半误差把连接变成不可伸长的杆，而是按
+## `stiffness × 硬化 × 连接数分摊` 只消除一部分，再对端点相对速度加阻尼。
+## 这样逐细胞推进速度差会被连接吸收成轻微伸缩，而不是被杆件转成压差 → 欧拉屈曲。
 static func _solve_links(cells: RefCounted, cell_count: int) -> void:
 	var pos_x: PackedFloat32Array = cells.get("cell_pos_x")
 	var pos_y: PackedFloat32Array = cells.get("cell_pos_y")
@@ -414,8 +473,10 @@ static func _solve_links(cells: RefCounted, cell_count: int) -> void:
 	var link_a: PackedInt32Array = cells.get("link_cell_a")
 	var link_b: PackedInt32Array = cells.get("link_cell_b")
 	var rest_lengths: PackedFloat32Array = cells.get("link_rest_length")
+	var link_counts: PackedByteArray = cells.get("cell_link_count")
+	var count: int = link_a.size()
 	for iteration in range(CONSTRAINT_ITERATIONS):
-		for link_index in range(link_a.size()):
+		for link_index in range(count):
 			var a: int = link_a[link_index]
 			var b: int = link_b[link_index]
 			if a < 0 or b < 0 or a >= cell_count or b >= cell_count or alive[a] == 0 or alive[b] == 0:
@@ -425,11 +486,53 @@ static func _solve_links(cells: RefCounted, cell_count: int) -> void:
 			var distance: float = sqrt(dx * dx + dy * dy)
 			if distance <= 0.000001:
 				continue
-			var correction: float = (distance - rest_lengths[link_index]) / distance
-			var half_correction: float = correction * 0.5
-			pos_x[a] += dx * half_correction
-			pos_y[a] += dy * half_correction
-			pos_x[b] -= dx * half_correction
-			pos_y[b] -= dy * half_correction
+			var rest: float = rest_lengths[link_index]
+			var delta: float = distance - rest
+			var feature: float = LINK_HARDEN_RATIO * maxf(rest, 0.000001)
+			var hard: float = 1.0 + LINK_HARDEN_GAIN * (delta * delta) / (feature * feature)
+			var count_a: int = int(link_counts[a]) if a < link_counts.size() else 1
+			var count_b: int = int(link_counts[b]) if b < link_counts.size() else 1
+			var share: float = 1.0 / float(maxi(1, maxi(count_a, count_b)))
+			var k: float = minf(LINK_STIFFNESS * hard * share, 0.9)
+			var inverse: float = 1.0 / distance
+			var nx: float = dx * inverse
+			var ny: float = dy * inverse
+			var correction: float = delta * k * 0.5
+			pos_x[a] += nx * correction
+			pos_y[a] += ny * correction
+			pos_x[b] -= nx * correction
+			pos_y[b] -= ny * correction
+	# 端点相对速度阻尼：Verlet 的 `pos − prev` 就是本 tick 速度，沿连接方向消减相对分量。
+	# 质心不变（两端等量反向），与 Cell Lab 力模型里 `(d29 − d27) · d32` 同向同效。
+	# v0.52.1：同时做过拉伸判定 —— 中心距超过静止长度 `LINK_TEAR_RATIO` 倍的连接直接断开
+	# （Cell Lab 的等价阈值是端点距 > 2·max(r)，约 2.7 倍静止长度）。
+	var broken: PackedInt32Array = PackedInt32Array()
+	for link_index in range(count):
+		var a: int = link_a[link_index]
+		var b: int = link_b[link_index]
+		if a < 0 or b < 0 or a >= cell_count or b >= cell_count or alive[a] == 0 or alive[b] == 0:
+			continue
+		var dx: float = pos_x[b] - pos_x[a]
+		var dy: float = pos_y[b] - pos_y[a]
+		var distance: float = sqrt(dx * dx + dy * dy)
+		if distance <= 0.000001:
+			continue
+		var rest: float = rest_lengths[link_index]
+		if LINK_TEAR_RATIO > 0.0 and rest > 0.000001 and distance > LINK_TEAR_RATIO * rest:
+			broken.append(link_index)
+			continue
+		var inverse: float = 1.0 / distance
+		var nx: float = dx * inverse
+		var ny: float = dy * inverse
+		var rel_vx: float = (pos_x[b] - prev_x[b]) - (pos_x[a] - prev_x[a])
+		var rel_vy: float = (pos_y[b] - prev_y[b]) - (pos_y[a] - prev_y[a])
+		var along: float = (rel_vx * nx + rel_vy * ny) * LINK_VELOCITY_DAMPING * 0.5
+		pos_x[a] += nx * along
+		pos_y[a] += ny * along
+		pos_x[b] -= nx * along
+		pos_y[b] -= ny * along
 	cells.set("cell_pos_x", pos_x)
 	cells.set("cell_pos_y", pos_y)
+	# 倒序删除，避免每次 remove_at 后索引位移。
+	for i in range(broken.size() - 1, -1, -1):
+		cells.call("remove_link", broken[i])

@@ -55,6 +55,8 @@ var reproduce_diagnostics: Dictionary = {"attempts": 0, "success": 0, "speciatio
 ## 选择集（阶段5）：当前框选/点选的存活细胞索引，SELECT/ROTATE_SELECTION 真实写入。
 var selection: Array[int] = []
 var agent_diagnostics: Dictionary = {"commands": 0, "dev_commands": 0}
+## v0.52.1：连接撕裂计数（过拉伸自动断连）。纯诊断，不进 hash。
+var link_diagnostics: Dictionary = {"torn": 0}
 var perf_probe: RefCounted = PERF_PROBE_SCRIPT.new() as RefCounted
 
 const TOOL_TYPES: Array[String] = ["SPAWN", "REMOVE", "DRAG", "BOOST", "INSPECT", "STERILIZE", "ADHERE", "INJECT_GENOME", "INJECT_SIGNAL", "INJECT_SUBSTANCE", "INJECT_COLOR", "SELECT", "CLEAR_SELECTION", "ROTATE_SELECTION", "TERRAIN_PAINT", "TERRAIN_ERASE"]
@@ -463,20 +465,44 @@ func advance_physics_tick(dt: float) -> void:
 	# if 块里，碰撞段拿不到 COLLISION_SOFTNESS）。
 	var physics_constants: Dictionary = CELL_PHYSICS_SCRIPT.get_script_constant_map()
 	perf_probe.call("end", "phys_args")
+	# v0.52.1：连接的静止长度每 tick 由当前半径派生（Cell Lab 的静止目标是「两端点重合」，
+	# 端点位置随半径实时重算，所以静止中心距不是常量）。旧实现在建连时写死长度，
+	# 细胞随能量长大/缩小时连接不跟随，群体被锁成刚性骨架。
+	perf_probe.call("begin", "phys_link_derive")
+	if native_spatial != null and native_spatial.has_method("derive_link_rest_lengths"):
+		cells.set("link_rest_length", native_spatial.call("derive_link_rest_lengths",
+			cells.get("cell_radius_scale"), cells.get("link_cell_a"), cells.get("link_cell_b"),
+			cells.get("link_offset"), cell_radius,
+			float(physics_constants.get("LINK_GAP_RATIO", 0.4))))
+	else:
+		CELL_PHYSICS_SCRIPT.call("derive_link_rest_lengths", cells, cell_radius)
+	perf_probe.call("end", "phys_link_derive")
 	if native_spatial != null and dt > 0.0:
 		perf_probe.call("begin", "phys_verlet")
 		var stepped: Dictionary = native_spatial.call("step_verlet_and_links",
 			cells.get("cell_pos_x"), cells.get("cell_pos_y"),
 			cells.get("cell_prev_x"), cells.get("cell_prev_y"), cells.get("cell_alive"),
 			cells.get("link_cell_a"), cells.get("link_cell_b"), cells.get("link_rest_length"),
+			cells.get("cell_link_count"),
 			float(physics_constants.get("DAMPING", 0.98)),
-			int(physics_constants.get("CONSTRAINT_ITERATIONS", 2)))
+			int(physics_constants.get("CONSTRAINT_ITERATIONS", 2)),
+			float(physics_constants.get("LINK_STIFFNESS", 0.55)),
+			float(physics_constants.get("LINK_HARDEN_GAIN", 2.0)),
+			float(physics_constants.get("LINK_HARDEN_RATIO", 2.5)),
+			float(physics_constants.get("LINK_VELOCITY_DAMPING", 0.12)),
+			float(physics_constants.get("LINK_TEAR_RATIO", 2.4)))
 		perf_probe.call("end", "phys_verlet")
 		perf_probe.call("begin", "phys_verlet_write")
 		cells.set("cell_pos_x", stepped["pos_x"])
 		cells.set("cell_pos_y", stepped["pos_y"])
 		cells.set("cell_prev_x", stepped["prev_x"])
 		cells.set("cell_prev_y", stepped["prev_y"])
+		# v0.52.1：内核只报索引，不改连接数组。倒序删除避免索引位移。
+		var broken: PackedInt32Array = stepped.get("break_links", PackedInt32Array())
+		if not broken.is_empty():
+			for i in range(broken.size() - 1, -1, -1):
+				cells.call("remove_link", int(broken[i]))
+			link_diagnostics["torn"] = int(link_diagnostics["torn"]) + broken.size()
 		perf_probe.call("end", "phys_verlet_write")
 	else:
 		perf_probe.call("begin", "phys_verlet_fallback")
@@ -1087,10 +1113,14 @@ func _apply_autonomous_lifecycle() -> void:
 		# v0.14.1：成熟后的自主分裂同样遵守黏附素语义，亲子自动建连。
 		# v0.16.0/v0.17.0：受当前模式 max_connections 上限约束；min_connections 为追加软补连。
 		var rest_length: float = maxf(division_separation, cell_radius * 2.0 * radius_scale)
+		# v0.52.1：建连时把「超出 Cell Lab 静止基准的分离量」存成偏移，之后静止长度
+		# 每 tick 由当前半径派生（`derive_link_rest_lengths`）。亲子此刻半径同倍率。
+		var rest_base: float = CELL_PHYSICS_SCRIPT.call("link_rest_base",
+			cell_radius * radius_scale, cell_radius * radius_scale)
 		if glue and _can_add_link(genome, cell_index, child_index):
-			cells.call("link_cells", cell_index, child_index, rest_length)
+			cells.call("link_cells", cell_index, child_index, rest_length, NAN, rest_base)
 		if gene_mode:
-			_apply_min_connections(genome, org_id, child_index, rest_length)
+			_apply_min_connections(genome, org_id, child_index, rest_length, rest_base)
 		# v0.18.0：端粒按细胞谱系递减，归零时母子同死（Cell Lab Gene.B[6]）。
 		if gene_mode:
 			var parent_telomere: int = int(cells.call("decrement_telomere", cell_index))
@@ -1376,7 +1406,8 @@ func _apply_gene_payload(genome: RefCounted, payload: Variant) -> void:
 
 ## v0.16.0：最小连接数是本项目追加的软约束（Cell Lab 未证实独立控件）。
 ## 分裂后按 cell index 升序扫描同个体细胞，确定性补连到 min_connections；仍受上限约束。
-func _apply_min_connections(genome: RefCounted, org_id: int, cell_index: int, rest_length: float) -> void:
+## v0.52.1：`rest_base` 是 Cell Lab 静止基准，`link_cells` 用它把 `rest_length` 折算成偏移。
+func _apply_min_connections(genome: RefCounted, org_id: int, cell_index: int, rest_length: float, rest_base: float = NAN) -> void:
 	var mode: Dictionary = _mode_for_cell(genome, cell_index)
 	var fallback_target: int = int(genome.get("min_connections"))
 	var target: int = clampi(int(mode.get("min_connections", fallback_target)), 0, 16)
@@ -1392,7 +1423,7 @@ func _apply_min_connections(genome: RefCounted, org_id: int, cell_index: int, re
 			continue
 		if not _can_add_link(genome, cell_index, peer_index):
 			continue
-		if bool(cells.call("link_cells", cell_index, peer_index, rest_length)):
+		if bool(cells.call("link_cells", cell_index, peer_index, rest_length, NAN, rest_base)):
 			link_counts = cells.get("cell_link_count")
 			if cell_index >= link_counts.size() or int(link_counts[cell_index]) >= target:
 				return
@@ -1697,7 +1728,11 @@ func _apply_tool_command(command: Dictionary) -> int:
 					return -1
 				b = candidates[0]
 			var rest_length: float = maxf(14.0, cell_radius * 2.0)
-			var linked: bool = bool(cells.call("link_cells", a, b, rest_length))
+			# v0.52.1：工具黏附同样走「静止基准 + 偏移」，之后跟随半径派生。
+			var rest_base: float = CELL_PHYSICS_SCRIPT.call("link_rest_base",
+				cell_radius * float(cells.call("get_radius_scale", a)),
+				cell_radius * float(cells.call("get_radius_scale", b)))
+			var linked: bool = bool(cells.call("link_cells", a, b, rest_length, NAN, rest_base))
 			if not linked:
 				last_tool_message = "黏附连接失败：两细胞需同个体且未连接"
 				adhesion_anchor = -1
@@ -2126,9 +2161,10 @@ func get_state_hash() -> int:
 	for array_name in ["cell_radius_baseline", "cell_energy_scale", "cell_division_tick", "cell_orientation"]:
 		for value in cells.get(array_name):
 			hash_value = _hash_int(hash_value, int(round(float(value) * 1000000.0)))
-	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length", "link_angle"]:
+	# v0.52.1：`link_offset` 是连接静止长度的持久来源（`link_rest_length` 已降级为派生缓存）。
+	for array_name in ["link_cell_a", "link_cell_b", "link_rest_length", "link_offset", "link_angle"]:
 		for value in cells.get(array_name):
-			var quantized: int = int(round(float(value) * 1000000.0)) if array_name == "link_rest_length" or array_name == "link_angle" else int(value)
+			var quantized: int = int(round(float(value) * 1000000.0)) if array_name == "link_rest_length" or array_name == "link_offset" or array_name == "link_angle" else int(value)
 			hash_value = _hash_int(hash_value, quantized)
 	for array_name in ["org_alive", "org_genome_id", "org_species_id", "org_parent_id", "org_age", "org_health", "org_death_cause", "org_state", "org_instruction_mask", "org_dev_cursor", "cell_offset", "cell_count"]:
 		for value in organisms.get(array_name):

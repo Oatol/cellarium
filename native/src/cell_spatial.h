@@ -59,12 +59,26 @@ public:
 
 	// v0.34.0: exact port of CellPhysics.step() Verlet integration plus
 	// _solve_links() constraint iterations. Side-effect-free; returns new arrays.
+	// v0.52.1: 连接求解从刚性 PBD 投影改为软弹簧（Cell Lab `CellWorld` 连接力模型的
+	// 位置空间等价形式）：每轮只消除 stiffness×硬化×连接数分摊 比例的误差，
+	// 再对端点相对速度加阻尼。参数与 CellPhysics 的同名常量一一对应。
 	Dictionary step_verlet_and_links(const PackedFloat32Array &pos_x,
 			const PackedFloat32Array &pos_y, const PackedFloat32Array &prev_x,
 			const PackedFloat32Array &prev_y, const PackedByteArray &alive,
 			const PackedInt32Array &link_a, const PackedInt32Array &link_b,
-			const PackedFloat32Array &rest_lengths, double damping,
-			int constraint_iterations);
+			const PackedFloat32Array &rest_lengths,
+			const PackedByteArray &link_counts, double damping,
+			int constraint_iterations, double stiffness, double harden_gain,
+			double harden_ratio, double velocity_damping, double tear_ratio);
+
+	// v0.52.1: 每 tick 由当前半径派生连接的静止长度。Cell Lab 的静止目标不是常量，
+	// 而是「两侧端点重合」：端点位于中心 + (r − gap_ratio·min(r_a,r_b)) 沿连接方向，
+	// 故静止中心距 = r_a + r_b − 2·gap_ratio·min(r_a,r_b)。`link_rest_length` 由此
+	// 降级为派生缓存，持久量只有 link_offsets。返回与 link_a 等长的新数组。
+	PackedFloat32Array derive_link_rest_lengths(const PackedFloat32Array &radius_scales,
+			const PackedInt32Array &link_a, const PackedInt32Array &link_b,
+			const PackedFloat32Array &link_offsets, double cell_radius,
+			double gap_ratio);
 
 	// v0.48.0: 整场镜像查表。field_flat 是 5×R² 的扁平通道布局（通道优先，与 GPU
 	// storage buffer 同序），positions 是 N×2 的扁平世界坐标。返回 N×5 扁平样本。
