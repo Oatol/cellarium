@@ -1,13 +1,13 @@
 # 创生模拟器 · 会话交接文档
 
 > 面向**完全没有上下文的新对话**。读完本文件即可接手，不必翻历史聊天记录。
-> 本文件更新于 2026-11-28，最新版本标签 `v0.48.0`；工作区有**阶段 A 高倍速调度修复**、**阶段 B3 独立模拟线程（默认关闭）**，均已随 v0.47.0/v0.48.0 发布，见 §4.1–§4.4。
+> 本文件更新于 2026-11-28，最新版本标签 `v0.49.0`；工作区有**阶段 A 高倍速调度修复**、**阶段 B3 独立模拟线程（默认关闭）**，均已随 v0.47.0 发布，见 §4.1–§4.5。
 
 ---
 
 ## 0. 一句话现状
 
-我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 把碰撞内核重构成 Cell Lab 式单轮软弹力**（真实皿 1024 细胞整 tick 墙钟 8801→6869 µs，碰撞段 1795→109.5 µs，16.4×），**v0.48.0 把场采样从「每 tick 两次 GPU 往返」改成「每 tick 一次整场回读 + 两次 C++ 本机查表」**（真实窗口同机背靠背 A/B：tick1 p50 27426→20587 µs，−24.9%；tick3 47742→34671，−27.4%）。state hash 基线 `114854044` 未变。下一步压力在 `metabolism`（约 2254 µs，其中 `metab_env` ~1010、`metab_base` ~215 全是纯 GDScript 逐细胞循环）与 `advance_field_tick` 里那一次 20 KB 整场回读。
+我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 把碰撞内核重构成 Cell Lab 式单轮软弹力**（真实皿 1024 细胞整 tick 墙钟 8801→6869 µs，碰撞段 1795→109.5 µs，16.4×），**v0.48.0 把场采样从「每 tick 两次 GPU 往返」改成「每 tick 一次整场回读 + 两次 C++ 本机查表」**（tick1 p50 −20% 量级），**v0.49.0 把 `metab_env` 的每 tick 重建表改成世代缓存 + 副作用循环下沉 C++**（3000 细胞 `metab_env` 2512.7→1301.5 µs，`metab_env_prep` 1232.3→5.1 µs）。state hash 基线 `114854044` 始终未变。**真实窗口当前实测：tick1 p50 4555–5214 µs、tick3 p50 12449–13396 µs，单 tick 已稳在 8 ms 预算内。** 下一个瓶颈是 `cache`（渲染缓存重建 p50 8531–8619 µs，把 3× 倍速相位帧时推到 16.66 ms）。
 
 ---
 
@@ -54,12 +54,19 @@
 
 ### 最近版本（重点，都是真实窗口分段计时驱动，全部逐位闸门通过）
 
-**v0.48.0 — 整场回读一次 + C++ 批量查表（当前版本，阶段 2 主方案）**
+**v0.49.0 — metab_env 三项下沉（当前版本）**
+- 定位：`metab_env_prep` 占 `metab_env` 的一半（3000 细胞 1232.3 / 2512.7 µs），每 tick 遍历 `genomes` 重建 `respiration` / `nutrition_priority` 两张按个体表 —— 而它们只在基因变化时才会变。
+- 改动：两张表并入按世代失效的原生缓存；`compute_environment_batch` 新增 `consume_cells` 输出；新增 `apply_environment_outcome()` 把逐细胞副作用 + 账本分组整段下沉（裸指针 + 256 定长桶单遍）；`EnergyLedger.record_batch()` 改单遍扫描 + 环形缓冲。
+- A/B（`MetabolismBreakdownProbe`，3000 细胞 / 60 tick / native）：`metab_env` 2512.7→**1301.5 µs（−48.2%）**、`metab_env_prep` 1232.3→**5.1 µs（−99.6%）**。
+- 真实窗口（1025 细胞，同机四跑）：tick1 p50 off 6107/6154 → eager **4555/5214**；tick3 off 16568/16628 → eager **12449/13396**；`STAGE metabolism` 1819.7/1756.0 → **1162.2/1215.7**。off 两跑差 0.77%。
+- **口径**：本轮绝对值可与 v0.47 日志直接对比（off 走 v0.47 路径，6130 vs 6282 吻合）。v0.48.0 记录的 27426/20587 是后台进程抢 GPU 的高位。
+
+**v0.48.0 — 整场回读一次 + C++ 批量查表（阶段 2 主方案）**
 - 定位：一个 tick 里两次按细胞采样用的是同一份场状态（场扩散在 physics tick 之后才推进），旧路径却付了两次完整 GPU 往返，每次约 967 µs。
 - 改动：`CellSpatial.sample_fields_nearest()` 新增 C++ 最近格查表（**全程 float32**，逐位复刻 shader；GDScript 的 double 乘法在 resolution 非 2 的幂时会分叉）；`_read_active_buffer()` 改 `to_float32_array()` + `slice()` 并同时产出 `_field_flat_mirror`；`sample_cells_flat()` 三级路由（镜像查表 / CPU 回退 / GPU dispatch）；`eager_mirror_readback` 把回读放在 `diffuse_tick` 的 sync 之后（比延迟到下次采样便宜 5.2×）。
 - A/B（同机背靠背，off/lazy/eager 三跑）：tick1 p50 27426 / 22341 / **20587**；tick3 47742 / 38938 / **34671**；`setup_dispatch` 9823.9 / 8190.2 / **112.1**；`metab_fields` 2060.2 / 245.3 / **239.6**。基线噪声带 4.4%。
 - 新闸门：`tools/FieldMirrorParityProbe.gd`（10000 值逐位对照镜像查表 vs GPU dispatch，0 差异）。
-- **口径**：本轮绝对数值比 v0.47 日志高约 4 倍（测量期间机器有无关后台进程抢 GPU），只承认同会话相对比较。
+- **口径**：该轮绝对数值比 v0.47 日志高约 4 倍（测量期间机器有无关后台进程抢 GPU），只承认同会话相对比较。
 
 **v0.47.0 — 碰撞内核重构为 Cell Lab 式单轮软弹力（已 tag + push）**
 - 定位：碰撞成本真凶是**网格尺寸**不是迭代次数。旧路径 `cell_size` 写死 64.0 而典型细胞直径仅 14 → 每桶挤约 20 个细胞、9 桶扫 180 候选只有约 6 个真邻居（30× 无效扫描）；单这一项 2.5×，叠加迭代与 pairs 物化才有 16–56×。
@@ -89,24 +96,36 @@
 - `WorkerEngineProbe`（场景，非 `--script`）：`PROBE_SEQ hash=114854044` / `PROBE_WORKER hash=114854044` / `match=true`。
 - `FieldMirrorParityProbe`（**需 Vulkan 窗口**）：`FIELD_MIRROR_PARITY values=10000 failures=0`。
 - `GpuSamplingTest`（**需 Vulkan 窗口**）：`GPU_SAMPLING PASS`，headless 打印 SKIP。
+- `LedgerBatchParityProbe`（headless）：`LEDGER_PARITY: checked=36 failures=0 entries=7`。
 - 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（逐轮通过）。
-- 生产 DLL SHA-256 `BABAD798A40BDB313A29D33B72315BD8DD00898B9FDFF9F68DF434A18FB04E59`（v0.48.0）。
+- 生产 DLL SHA-256 `C58878CECF49F76C7B66181ACE0738D1DE43C0B874EF18B8FCDEF9AB6ED54FD5`（v0.49.0）。
 
 ---
 
 ## 4. 当前状态：≤8 ms/tick 已达标
 
-v0.45 同会话两轮裸 tick **7.48 / 7.29 ms**（余量 0.5–0.7 ms），v0.46 signal 再降 31%。1025 细胞真实窗口 v0.46 低负载轮分段：
+**v0.49.0 真实窗口实测（Vulkan，1025 细胞冻结，同机四跑）**：
+
+| 指标 | off #1 | off #2 | eager #1 | eager #2 |
+| --- | ---: | ---: | ---: | ---: |
+| tick1 work p50 | 6107 | 6154 | **4555** | **5214** |
+| tick3 work p50 | 16568 | 16628 | **12449** | **13396** |
+| tick1 frame ms avg | 6.96 | 6.86 | 6.76 | 6.68 |
+| tick3 frame ms avg | 16.56 | 16.76 | 13.38 | 14.58 |
+
+tick3 除以 3 即单 tick 成本：eager 下 4150–4465 µs，**稳在 8 ms 预算内，余量 3.5 ms 以上**。1× 倍速帧时 6.68–6.76 ms（≈148 fps）；3× 倍速帧时 13.38–14.58 ms，仍低于 16.7 ms 但余量只剩 2 ms 左右。
+
+eager 模式下 1025 细胞的分段：
 
 | 段 | 耗时 | 说明 |
 | --- | ---: | --- |
-| metabolism | 3.3–4.1 ms | `metab_env` 1.42（负载高时到 2.3）/ `metab_fields` ~1.1–1.3 / `metab_base` 0.31 |
-| physics | ~1.9 ms | `phys_collision` 1.64（C++ 已 ptrw 优化）、Verlet 38 µs、project 184 µs |
-| behavior | ~1.06 ms | collect 0.39（已 ptrw）、eval 0.30、apply 0.27（**不可下沉 C++**）、idxarr 0.03 |
-| signal | ~0.56 ms | v0.46 批量写入后（原 0.83） |
-| 头部准备 | 1.2–2.0 ms | tick_setup，受机器负载波动大，不计入裸 tick 验收 |
+| `PART physics` | 3337–3542 µs | 含 `STAGE physics 345`（`phys_collision` 137.7、`phys_project` 130.3、`phys_verlet` 38.3）+ `STAGE metabolism 1162–1216` + `behavior 1062` + `signal 479` |
+| `PART field` | 1087–1316 µs | 含那一次 20 KB 整场回读（eager 下搬到这里） |
+| `cache`（渲染缓存重建） | 8651–8672 µs | **新头号单项**，`tick3_cache` 帧时 16.66 ms 的主因 |
+| `STAGE metabolism` | 1162–1216 µs | `metab_env` 558–581（`ledger` 382 / `compute` 62 / `tail` 39 / `fetch` 23 / `prep` 4.5 / `consume` 2）+ `metab_base` 232 + `metab_fields` 180 |
+| `STAGE behavior` | 1000–1062 µs | `beh_collect` 418、`beh_eval` 310、`beh_apply` 195（**不可下沉 C++**）、`beh_copy` 38、`beh_idxarr` 22 |
 
-**性能专项已到收益递减拐点**：第 6 专项确认 metab_env 波动是机器负载噪声（微探针稳定态 1.04 ms，无隐藏热点）；`beh_apply` 下沉 C++ 经 20000 组原型验证有 53 处 1 ULP 差异被否决。剩余大段要么已榨过、要么受负载主导，硬抠边际收益已低于逐位 hash 风险。
+**已到收益递减区**：`beh_apply` 下沉 C++ 经 20000 组原型验证有 53 处 1 ULP 差异被否决；GDScript 层多核分片实测负收益（Amdahl 上限 ~1.08×）。再降只能动 C++ 内核内部并行或阶段 4 GPU 主体化（需重建 hash 基线）。
 
 **注意物理限制**：机器长时间满载会过热蓝屏（`clock_watchdog_timeout`）。性能基准单次 ≤60 秒，禁止长跑满载扫描；并发编译 `-j 4`。
 
@@ -183,19 +202,50 @@ v0.45 同会话两轮裸 tick **7.48 / 7.29 ms**（余量 0.5–0.7 ms），v0.4
 
 ---
 
-## 5. 下一步计划（v0.48 之后）
+### 4.5 v0.49.0 metab_env 三项下沉（已实施）
 
-碰撞已不是瓶颈（109.5 µs / 1.6%），场采样 GPU 往返已减半。剩余大头按 `analysis/架构诊断与重构路线.md`：
+**关键事实**：`metab_env_prep` 占 `metab_env` 的一半（3000 细胞 1232.3 / 2512.7 µs），它每 tick 遍历 `genomes` 重建两张按个体表（`respiration`、`nutrition_priority`）—— 而这两张表只在基因变化时才会变。同一份数据在 `_rebuild_native_metabolism_cache()` 里本来就要每世代遍历一遍，顺手派生即可。
 
-1. **`advance_field_tick` 里的那一次 20 KB 整场回读**（`PART field` avg 7878.9 / p50 3480）。它是每 tick 最大的单项 GPU 等待。要再降只有两条路：把场整体移出主 tick 关键路径（阶段 4 GPU 主体化 / 阶段 B 独立模拟线程），或减少回读频率（场按固定间隔推进，但会改语义）。
-2. **`metabolism`（约 2254 µs）**：`metab_env` ~1010、`metab_base` ~215，全是纯 GDScript 逐细胞循环。v0.41/v0.44/v0.45 已把字典与边界检查逐项拆掉，剩下的是真正的逐细胞算术，只能下沉 C++ 或 AoS 化。**注意 `beh_apply` 的 `Vector2.rotated` 已两次验证不可下沉 C++（1 ULP 差异）**。
-3. **`behavior`（约 1362 µs）**：`beh_collect` ~390 + `beh_eval` ~300。
-4. **阶段 3：调度层降频 + 工作量硬上限**（低成本）：神经/行为按固定间隔更新；每细胞接触数硬上限。
-5. **阶段 4：GPU 主体化**（长期）：collision 的 Gauss-Seidel 依赖已被阶段 1 消除；behavior（8→4→6 网络）+ `collect_inputs_grid`（整数邻域计数可保位）可搬 compute。
-6. **高倍速真实体感**：worker 单 tick 成本降下来后 B3 的 32× 才有实际可能；先用 OS 单调钟口径重测，不要用 delta。
-7. **玩法完成度收尾**：与 v1.1 合并稿逐条对照，列出剩余缺口。
+- `OrganismManager._native_org_respiration` / `_native_org_priority`：在世代缓存里派生；失效已覆盖 `_apply_gene_payload()`（`nutrition_priority` 在同 payload 落地）与 `_set_gene_respiration()`。**新增基因写入路径时记得调 `_invalidate_native_metabolism_cache()`**，否则这两张表会读到旧值。无原生扩展时保留原每 tick 重建路径作为等价参照。
+- `CellMetabolism.compute_environment_batch()` 新增 `consume_cells` 输出（升序、仅 `food_gain > 0 && (ZYGOTE || NITROCYTE)`）。M1 全 PHOTOCYTE 时为空表，省掉全细胞类型扫描。
+- `CellMetabolism.apply_environment_outcome(...)`：逐细胞能量/能量流/健康更新 + 账本分组整段下沉，裸指针 + 256 定长桶单遍走完，`consume` 结果按升序稀疏覆盖写回。中间值仍走 `PackedFloat64Array` 保 double。
+- `EnergyLedger.record_batch()` 改单遍扫描 + 环形缓冲；淘汰从逐条 `pop_front()`（每次 O(n)）改成一次性裁头。
 
-**任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + WorkerEngineProbe + FieldMirrorParityProbe + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
+`MetabolismBreakdownProbe`（3000 细胞 / 60 tick / `CELLARIUM_NATIVE=1`，同会话 A/B）：`metab_env` 2512.7→**1301.5 µs（−48.2%）**，`metab_env_prep` 1232.3→**5.1 µs（−99.6%）**，`metab_fields` 持平。收益几乎全部来自 prep 归零。
+
+真实窗口 A/B（1025 细胞，同机四跑）：
+
+| µs/tick | off #1 | off #2 | eager #1 | eager #2 |
+| --- | ---: | ---: | ---: | ---: |
+| tick1 p50 | 6107 | 6154 | **4555** | **5214** |
+| tick3 p50 | 16568 | 16628 | **12449** | **13396** |
+| `STAGE metabolism` | 1819.7 | 1756.0 | **1162.2** | **1215.7** |
+| `metab_fields` | 851.3 | 830.5 | 180.0 | 189.4 |
+| `setup_dispatch` | 1319.8 | 1595.0 | 78.9 | 82.6 |
+
+`off` 两跑差 0.77%，噪声带很紧；eager 两跑差 14.5%，取均值 tick1 −20.3% / tick3 −22.1%。
+
+**口径**：本轮绝对值可与 v0.47 日志直接对比 —— `off` 走的就是 v0.47 采样路径，本轮 6130 / 6154 µs 与 v0.47 记录的 6282 µs 吻合。v0.48.0 记录的 27426 / 20587 是那次测量期间后台进程抢 GPU 的高位，不代表代码退化。**下次重跑基准时若 `off` 显著高于 6300，先查后台进程再下结论。**
+
+闸门：双工程 SmokeTest `SCRIPTS=95 FAILURES=0`、NativeParityProbe `OK`、WorkerEngineProbe hash `114854044` 不变、`LedgerBatchParityProbe checked=36 failures=0`、`WINDOW_BENCH_FLAT_PARITY 5125/0`（off 与 eager 各一次）。
+
+---
+
+## 5. 下一步计划（v0.49 之后）
+
+碰撞已不是瓶颈（137.7 µs），场采样 GPU 往返已减半，`metab_env_prep` 已归零。剩余大头按 `analysis/架构诊断与重构路线.md`：
+
+1. **`cache`（渲染缓存重建）p50 8531–8619 µs** —— 现在它是 `tick3_cache` 相位帧时 16.66 ms 的主因，3× 倍速已经贴着 60 fps 的线。这是当前最值得动的一块。
+2. **`advance_field_tick` 里的那一次 20 KB 整场回读**（eager 下 `PART field` avg 1087–1316 / p50 829–958）。要再降只有两条路：把场整体移出主 tick 关键路径（阶段 4 GPU 主体化 / 阶段 B 独立模拟线程），或减少回读频率（场按固定间隔推进，会改语义）。
+3. **`metab_env_consume`（3000 细胞 590.1 µs，M1 真实皿只有 2 µs）** —— 全是 `consume_nutrient` / `consume_signal` 的跨对象动态 call，批量化为一次 native 调用是明确收益，但会动到环境场消耗语义，需要单独闸门。
+4. **`metab_env_ledger` 307.8 µs** —— 现在只剩每 tick 为尾部 `_max_entries` 条建 Dictionary。
+5. **`behavior`（约 1000–1062 µs）**：`beh_collect` ~418 + `beh_eval` ~310。**注意 `beh_apply` 的 `Vector2.rotated` 已两次验证不可下沉 C++（1 ULP 差异）**。
+6. **阶段 3：调度层降频 + 工作量硬上限**（低成本）：神经/行为按固定间隔更新；每细胞接触数硬上限。
+7. **阶段 4：GPU 主体化**（长期）：collision 的 Gauss-Seidel 依赖已被阶段 1 消除；behavior（8→4→6 网络）+ `collect_inputs_grid`（整数邻域计数可保位）可搬 compute。
+8. **高倍速真实体感**：worker 单 tick 成本降下来后 B3 的 32× 才有实际可能；先用 OS 单调钟口径重测，不要用 delta。
+9. **玩法完成度收尾**：与 v1.1 合并稿逐条对照，列出剩余缺口。
+
+**任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + WorkerEngineProbe + FieldMirrorParityProbe + LedgerBatchParityProbe + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
 
 **测量纪律（本轮新增，务必遵守）**：
 - 跑真实窗口基准前先确认没有残留 Godot 进程（`Get-Process | Where ProcessName -like "Godot*"`）。一个残留进程就能让 `dispatch+sync` 从 567 µs 涨到 4787 µs。

@@ -4,6 +4,78 @@
 
 ---
 
+## v0.49.0 — metab_env 三项下沉：世代缓存 + C++ 单遍副作用 + 账本单遍（2026-11-28）
+
+**类型**：热路径重构（metabolism 内部）。state hash 基线不变，手感不变。
+
+### 问题
+
+`metab_env` 在 3000 细胞下 2512.7 µs，其中 **`metab_env_prep` 占 1232.3 µs**：它每 tick 重建两张按个体的表（`respiration` 与 `nutrition_priority`），做法是遍历 `genomes` 字典逐个取属性。这两张表只在基因变化时才会变，却每 tick 付一次全量重建。
+
+同一段里还有两个隐藏成本：
+
+- 逐细胞副作用循环（能量增减、能量流累计、厌氧毒性扣血）在 GDScript 里每细胞写 4 次 PackedArray，1025–3000 次元素写。
+- 账本分组用 `(dict[key] as PackedFloat64Array).append()`，每个 key 的 `append` 都会因 COW 复制整个数组，条数一多就退化成 **O(n²)**。
+
+### 方案
+
+1. **两张按个体表并入按世代失效的原生缓存**。`_rebuild_native_metabolism_cache()` 本来就要每世代遍历一遍个体，顺手派生 `_native_org_respiration` / `_native_org_priority` 即可，`metab_env` 不再单独扫。缓存失效已覆盖 `_apply_gene_payload()`（`nutrition_priority` 在同一个 payload 里落地）与 `_set_gene_respiration()`。无原生扩展时保留原每 tick 重建路径作为等价参照实现。
+2. **`compute_environment_batch` 新增 `consume_cells` 输出**（PackedInt32Array，升序，仅 `food_gain > 0 && (ZYGOTE || NITROCYTE)`）。M1 全 PHOTOCYTE 时该表为空，省掉一次全细胞类型扫描；有消费者时也只遍历候选，不再扫全细胞。
+3. **新增 `CellMetabolism.apply_environment_outcome(...)`**：把逐细胞副作用与账本分组整段下沉 C++，裸指针 + 256 个定长桶一次走完。桶用首次出现序记录顺序，账本 entry 内容与顺序与原 GDScript 路径一致；`consume` 结果用升序稀疏覆盖写回，不需要第二次全细胞扫描。
+4. **`EnergyLedger.record_batch()` 改单遍扫描 + 环形缓冲**：原实现扫两遍（先统计有效条数与余额增量，再挑最后 `_max_entries` 条），且逐条 `pop_front()` 每次 O(n) 位移。现在第一遍就用环形缓冲记下尾部候选，淘汰改成一次性裁头。
+5. **`metab_env` 新增八项埋点**：`fetch / arrays / prep / compute / consume / outcome / ledger / tail`，`MetabolismBreakdownProbe` 同步输出。
+
+### 结果（`MetabolismBreakdownProbe`，3000 细胞 / 60 tick / native，同会话 A/B）
+
+| 分段（µs/tick） | v0.48.0 | **v0.49.0** | 变化 |
+| --- | ---: | ---: | --- |
+| `metab_env` 整段 | 2512.7 | **1301.5** | **−48.2%** |
+| `metab_env_prep` | 1232.3 | **5.1** | **−99.6%** |
+| `metab_env_consume` | — | 590.1 | 新增细分 |
+| `metab_env_ledger` | — | 307.8 | 新增细分 |
+| `metab_env_compute` | — | 167.2 | 新增细分 |
+| `metab_env_tail` | — | 105.6 | 新增细分 |
+| `metab_env_fetch` | — | 58.4 | 新增细分 |
+| `metab_env_outcome` | — | 49.5 | 新增细分 |
+| `metab_fields` | 1105.5 | 1105.5 | 持平 |
+
+收益几乎全部来自 `prep` 归零（−1227 µs）。`compute / consume / outcome / ledger` 四段合计与下沉前基本持平 —— 下沉的价值不在于让这四段更快，而在于消掉 `append` 的 O(n²) 退化风险，并让 GDScript 侧只剩取数组与写回字典。
+
+### 真实窗口 A/B（Vulkan，1025 细胞，同机四跑，每档两遍）
+
+| 指标（µs/tick） | off #1 | off #2 | eager #1 | eager #2 |
+| --- | ---: | ---: | ---: | ---: |
+| tick1 work p50 | 6107 | 6154 | **4555** | **5214** |
+| tick3 work p50 | 16568 | 16628 | **12449** | **13396** |
+| `PART physics` avg | 5198.5 | 5270.1 | 3337.2 | 3541.9 |
+| `PART field` avg | 736.5 | 753.8 | 1087.2 | 1316.4 |
+| `STAGE metabolism` | 1819.7 | 1756.0 | **1162.2** | **1215.7** |
+| `metab_fields` | 851.3 | 830.5 | 180.0 | 189.4 |
+| `setup_dispatch` | 1319.8 | 1595.0 | 78.9 | 82.6 |
+
+`off` 两跑差 0.77%（tick1 p50 6107 / 6154），噪声带很紧；eager 两跑差 14.5%（4555 / 5214），取均值：tick1 6130.5 → 4884.5（**−20.3%**）、tick3 16598 → 12922.5（**−22.1%**）。这个幅度与 v0.48.0 记录的 −24.9% / −27.4% 同量级，方向一致。
+
+**本轮绝对数值可直接与 v0.47 日志对比**：`off` 模式走的就是 v0.47 的采样路径，本轮 6130 / 6154 µs 与 v0.47 记录的 6282 µs 吻合。v0.48.0 记录的 27426 / 20587 是那次测量期间后台进程占用 GPU 导致的高位（该节 §口径声明 已注明），不代表代码退化。
+
+### 闸门
+
+双工程 SmokeTest `SCRIPTS=95 FAILURES=0`；NativeParityProbe `NATIVE_E2E: OK (failures=0)`（tick 10/60/300/302/600/602/700 逐 tick match）；WorkerEngineProbe `PROBE_SEQ hash=114854044` / `PROBE_WORKER hash=114854044` / `match=true`；`LedgerBatchParityProbe checked=36 failures=0 entries=7`；`WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（off 与 eager 各一次）。
+
+> `LedgerBatchParityProbe` 在本轮抓到过一个真实缺陷：`record_batch` 的淘汰条件写成 `mini(new_count, _entries.size())`，在条目未溢出时也裁掉旧条目（`entries size 7 vs 3` + 守恒失败）。已改为 `maxi(0, _entries.size() + new_count - _max_entries)`，只在真正溢出时裁剪。
+
+### 入库 DLL
+
+`native/` 与构建工作区同步后重编译，SHA-256 `C58878CECF49F76C7B66181ACE0738D1DE43C0B874EF18B8FCDEF9AB6ED54FD5`（v0.48.0 为 `BABAD798A40BDB313A29D33B72315BD8DD00898B9FDFF9F68DF434A18FB04E59`）。
+
+### 仍然剩下的
+
+- `metabolism` 1215.7 里 `metab_fields 180` 已不是大头；新的头号单项是 `metab_env_consume`（3000 细胞 590.1 µs，M1 真实皿只有 2 µs —— 全是 `consume_nutrient` / `consume_signal` 的跨对象动态 call）。
+- `metab_env_ledger 307.8`：现在只剩每 tick 为尾部 `_max_entries` 条建 Dictionary。
+- `PART field` 里那一次 20 KB 整场回读仍在关键路径上（eager 下搬到 `advance_field_tick`，本轮 `avg 1087–1316 / p50 829–958`）。
+- `cache`（渲染缓存重建）`p50 8531–8619`，在 `tick3_cache` 相位把帧时推到 16.66–16.67 ms —— 3× 倍速下已经贴着 60 fps 的线，是下一个瓶颈。
+
+---
+
 ## v0.48.0 — 阶段 2 主方案：整场回读一次 + C++ 批量查表（2026-11-28）
 
 **类型**：架构级热路径重构（场采样 GPU 往返减半）。state hash 基线不变，手感不变。

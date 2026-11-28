@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -108,6 +109,7 @@ Dictionary CellMetabolism::compute_environment_batch(
 	PackedFloat64Array food_gains;
 	PackedFloat64Array movement_costs;
 	PackedByteArray toxic_flags;
+	PackedInt32Array consume_cells;
 	food_gains.resize(count);
 	movement_costs.resize(count);
 	toxic_flags.resize(count);
@@ -147,6 +149,10 @@ Dictionary CellMetabolism::compute_environment_batch(
 					* chemotrophic_intake_rate * feeding_factor * dt;
 		}
 		food_gains.set(cell_index, food_gain);
+		if (food_gain > 0.0
+				&& (cell_type == CELL_TYPE_ZYGOTE || cell_type == CELL_TYPE_NITROCYTE)) {
+			consume_cells.push_back(cell_index);
+		}
 
 		const int intent_offset = cell_index * 6;
 		const double movement = (intent_offset < intents.size())
@@ -159,6 +165,127 @@ Dictionary CellMetabolism::compute_environment_batch(
 	result["food_gains"] = food_gains;
 	result["movement_costs"] = movement_costs;
 	result["toxic_flags"] = toxic_flags;
+	// v0.49.0：需要真正调用 consume() 的细胞（升序）。原 GDScript 逐细胞判断
+	// `food_gain > 0 && (type == ZYGOTE || type == NITROCYTE)`；下沉后只需遍历这张
+	// 稀疏表，M1 全 PHOTOCYTE 时为空，省掉每 tick 一次全细胞类型扫描。
+	result["consume_cells"] = consume_cells;
+	return result;
+}
+
+// v0.49.0: metab_env 副作用循环下沉。原来是每细胞 4 次 PackedArray 元素写入
+// （energies/flow_production/flow_self_cost/health）加一次账本字典分组，1142 细胞
+// 实测约 570 µs；账本分组里 `(dict[key] as PackedFloat64Array).append()` 还会因为
+// COW 变成 O(n²)。C++ 侧用裸指针 + 定长桶一次走完。
+Dictionary CellMetabolism::apply_environment_outcome(
+		const PackedFloat32Array &energies_in, const PackedFloat64Array &food_gains,
+		const PackedInt32Array &consume_cells, const PackedFloat64Array &consume_amounts,
+		const PackedByteArray &alive, const PackedByteArray &types,
+		const PackedInt32Array &org_ids, const PackedFloat64Array &movement_costs,
+		const PackedByteArray &toxic_flags, const PackedFloat64Array &flow_production_in,
+		const PackedFloat64Array &flow_self_cost_in, const PackedFloat32Array &health_in,
+		double toxicity_damage) {
+	const int64_t count = energies_in.size();
+	PackedFloat32Array energies = energies_in;
+	PackedFloat32Array health = health_in;
+	PackedFloat64Array flow_production = flow_production_in;
+	PackedFloat64Array flow_self_cost = flow_self_cost_in;
+	if (count <= 0) {
+		Dictionary empty_result;
+		empty_result["energies"] = energies;
+		empty_result["health"] = health;
+		empty_result["flow_production"] = flow_production;
+		empty_result["flow_self_cost"] = flow_self_cost;
+		empty_result["ledger_groups"] = Dictionary();
+		return empty_result;
+	}
+	float *energy_ptr = energies.ptrw();
+	float *health_ptr = health.ptrw();
+	double *production_ptr = flow_production.ptrw();
+	double *self_cost_ptr = flow_self_cost.ptrw();
+	const uint8_t *alive_ptr = alive.ptr();
+	const uint8_t *types_ptr = types.ptr();
+	const int32_t *org_ptr = org_ids.ptr();
+	const double *gain_ptr = food_gains.ptr();
+	const double *cost_ptr = movement_costs.ptr();
+	const uint8_t *toxic_ptr = toxic_flags.ptr();
+	const int64_t gain_count = food_gains.size();
+	const int64_t cost_count = movement_costs.size();
+	const int64_t org_count = org_ids.size();
+	const int64_t health_count = health.size();
+	const int64_t flow_count = std::min(flow_production.size(), flow_self_cost.size());
+	const int64_t override_count = std::min(consume_cells.size(), consume_amounts.size());
+	const int32_t *override_cell_ptr = consume_cells.ptr();
+	const double *override_amount_ptr = consume_amounts.ptr();
+	const int64_t type_count = types.size();
+	int64_t override_cursor = 0;
+
+	// 账本分组：桶按 cell_type 直接下标，插入序按首次出现记录，与 GDScript
+	// Dictionary 的插入序一致（_flush_ledger_groups 依赖这个顺序）。
+	std::vector<PackedFloat64Array> buckets(256);
+	std::vector<int> bucket_order;
+	std::vector<char> bucket_seen(256, 0);
+
+	for (int64_t i = 0; i < count; ++i) {
+		if (alive_ptr[i] == 0) {
+			continue;
+		}
+		double consumed = (i < gain_count && gain_ptr[i] > 0.0) ? gain_ptr[i] : 0.0;
+		if (override_cursor < override_count && override_cell_ptr[override_cursor] == i) {
+			consumed = override_amount_ptr[override_cursor];
+			++override_cursor;
+		}
+		if (consumed != 0.0) {
+			energy_ptr[i] = static_cast<float>(static_cast<double>(energy_ptr[i]) + consumed);
+			if (i < flow_count) {
+				production_ptr[i] += consumed;
+			}
+		}
+		if (i < cost_count) {
+			const double cost = cost_ptr[i];
+			energy_ptr[i] = static_cast<float>(
+					std::max(0.0, static_cast<double>(energy_ptr[i]) - cost));
+			if (cost != 0.0 && i < flow_count) {
+				self_cost_ptr[i] += cost;
+			}
+		}
+		if (i < org_count && i < health_count && toxic_ptr[i] != 0) {
+			const int org_id = org_ptr[i];
+			if (org_id >= 0 && org_id < health_count) {
+				health_ptr[org_id] = static_cast<float>(std::max(0.0,
+						static_cast<double>(health_ptr[org_id]) - toxicity_damage));
+			}
+		}
+		if (consumed > 0.0 && i < type_count) {
+			const int type_key = static_cast<int>(types_ptr[i]);
+			if (type_key >= 0 && type_key < 256) {
+				if (bucket_seen[type_key] == 0) {
+					bucket_seen[type_key] = 1;
+					bucket_order.push_back(type_key);
+				}
+				buckets[type_key].push_back(consumed);
+			}
+		}
+	}
+
+	Dictionary ledger_groups;
+	for (const int type_key : bucket_order) {
+		const PackedFloat64Array &source = buckets[type_key];
+		const int64_t source_count = source.size();
+		PackedFloat64Array values;
+		values.resize(source_count);
+		double *values_ptr = values.ptrw();
+		for (int64_t k = 0; k < source_count; ++k) {
+			values_ptr[k] = source[k];
+		}
+		ledger_groups[type_key] = values;
+	}
+
+	Dictionary result;
+	result["energies"] = energies;
+	result["health"] = health;
+	result["flow_production"] = flow_production;
+	result["flow_self_cost"] = flow_self_cost;
+	result["ledger_groups"] = ledger_groups;
 	return result;
 }
 
@@ -354,6 +481,11 @@ void CellMetabolism::_bind_methods() {
 			"dt", "heterotrophic_intake_rate", "photosynthetic_intake_rate",
 			"chemotrophic_intake_rate", "movement_energy_cost", "facultative_aerobic_efficiency"),
 			&CellMetabolism::compute_environment_batch);
+	ClassDB::bind_method(D_METHOD("apply_environment_outcome", "energies", "food_gains",
+			"consume_cells", "consume_amounts", "alive", "types", "org_ids",
+			"movement_costs", "toxic_flags", "flow_production", "flow_self_cost",
+			"health", "toxicity_damage"),
+			&CellMetabolism::apply_environment_outcome);
 	ClassDB::bind_method(D_METHOD("compute_transfer_rates", "alive", "org_ids", "mode_ids",
 			"org_gene_mode", "org_has_modes", "org_mode_counts", "org_default_rates",
 			"org_mode_rates"), &CellMetabolism::compute_transfer_rates);

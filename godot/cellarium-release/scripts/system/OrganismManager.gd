@@ -96,6 +96,11 @@ var _native_org_default_division_mass: PackedFloat32Array = PackedFloat32Array()
 var _native_org_mode_rates: PackedFloat32Array = PackedFloat32Array()
 var _native_org_mode_thresholds: PackedFloat32Array = PackedFloat32Array()
 var _native_org_mode_link_limits: PackedInt32Array = PackedInt32Array()
+## v0.49.0：呼吸类型与营养优先级也并入同一份按世代失效的缓存。
+## 原先 metab_env 每 tick 重建这两张表（3000 个体实测 1232 µs），而这里已经
+## 每世代遍历一遍个体，顺手派生即可，metab_env 不再单独扫。
+var _native_org_respiration: PackedByteArray = PackedByteArray()
+var _native_org_priority: PackedFloat32Array = PackedFloat32Array()
 var _native_mode_dicts: Array[Dictionary] = []
 
 func _get_native_spatial() -> RefCounted:
@@ -157,6 +162,8 @@ func _rebuild_native_metabolism_cache() -> void:
 	_native_org_default_threshold.resize(org_count)
 	_native_org_default_rate.resize(org_count)
 	_native_org_default_division_mass.resize(org_count)
+	_native_org_respiration.resize(org_count)
+	_native_org_priority.resize(org_count)
 	var flat_count: int = org_count * stride
 	_native_org_mode_rates.resize(flat_count)
 	_native_org_mode_thresholds.resize(flat_count)
@@ -175,12 +182,17 @@ func _rebuild_native_metabolism_cache() -> void:
 		_native_org_default_threshold[org_id] = autonomous_division_energy
 		_native_org_default_rate[org_id] = 0.0
 		_native_org_default_division_mass[org_id] = 0.05
+		_native_org_respiration[org_id] = 0
+		_native_org_priority[org_id] = 0.5
 		if not genomes.has(org_id):
 			continue
 		var genome: RefCounted = genomes[org_id] as RefCounted
 		if genome == null:
 			continue
 		_native_org_genome_present[org_id] = 1
+		# v0.49.0：metab_env 需要的两张按个体表，顺手在这里派生。
+		_native_org_respiration[org_id] = genome.respiration
+		_native_org_priority[org_id] = clampf(genome.nutrition_priority, 0.0, 1.0)
 		var gene_mode: bool = bool(GENOME_SCRIPT.call("is_gene_mode", genome))
 		_native_org_gene_mode[org_id] = 1 if gene_mode else 0
 		var has_modes: bool = gene_mode and bool(GENOME_SCRIPT.call("has_modes", genome))
@@ -688,17 +700,20 @@ func _compute_base_metabolism_range(first: int, last: int, dt: float, _energies:
 func _apply_environment_metabolism(dt: float) -> void:
 	## v0.30.0：场采样已是扁平缓冲 + cell_index 索引，无需每细胞 PackedFloat32Array 快照，
 	## 也不再为该步开 WorkerThreadPool 任务；静态分区的代谢主循环仍在 _apply_base_metabolism。
+	perf_probe.call("begin", "metab_env_fetch")
 	var count: int = int(cells.call("size"))
 	var fields_flat: PackedFloat32Array = PackedFloat32Array()
 	var sample_indices: PackedInt32Array = PackedInt32Array()
 	if environment_manager != null:
 		fields_flat = environment_manager.call("get_field_samples_flat")
 		sample_indices = environment_manager.call("get_field_sample_index_array", count)
+	perf_probe.call("end", "metab_env_fetch")
 	_apply_environment_metabolism_ranges(dt, fields_flat, sample_indices)
 
 func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat32Array, sample_indices: PackedInt32Array) -> void:
 	if environment_manager == null or dt <= 0.0:
 		return
+	perf_probe.call("begin", "metab_env_arrays")
 	var energies: PackedFloat32Array = cells.get("cell_energy")
 	var alive: PackedByteArray = cells.get("cell_alive")
 	var org_ids: PackedInt32Array = cells.get("cell_org_id")
@@ -707,26 +722,37 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 	var positions_y: PackedFloat32Array = cells.get("cell_pos_y")
 	var org_alive_flags: PackedByteArray = organisms.get("org_alive")
 	var health: PackedFloat32Array = organisms.get("org_health")
-	var respiration_values: PackedByteArray = PackedByteArray()
-	respiration_values.resize(org_alive_flags.size())
-	## v0.16.0：营养优先级按个体派生，0.5 的系数恒为 1.0，旧基因组行为不变。
-	var priority_values: PackedFloat32Array = PackedFloat32Array()
-	priority_values.resize(org_alive_flags.size())
-	priority_values.fill(0.5)
-	# v0.44：typed 直接属性访问替代每个体两次 Variant 字符串 get（微探针 344→176 µs）。
-	for org_id in genomes:
-		var oi: int = int(org_id)
-		var genome: RefCounted = genomes[org_id] as RefCounted
-		respiration_values[oi] = genome.respiration
-		priority_values[oi] = clampf(genome.nutrition_priority, 0.0, 1.0)
+	perf_probe.call("end", "metab_env_arrays")
+	perf_probe.call("begin", "metab_env_prep")
+	# v0.49.0：按个体的呼吸类型 / 营养优先级来自按世代失效的原生缓存
+	# （_rebuild_native_metabolism_cache 已经每世代遍历一遍个体，顺手派生）。
+	# 原实现每 tick 重建这两张表，3000 个体实测 1232 µs，是 metab_env 的最大单项。
+	var native_metabolism: RefCounted = _native_metabolism_for_hotspots()
+	var respiration_values: PackedByteArray = _native_org_respiration
+	var priority_values: PackedFloat32Array = _native_org_priority
+	if native_metabolism == null:
+		## 无原生扩展时仍按原样每 tick 重建，作为等价参照实现。
+		respiration_values = PackedByteArray()
+		respiration_values.resize(org_alive_flags.size())
+		## v0.16.0：营养优先级按个体派生，0.5 的系数恒为 1.0，旧基因组行为不变。
+		priority_values = PackedFloat32Array()
+		priority_values.resize(org_alive_flags.size())
+		priority_values.fill(0.5)
+		# v0.44：typed 直接属性访问替代每个体两次 Variant 字符串 get（微探针 344→176 µs）。
+		for org_id in genomes:
+			var oi: int = int(org_id)
+			var genome: RefCounted = genomes[org_id] as RefCounted
+			respiration_values[oi] = genome.respiration
+			priority_values[oi] = clampf(genome.nutrition_priority, 0.0, 1.0)
 	# v0.44：能量流是诊断缓冲、不进 state hash；把 _energy_flow_add 的字典查找提到循环外，
 	# 每细胞直接写扁平 PackedFloat64Array（微探针 1099→329 µs）。长度由 _reset_energy_flow 保证。
 	var flow_production: PackedFloat64Array = _energy_flow.get("production", PackedFloat64Array())
 	var flow_self_cost: PackedFloat64Array = _energy_flow.get("self_cost", PackedFloat64Array())
-	var native_metabolism: RefCounted = _get_native_metabolism()
+	perf_probe.call("end", "metab_env_prep")
 	if native_metabolism != null:
 		# v0.33.0：纯计算段下沉 C++；副作用（consume / ledger / 死亡）顺序与 GDScript 原路径完全一致。
 		# 中间值用 PackedFloat64Array 保留 double，避免多一次 float32 舍入破坏 state hash。
+		perf_probe.call("begin", "metab_env_compute")
 		var batch: Dictionary = native_metabolism.call("compute_environment_batch",
 			alive, types, org_ids, field_samples, sample_indices,
 			respiration_values, priority_values, cells.get("behavior_intents"),
@@ -735,35 +761,42 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 		var food_gains: PackedFloat64Array = batch["food_gains"]
 		var movement_costs: PackedFloat64Array = batch["movement_costs"]
 		var toxic_flags: PackedByteArray = batch["toxic_flags"]
-		# v0.41.0：账本 entry 逐细胞 record() 是 metab_env 的 90% 开销（微探针 1.84ms/1142 细胞）。
-		# 按 intake_type 分组收集 consumed，循环结束后每组一次 record_batch；entries 内容与顺序不变。
-		var ledger_by_type: Dictionary = {}
-		for cell_index in range(energies.size()):
-			if alive[cell_index] == 0:
-				continue
-			var org_id: int = org_ids[cell_index]
-			var food_gain: float = float(food_gains[cell_index])
-			if food_gain > 0.0:
-				var consumed: float = food_gain
-				if types[cell_index] == CELL_TYPE_ZYGOTE:
-					consumed = float(environment_manager.call("consume_nutrient", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
-				elif types[cell_index] == CELL_TYPE_NITROCYTE:
-					consumed = float(environment_manager.call("consume_signal", Vector2(positions[cell_index], positions_y[cell_index]), food_gain))
-				energies[cell_index] += consumed
-				if consumed != 0.0:
-					flow_production[cell_index] += consumed
-				if consumed > 0.0:
-					var type_key: int = int(types[cell_index])
-					if not ledger_by_type.has(type_key):
-						ledger_by_type[type_key] = PackedFloat64Array()
-					(ledger_by_type[type_key] as PackedFloat64Array).append(consumed)
-			var movement_cost: float = float(movement_costs[cell_index])
-			energies[cell_index] = maxf(0.0, energies[cell_index] - movement_cost)
-			if movement_cost != 0.0:
-				flow_self_cost[cell_index] += movement_cost
-			if toxic_flags[cell_index] != 0:
-				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
-		_flush_ledger_groups(ledger_by_type)
+		perf_probe.call("end", "metab_env_compute")
+		perf_probe.call("begin", "metab_env_consume")
+		# v0.49.0：只有 ZYGOTE / NITROCYTE 需要真正 consume（结果取决于场内剩余量）。
+		# 候选表由 C++ 给出（升序），M1 全 PHOTOCYTE 时为空，省掉一次全细胞类型扫描。
+		var consume_cells: PackedInt32Array = batch.get("consume_cells", PackedInt32Array()) as PackedInt32Array
+		var consume_amounts: PackedFloat64Array = PackedFloat64Array()
+		consume_amounts.resize(consume_cells.size())
+		for order in range(consume_cells.size()):
+			var cell_index: int = consume_cells[order]
+			var request: float = float(food_gains[cell_index])
+			var position: Vector2 = Vector2(positions[cell_index], positions_y[cell_index])
+			if types[cell_index] == CELL_TYPE_ZYGOTE:
+				consume_amounts[order] = float(environment_manager.call("consume_nutrient", position, request))
+			else:
+				consume_amounts[order] = float(environment_manager.call("consume_signal", position, request))
+		perf_probe.call("end", "metab_env_consume")
+		perf_probe.call("begin", "metab_env_outcome")
+		# v0.49.0：逐细胞能量/能量流/健康更新 + 账本分组整段下沉 C++。原 GDScript 循环
+		# 每细胞 4 次 PackedArray 元素写入，且账本分组用
+		# `(dict[key] as PackedFloat64Array).append()` 会因 COW 退化成 O(n²)。
+		var outcome: Dictionary = native_metabolism.call("apply_environment_outcome",
+			energies, food_gains, consume_cells, consume_amounts,
+			alive, types, org_ids, movement_costs, toxic_flags,
+			flow_production, flow_self_cost, health,
+			anaerobic_toxicity_damage_per_second * dt)
+		energies = outcome["energies"] as PackedFloat32Array
+		health = outcome["health"] as PackedFloat32Array
+		# 能量流是诊断缓冲（不进 state hash）；C++ 返回新数组，必须写回字典。
+		flow_production = outcome["flow_production"] as PackedFloat64Array
+		flow_self_cost = outcome["flow_self_cost"] as PackedFloat64Array
+		_energy_flow["production"] = flow_production
+		_energy_flow["self_cost"] = flow_self_cost
+		perf_probe.call("end", "metab_env_outcome")
+		perf_probe.call("begin", "metab_env_ledger")
+		_flush_ledger_groups(outcome["ledger_groups"] as Dictionary)
+		perf_probe.call("end", "metab_env_ledger")
 	else:
 		var ledger_by_type: Dictionary = {}
 		for cell_index in range(energies.size()):
@@ -807,11 +840,13 @@ func _apply_environment_metabolism_ranges(dt: float, field_samples: PackedFloat3
 			if bool(respiration.get("toxic", false)):
 				health[org_id] = maxf(0.0, health[org_id] - anaerobic_toxicity_damage_per_second * dt)
 		_flush_ledger_groups(ledger_by_type)
+	perf_probe.call("begin", "metab_env_tail")
 	organisms.set("org_health", health)
 	cells.set("cell_energy", energies)
 	for org_id in range(health.size() - 1, -1, -1):
 		if org_alive_flags[org_id] != 0 and health[org_id] <= 0.0:
 			_remove_organism_cells(org_id, int(ORGANISM_STORE_SCRIPT.get_script_constant_map()["DEATH_TOXICITY"]))
+	perf_probe.call("end", "metab_env_tail")
 
 func _flush_ledger_groups(ledger_by_type: Dictionary) -> void:
 	## v0.41.0：按 intake_type 分组批量记账。每组一次 record_batch，entries 组内按 cell 升序。
@@ -1834,6 +1869,9 @@ func _set_gene_respiration(args: Dictionary) -> int:
 			continue
 		genome.set("respiration", respiration_type)
 		changed += 1
+	if changed > 0:
+		# v0.49.0：呼吸类型进了原生个体缓存，改完必须失效。
+		_invalidate_native_metabolism_cache()
 	return changed
 
 func _trait_name_to_index(trait_name: String) -> int:

@@ -41,11 +41,31 @@ public:
 			double movement_energy_cost,
 			double facultative_aerobic_efficiency);
 
+	// v0.49.0: 副作用段下沉。逐细胞能量/能量流/健康更新 + 账本按类型分组，
+	// 与 GDScript 原循环同序同精度（energies/health 是 float32，中间用 double 再舍入）。
+	// consumed 语义：food_gain > 0 时取 food_gain，再被 consume_cells/consume_amounts
+	// 的稀疏覆盖（升序，来自 consume_nutrient/consume_signal 的真实返回值）替换。
+	// 返回 "energies" / "health" / "flow_production" / "flow_self_cost" /
+	// "ledger_groups"（Dictionary，int type -> PackedFloat64Array，按首次出现序插入）。
+	Dictionary apply_environment_outcome(
+			const PackedFloat32Array &energies_in,
+			const PackedFloat64Array &food_gains,
+			const PackedInt32Array &consume_cells,
+			const PackedFloat64Array &consume_amounts,
+			const PackedByteArray &alive,
+			const PackedByteArray &types,
+			const PackedInt32Array &org_ids,
+			const PackedFloat64Array &movement_costs,
+			const PackedByteArray &toxic_flags,
+			const PackedFloat64Array &flow_production_in,
+			const PackedFloat64Array &flow_self_cost_in,
+			const PackedFloat32Array &health_in,
+			double toxicity_damage);
+
 	// v0.34.0: pure computation behind OrganismManager._build_transfer_rates.
 	// Per-organism caches are rebuilt once per tick by GDScript; C++ expands them
 	// per cell without calling GDScript Genome.get_mode() for every cell.
-	PackedFloat32Array compute_transfer_rates(
-			const PackedByteArray &alive,
+	PackedFloat32Array compute_transfer_rates(			const PackedByteArray &alive,
 			const PackedInt32Array &org_ids,
 			const PackedByteArray &mode_ids,
 			const PackedByteArray &org_gene_mode,
