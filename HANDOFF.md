@@ -1,13 +1,13 @@
 # 创生模拟器 · 会话交接文档
 
 > 面向**完全没有上下文的新对话**。读完本文件即可接手，不必翻历史聊天记录。
-> 本文件更新于 2026-11-28，最新版本标签 `v0.46.0`；工作区有**阶段 A 高倍速调度修复**、**阶段 B3 独立模拟线程（默认关闭）**、**v0.47.0 阶段 1 碰撞内核重构（未发布）**，见 §4.1–§4.3。
+> 本文件更新于 2026-11-28，最新版本标签 `v0.48.0`；工作区有**阶段 A 高倍速调度修复**、**阶段 B3 独立模拟线程（默认关闭）**，均已随 v0.47.0/v0.48.0 发布，见 §4.1–§4.4。
 
 ---
 
 ## 0. 一句话现状
 
-我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 阶段 1 把碰撞内核重构成 Cell Lab 式单轮软弹力，真实皿 1024 细胞整 tick 墙钟 8801→6869 µs（TPS 113.6→145.6），首次进入 ≤8 ms 预算**；碰撞段本身 1795→109.5 µs（16.4×），已从最大单项降到 1.6%。state hash 基线随之重建为 `114854044`。下一步压力在 metabolism（2541 µs，其中 `metab_fields` 1069.8）与 `metab_env`（1047.1），属阶段 2（热路径 AoS 化）。
+我们在 Godot 4.7.2 里复刻 Cell Lab 的人工生命沙盒，第一阶段玩法已基本对齐。**v0.47.0 把碰撞内核重构成 Cell Lab 式单轮软弹力**（真实皿 1024 细胞整 tick 墙钟 8801→6869 µs，碰撞段 1795→109.5 µs，16.4×），**v0.48.0 把场采样从「每 tick 两次 GPU 往返」改成「每 tick 一次整场回读 + 两次 C++ 本机查表」**（真实窗口同机背靠背 A/B：tick1 p50 27426→20587 µs，−24.9%；tick3 47742→34671，−27.4%）。state hash 基线 `114854044` 未变。下一步压力在 `metabolism`（约 2254 µs，其中 `metab_env` ~1010、`metab_base` ~215 全是纯 GDScript 逐细胞循环）与 `advance_field_tick` 里那一次 20 KB 整场回读。
 
 ---
 
@@ -52,9 +52,21 @@
 
 ## 3. 已经完成了什么
 
-### 最近三个版本（重点，都是真实窗口分段计时驱动，全部逐位闸门通过）
+### 最近版本（重点，都是真实窗口分段计时驱动，全部逐位闸门通过）
 
-**v0.46.0 — signal 分泌源批量写入（当前版本，纯 GDScript，DLL 未动）**
+**v0.48.0 — 整场回读一次 + C++ 批量查表（当前版本，阶段 2 主方案）**
+- 定位：一个 tick 里两次按细胞采样用的是同一份场状态（场扩散在 physics tick 之后才推进），旧路径却付了两次完整 GPU 往返，每次约 967 µs。
+- 改动：`CellSpatial.sample_fields_nearest()` 新增 C++ 最近格查表（**全程 float32**，逐位复刻 shader；GDScript 的 double 乘法在 resolution 非 2 的幂时会分叉）；`_read_active_buffer()` 改 `to_float32_array()` + `slice()` 并同时产出 `_field_flat_mirror`；`sample_cells_flat()` 三级路由（镜像查表 / CPU 回退 / GPU dispatch）；`eager_mirror_readback` 把回读放在 `diffuse_tick` 的 sync 之后（比延迟到下次采样便宜 5.2×）。
+- A/B（同机背靠背，off/lazy/eager 三跑）：tick1 p50 27426 / 22341 / **20587**；tick3 47742 / 38938 / **34671**；`setup_dispatch` 9823.9 / 8190.2 / **112.1**；`metab_fields` 2060.2 / 245.3 / **239.6**。基线噪声带 4.4%。
+- 新闸门：`tools/FieldMirrorParityProbe.gd`（10000 值逐位对照镜像查表 vs GPU dispatch，0 差异）。
+- **口径**：本轮绝对数值比 v0.47 日志高约 4 倍（测量期间机器有无关后台进程抢 GPU），只承认同会话相对比较。
+
+**v0.47.0 — 碰撞内核重构为 Cell Lab 式单轮软弹力（已 tag + push）**
+- 定位：碰撞成本真凶是**网格尺寸**不是迭代次数。旧路径 `cell_size` 写死 64.0 而典型细胞直径仅 14 → 每桶挤约 20 个细胞、9 桶扫 180 候选只有约 6 个真邻居（30× 无效扫描）；单这一项 2.5×，叠加迭代与 pairs 物化才有 16–56×。
+- 改动：`resolve_collisions_soft()` 单次网格遍历、不迭代、不物化 pairs、先比距离平方再开方、每对只推开 `穿透×0.5×stiffness×softness`；`cell_size <= 0` 由内核按存活细胞最大半径倍率自动推导（9 格邻域不漏对的下界）。
+- A/B：`phys_collision` 1795.1→109.5 µs（16.4×）、整 tick 8800.6→6869.0 µs（TPS 113.6→145.6）。手感：最坏重叠 8.44→4.62（更小）、平均 0.437→0.679（contact 14 的 1.7%）。state hash 基线重建为 `114854044`。
+
+**v0.46.0 — signal 分泌源批量写入（纯 GDScript，DLL 未动）**
 - 定位：signal 段加 `sig_collect`/`sig_add` 埋点，834 µs 中 sig_add 占 795（95%，524 源）。真凶是每源三次跨对象动态 `call()` + Vector2 分配 + 双层字典写入，与 C++ 采集（32 µs）无关。
 - 改动：`EnvironmentField.add_signal_sources_batch()` 把 N 次 call 合成 1 次（同脚本内静态调 `get_grid_position` + 内联 `add_source`），indices 升序 / float32 位置 / 累加顺序不变。
 - A/B：sig_add 795→516/535 µs（-33%）、signal 834→559/577 µs（-31%）。SHA 不变 `BFCF3222…00D7`。
@@ -72,11 +84,13 @@
 **更早里程碑**：v0.43 dev 只读数组外提（p50 3285→71 µs）；v0.42 场采样准备下沉（setup_positions 559→150、GPU post 678→279、metab_fields 2243→1022 µs）；v0.41 账本批量化（metab_env 5.27→2.56 ms）；v0.40 三角展开下沉 C++（渲染缓存 32.8→8.7 ms）；v0.39 GPU 合批（draw call 4231→259 但帧时不变）；v0.38 皿外方点修复；v0.37 原生默认开启（此前优化从未生效！native=false 6.2 TPS vs true 54–62 TPS）；v0.36 `collect_inputs_grid` 融合；v0.33 C++ 源码/DLL 入库；v0.29 分裂对齐；v0.25–v0.28 预览真实内核/膜弦/时间轴。
 
 ### 闸门现状（接手后任何改动都要重跑）
-- `SmokeTest: SCRIPTS=71 FAILURES=0`（工作区 + D 盘双工程，新增脚本必须登记 manifest）。
-- `NativeParityProbe: OK failures=0`，m1_photo tick=1 `872470415` / tick=700 `3284848376`，与 v0.44 起逐位相同。
-- 原型工程 `spatial_parity_probe.gd`：`SPATIAL_PARITY OK (total_failures=0)`（邻域 CSR 657380、collect_inputs 12000、碰撞 73620 次修正全等）。
+- `SmokeTest: SCRIPTS=95 FAILURES=0`（工作区 + D 盘双工程，新增脚本必须登记 manifest）。
+- `NativeParityProbe: NATIVE_E2E: OK (failures=0)`。
+- `WorkerEngineProbe`（场景，非 `--script`）：`PROBE_SEQ hash=114854044` / `PROBE_WORKER hash=114854044` / `match=true`。
+- `FieldMirrorParityProbe`（**需 Vulkan 窗口**）：`FIELD_MIRROR_PARITY values=10000 failures=0`。
+- `GpuSamplingTest`（**需 Vulkan 窗口**）：`GPU_SAMPLING PASS`，headless 打印 SKIP。
 - 真实 GPU 窗口 `WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（逐轮通过）。
-- 生产 DLL SHA-256 `BFCF32227328E74120F93D4E42CF8775D3D1E7A72AEA50AC7E5E1722FB4E00D7`（v0.46 未改 DLL，沿用 v0.45）。
+- 生产 DLL SHA-256 `BABAD798A40BDB313A29D33B72315BD8DD00898B9FDFF9F68DF434A18FB04E59`（v0.48.0）。
 
 ---
 
@@ -112,7 +126,7 @@ v0.45 同会话两轮裸 tick **7.48 / 7.29 ms**（余量 0.5–0.7 ms），v0.4
 - 权威模拟进入 worker：`scripts/system/WorkerSimEngine.gd` + `SimSnapshot.gd` 扩展；主线程通过 `Main.start_threaded_simulation()` 建立隔离 CPU 场世界、native 主线程预热、worker 连续跑完整 tick，每帧把渲染所需 SoA 写回主场景 `CellArray`，现有渲染器零改动。
 - 调度：`TickCore.worker_target_mode` 发布 `target_tick`，不再走主线程每帧 12 tick；旧同步路径与 12 tick 上限保留。`Main.threaded_simulation_enabled` 默认 false；`HighSpeedPerfBenchmark --worker=1` 可启用 A/B。
 - 修复：`SaveManager.capture()` 深拷 `field._pending_sources`，否则 64×64 场 restore 后残留 32×32 源缓冲导致信号写入越界；`WorkerSimEngine.repair_field_after_restore()` 兜底重建场缓冲。
-- hash 基线：worker 路径采用 CPU 权威场，黄金值重建；`tools/WorkerEngineProbe.tscn` 512 细胞 / 32 场 / native / 30 tick，主线程顺序执行与 worker 同为 `4234109495`，快照首细胞坐标一致。旧主线程 GPU 场基线 `3284848376` 继续用于 legacy 路径。
+- hash 基线：worker 路径采用 CPU 权威场，黄金值重建；`tools/WorkerEngineProbe.tscn` 512 细胞 / 32 场 / native / 30 tick，主线程顺序执行与 worker 同为 `4234109495`，快照首细胞坐标一致。旧主线程 GPU 场基线 `3284848376` 继续用于 legacy 路径。**v0.47.0 起这两个值都已作废**：碰撞软弹力重建后 worker 基线为 `114854044`（v0.48.0 仍为 `114854044`）。
 - **⚠️ 2026-11-28 重大纠正**：B3 初版宣称的「512 worker 32× 有效 32.09–32.24× / 连续 5 秒 32.02×」**全部作废**。根因是 `HighSpeedPerfBenchmark` 用 `_process(delta)` 累加墙钟，delta 被 vsync/max_fps 钳在 16.7ms，60 帧只累计 1.0s，而外部 Stopwatch 实测进程真实运行 32.2s。基准已改用 OS 单调钟为墙钟。
 - 修正墙钟后同会话真实 A/B（32× 档，60 帧）：**512** 旧 0.36×（720 tick/33.2s）→ worker **1.21×**（1910 tick/26.3s，85.3 tick/s）；**1024** 旧 0.86× → worker 0.83×（无提升）。worker 相对旧路径在 512 约 3.4× 提升，但两条路径都远未达 32×。**阶段 B3「突破 12×」目标未达成。**
 - 权威单 tick 成本（worker 世界 PerfProbe）：512 total 6.24ms（metabolism 3.45、physics 1.86、metab_fields 1.33、collision 1.62），1024 total 12.10ms（metabolism 6.38、physics 3.98）。各段近线性 2×，无单一病理热点；单 worker 理论上限 161/82 tick/s 与实测 85/60 自洽。
@@ -142,21 +156,53 @@ v0.45 同会话两轮裸 tick **7.48 / 7.29 ms**（余量 0.5–0.7 ms），v0.4
 
 闸门：双工程 SmokeTest `SCRIPTS=84 FAILURES=0`、NativeParityProbe `OK (failures=0)`、WorkerEngineProbe `PROBE_VERDICT OK`（**新 hash 基线 `114854044`**，旧 `4234109495` 作废）、BenchTest `FAILURES=0`。探针：`tools/CollisionSoftProbe.gd`（合成等密度 + cell_size 扫描）、`tools/CollisionRealProbe.gd`（真实皿完整 tick 链）。
 
+### 4.4 v0.48.0 阶段 2：整场回读一次 + C++ 批量查表（已实施）
+
+**关键事实**：一个 tick 里两次按细胞采样（behavior 前 / metabolism 前）用的是**同一份场状态**。`advance_field_tick` 在整个 `advance_physics_tick` 之后才推进，两次采样之间只有细胞位置在变，场值不变。旧路径却为这同一份场付了两次 `submit()+sync()`。
+
+- `CellSpatial.sample_fields_nearest(field_flat, positions, resolution, center, radius)`：C++ 最近格查表，**全程 float32**。这一点不能省 —— GDScript 的 `float` 是 double，`normalized.x * resolution` 在 GDScript 里会被提升成 double 乘法；resolution 为 32/64 时因为乘 2 的幂恰好不出错，换成非 2 的幂就会与 shader 分叉。内核不做皿内判定（与 shader 一致，越界按最近格 clamp）。
+- `EnvironmentField._read_active_buffer()` 改 `to_float32_array()` + 5 次 `slice()`，同时产出 `_field_flat_mirror`（扁平 5R²，零拷贝交给 C++）与 5 个通道数组。
+- `sample_cells_flat()` 三级路由：native 内核可用且镜像新鲜 → 镜像查表；否则同步镜像后走 CPU 回退；再否则旧 GPU dispatch。native 缺失时行为等同 v0.47。
+- **`eager_mirror_readback = true`（默认）**：回读放在 `diffuse_tick` 的 sync 之后立刻做。同一份 20 KB 回读，紧跟 sync 约 1.3–1.6 ms，拖到下一个 physics tick 开头（渲染队列已堆积）会涨到 8.5 ms —— **5.2×** 差距，这是 lazy/eager 两档的唯一区别。
+- 镜像失效点：`_upload_active_buffer()`、`diffuse_tick` 的 buffer 翻转、`_flush_pending_deltas()`。`sample()` 也优先读镜像，让 `consume()` 不再触发单元素 dispatch。
+
+真实窗口三档 A/B（同机背靠背，环境变量 `WINDOW_BENCH_MIRROR=off|lazy|eager`）：
+
+| µs/tick | off | lazy | eager |
+| --- | ---: | ---: | ---: |
+| tick1 p50 | 27426 | 22341 | **20587** |
+| tick3 p50 | 47742 | 38938 | **34671** |
+| `setup_dispatch` | 9823.9 | 8190.2 | **112.1** |
+| `metab_fields` | 2060.2 | 245.3 | **239.6** |
+| `PART physics` | 17436.6 | 13785.2 | **5321.9** |
+| `PART field` | 1196.6 | 1329.2 | 7878.9 |
+
+**口径**：本轮绝对值比 v0.47 日志（tick1 p50 6282）高约 4 倍，因为测量期间机器上有无关后台进程抢 GPU（同一张 RTX 3050 Laptop）。只承认同会话相对比较；基线噪声带 4.4%（off vs off2）。
+
+闸门：双工程 SmokeTest `SCRIPTS=95 FAILURES=0`、NativeParityProbe `OK`、WorkerEngineProbe hash `114854044` 不变、`FieldMirrorParityProbe values=10000 failures=0`、`GpuSamplingTest PASS`、`WINDOW_BENCH_FLAT_PARITY 5125/0`。新探针 `tools/FieldMirrorParityProbe.gd` 已登记 manifest。
+
 ---
 
-## 5. 下一步计划（v0.47 之后）
+## 5. 下一步计划（v0.48 之后）
 
-碰撞已不再是瓶颈（109.5 µs / 1.6%）。按 `analysis/架构诊断与重构路线.md` 的排序继续：
+碰撞已不是瓶颈（109.5 µs / 1.6%），场采样 GPU 往返已减半。剩余大头按 `analysis/架构诊断与重构路线.md`：
 
-1. **阶段 2：热路径 AoS 化**（当前最高 ROI）。真实皿 1024 细胞剩余大头：`metabolism` 2541 µs（`metab_fields` 1069.8 + `metab_env` 1047.1 + `metab_base` 234.3）、`behavior` 990 µs（`beh_collect` 416.9 + `beh_eval` 312.3）、`signal` 457.6。`metab_fields` 与 `metab_env` 都是逐细胞 SoA + 动态字典访问，是 AoS 化的直接目标。**注意 `beh_apply` 的 `Vector2.rotated` 已两次验证不可下沉 C++（1 ULP 差异）**。
-2. **阶段 3：调度层降频 + 工作量硬上限**（低成本）：神经/行为按固定间隔更新（现有 `should_update_neural` 只在 ≥8× 生效）；每细胞接触数硬上限。
-3. **阶段 4：GPU 主体化**（长期）：collision 的 Gauss-Seidel 依赖已被阶段 1 消除，GPU 化前提已具备；behavior（8→4→6 网络）+ `collect_inputs_grid`（整数邻域计数可保位）可搬 compute。
-4. **高倍速真实体感**：worker 单 tick 成本降下来后（v0.47 后 512 细胞约 2.75 ms），B3 的 32× 才有实际可能；先用 OS 单调钟口径重测，不要用 delta。
-5. **玩法完成度收尾**：与 v1.1 合并稿逐条对照，列出剩余缺口。
+1. **`advance_field_tick` 里的那一次 20 KB 整场回读**（`PART field` avg 7878.9 / p50 3480）。它是每 tick 最大的单项 GPU 等待。要再降只有两条路：把场整体移出主 tick 关键路径（阶段 4 GPU 主体化 / 阶段 B 独立模拟线程），或减少回读频率（场按固定间隔推进，但会改语义）。
+2. **`metabolism`（约 2254 µs）**：`metab_env` ~1010、`metab_base` ~215，全是纯 GDScript 逐细胞循环。v0.41/v0.44/v0.45 已把字典与边界检查逐项拆掉，剩下的是真正的逐细胞算术，只能下沉 C++ 或 AoS 化。**注意 `beh_apply` 的 `Vector2.rotated` 已两次验证不可下沉 C++（1 ULP 差异）**。
+3. **`behavior`（约 1362 µs）**：`beh_collect` ~390 + `beh_eval` ~300。
+4. **阶段 3：调度层降频 + 工作量硬上限**（低成本）：神经/行为按固定间隔更新；每细胞接触数硬上限。
+5. **阶段 4：GPU 主体化**（长期）：collision 的 Gauss-Seidel 依赖已被阶段 1 消除；behavior（8→4→6 网络）+ `collect_inputs_grid`（整数邻域计数可保位）可搬 compute。
+6. **高倍速真实体感**：worker 单 tick 成本降下来后 B3 的 32× 才有实际可能；先用 OS 单调钟口径重测，不要用 delta。
+7. **玩法完成度收尾**：与 v1.1 合并稿逐条对照，列出剩余缺口。
 
-**任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + 原型 spatial parity + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
+**任何改动的固定流程**：分段计时定位 → 同会话 A/B → 双工程 SmokeTest + NativeParityProbe + WorkerEngineProbe + FieldMirrorParityProbe + 真实窗口 flat parity → 如实记录 `cpu_budget_met` → CHANGELOG / 分析文档 / 技术设计文档 / 项目记忆同步 → 提交 + tag + push。
 
-**不要重做已完成的事**：GPU 合批、consume、账本、场采样、碰撞内核、behavior 裸指针、signal 批量都已做；原生默认已开启。别再回头猜这些。
+**测量纪律（本轮新增，务必遵守）**：
+- 跑真实窗口基准前先确认没有残留 Godot 进程（`Get-Process | Where ProcessName -like "Godot*"`）。一个残留进程就能让 `dispatch+sync` 从 567 µs 涨到 4787 µs。
+- 同会话背靠背跑 `off` 两遍界定噪声带，再跑目标变体；只承认超出噪声带的差值。
+- 基准跑完进程不会退出（`_report()` 之后游戏继续跑），看到 `WINDOW_BENCH_FILE` 就手动 `Stop-Process`。
+
+**不要重做已完成的事**：GPU 合批、consume、账本、场采样、碰撞内核、behavior 裸指针、signal 批量、整场镜像查表都已做；原生默认已开启。别再回头猜这些。
 
 ---
 

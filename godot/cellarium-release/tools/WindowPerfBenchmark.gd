@@ -92,8 +92,29 @@ func _setup() -> void:
 		str(_manager.get("native_spatial_enabled")),
 		str(ClassDB.class_exists("CellRenderCache")),
 	])
+	_apply_mirror_mode()
 	_verify_flat_parity()
 	_setup_done = true
+
+## v0.48：同会话 A/B 开关，用环境变量选场采样路径：
+##   WINDOW_BENCH_MIRROR=off    走 v0.47 的两次 GPU dispatch 采样（基线）
+##   WINDOW_BENCH_MIRROR=lazy   整场镜像 + 首次采样时回读
+##   WINDOW_BENCH_MIRROR=eager  整场镜像 + diffuse sync 后立刻回读（默认）
+## 三种模式场数值完全相同，只影响回读落在哪个时间窗口。
+func _apply_mirror_mode() -> void:
+	var mode: String = OS.get_environment("WINDOW_BENCH_MIRROR").strip_edges().to_lower()
+	if mode.is_empty():
+		mode = "eager"
+	var field_ref: RefCounted = _environment.get("field") as RefCounted
+	if field_ref != null:
+		if mode == "off":
+			# 纯 v0.47 基线：既不用 native 查表，也不做整场回读。
+			field_ref.set("prefer_native_sampler", false)
+			field_ref.set("eager_mirror_readback", false)
+		else:
+			field_ref.set("prefer_native_sampler", true)
+			field_ref.set("eager_mirror_readback", mode != "lazy")
+	print("WINDOW_BENCH_MODE mirror=%s" % mode)
 
 ## v0.42：真实 GPU 窗口内，专用 flat 路径与旧 sample_cells()+复制路径的逐位对照。
 ## 只在 setup 阶段执行一次，不进入任何测量相位。
@@ -270,6 +291,14 @@ func _report() -> void:
 		]
 		print(fline)
 		lines.append(fline)
+		# v0.48：整场镜像查表分段（整场回读 vs 本机查表），用于确认「每 tick 一次回读」。
+		var mline: String = "WINDOW_BENCH_MIRROR readbacks=%d readback=%.1fus lookups=%d lookup=%.1fus cells=%d fresh=%s" % [
+			int(fd.get("mirror_readback_count", 0)), float(fd.get("mirror_readback_usec", 0.0)),
+			int(fd.get("mirror_lookup_count", 0)), float(fd.get("mirror_lookup_usec", 0.0)),
+			int(fd.get("mirror_lookup_cells", 0)), str(fd.get("mirror_fresh", false)),
+		]
+		print(mline)
+		lines.append(mline)
 	# v0.46：signal 分泌源数量（解释 sig_add 开销），只读诊断。
 	var srcline: String = "WINDOW_BENCH_SIGSRC count=%d" % int(_manager.get("diag_signal_source_count"))
 	print(srcline)

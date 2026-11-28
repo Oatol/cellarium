@@ -4,6 +4,112 @@
 
 ---
 
+## v0.48.0 — 阶段 2 主方案：整场回读一次 + C++ 批量查表（2026-11-28）
+
+**类型**：架构级热路径重构（场采样 GPU 往返减半）。state hash 基线不变，手感不变。
+
+### 问题
+
+一个 tick 里两次按细胞采样（`tick_setup` 的 behavior 前、`metabolism` 的 physics 后）用的是**同一份场状态** —— 场扩散 `advance_field_tick` 在整个 `advance_physics_tick` 之后才推进，两次采样之间只有细胞位置在变，场值不变。旧路径却为此付了两次完整的 GPU 往返：每次 `upload 46.2 + dispatch+sync 567.4 + readback 350.9 + post 2.9 ≈ 967 µs`，合计约 1.9 ms/tick。
+
+### 方案
+
+每 tick 只把整场 5×R² 个 float（32×32×5 = 20480 字节，与一次按细胞采样回读的 20500 字节同量级）**整块回读一次**，两次采样都改在本机按最近格查表。GPU 往返从 2 次降到 1 次。
+
+### 实现
+
+- **`native/src/cell_spatial.cpp` 新增 `CellSpatial.sample_fields_nearest(field_flat, positions, resolution, center, radius)`**：输入扁平 5R² 通道优先场（与 GPU storage buffer 同序）与 N×2 扁平坐标，返回 N×5 扁平样本。
+  - **全程 float32**，逐位复刻 `SAMPLE_SOURCE`：`(position - (center - radius)) / (2*radius)` → `× resolution` → `floor` → `clamp(0, R-1)`。这一步是必须的：GDScript 的 `float` 是 double，`normalized.x * resolution` 在 GDScript 里会被提升成 double 乘法，resolution 为 32/64 时因为乘 2 的幂恰好不出错，换成非 2 的幂就会与 shader 分叉。内核统一用 `float`，与 shader 同精度同序。
+  - **不做皿内判定**（与 shader 一致，越界按最近格 clamp）。皿内判定只存在于 CPU 后端回退路径 `_sample_cells_flat_cpu`，这是既有差异，本轮不动。
+- **`EnvironmentField._read_active_buffer()`**：整场回读改 `bytes.to_float32_array()` + 5 次 `slice()`，替掉 5120 次 `decode_float` 的逐元素 GDScript 调用。回读结果同时成为 `_field_flat_mirror`（扁平 5R²，可直接零拷贝交给 C++）与 5 个通道数组的来源。回读长度异常时仍退回逐元素解码并禁用镜像查表。
+- **`EnvironmentField.sample_cells_flat()`** 三级路由：native 内核可用且镜像新鲜 → 镜像查表；否则同步镜像后走 CPU 回退（>4096 细胞或 sample pipeline 失效）；再否则走旧的 GPU dispatch。native 缺失时行为与 v0.47 完全一致。
+- **`eager_mirror_readback = true`**：整场回读放在 `diffuse_tick` 的 `submit()+sync()` **之后**立刻做，而不是延迟到首次采样。同一份 20 KB 回读，紧跟 sync 时约 1.3–1.6 ms，拖到下一个 physics tick 开头（渲染队列已堆积）会涨到 8.5 ms —— 实测 5.2× 差距。
+- **镜像失效点**：`_upload_active_buffer()`（set_value / fill_channel / set_channel_values / paint_terrain）、`diffuse_tick` 的 buffer 翻转、`_flush_pending_deltas()`。
+- **`EnvironmentField.sample()`** 优先读镜像，让 `consume()` 的兼容路径不再触发单元素 dispatch（`consume` 只排队 delta、不回写镜像，与 GPU 语义一致：同一 tick 内重复 consume 仍看到原值）。
+
+### 新增闸门
+
+- **`tools/FieldMirrorParityProbe.gd`**（已登记进 SmokeTest 清单，95 个脚本）：2000 个位置 × 5 通道 = 10000 值，覆盖皿内随机点、格边界整数倍点、皿外点，比对「镜像查表」与「GPU dispatch」是否**逐位相等**。Vulkan 窗口下 `values=10000 failures=0`。
+- **`GpuSamplingTest`** 断言语义更新：旧断言是「每 tick 零次整场回读」（阶段 10 的设计），新设计是「每 tick 至多一次整场回读、且按细胞采样不再产生任何回读」。同时新增「连续两次采样必须复用同一份镜像」。
+- **`WindowPerfBenchmark`** 新增 `WINDOW_BENCH_MODE`（环境变量 `WINDOW_BENCH_MIRROR=off|lazy|eager`）与 `WINDOW_BENCH_MIRROR` 分段输出，用于同会话三方 A/B。
+
+### 真实窗口 A/B（Vulkan，1025 细胞，同机背靠背三次）
+
+| 指标（µs/tick） | off（v0.47 基线） | lazy | **eager（采用）** |
+| --- | ---: | ---: | ---: |
+| tick1 work p50 | 27426 | 22341 | **20587** |
+| tick3 work p50 | 47742 | 38938 | **34671** |
+| `tick_setup` | 10028.2 | 8409.7 | **321.6** |
+| `setup_dispatch`（采样 #1） | 9823.9 | 8190.2 | **112.1** |
+| `metab_fields`（采样 #2） | 2060.2 | 245.3 | **239.6** |
+| `metabolism` 阶段 | 4080.3 | 2179.0 | 2254.3 |
+| `PART field` | 1196.6 | 1329.2 | 7878.9（回读搬到这里） |
+| `PART physics` | 17436.6 | 13785.2 | **5321.9** |
+| `ENVIDIAG field_sample`（每次采样） | 6225.4 | 4377.0 | **87.9** |
+
+eager 相对 off：**tick1 p50 −24.9%、tick3 p50 −27.4%**。基线噪声带由 `off` 与 `off2` 两次同模式运行界定（tick1 p50 28674 vs 27426，差 4.4%；tick3 49829 vs 47742，差 4.4%），收益远在噪声之外。
+
+**口径声明**：本轮绝对数值比 v0.47 日志（tick1 p50 6282）高约 4 倍，原因是本次测量期间机器上有无关的后台进程占用 GPU（Vulkan 设备同为 RTX 3050 Laptop）。因此**只承认同会话背靠背的相对比较，不承认绝对数值可与 v0.47 日志对比**。`dispatch+sync` 在 off 模式下从 v0.47 的 422–567 µs 涨到 4787 µs，就是这个原因。
+
+### 闸门
+
+双工程 SmokeTest `SCRIPTS=95 FAILURES=0`；NativeParityProbe `NATIVE_E2E: OK (failures=0)`；WorkerEngineProbe `PROBE_SEQ hash=114854044` / `PROBE_WORKER hash=114854044` / `match=true`（与 v0.47 基线一致）；`GpuSamplingTest` PASS（`sample_error=5.96e-8`、`state_error=6.10e-5`）；`FieldMirrorParityProbe values=10000 failures=0`；`WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`。
+
+### 入库 DLL
+
+`native/` 与构建工作区同步后重编译，SHA-256 `BABAD798A40BDB313A29D33B72315BD8DD00898B9FDFF9F68DF434A18FB04E59`（v0.47.0 为 `9219D0F0BDDB5E6DA2BF612071A613E178D3ECAFE733B02537230140FA4139B0`）。
+
+### 仍然剩下的
+
+- `PART field` 里的一次整场回读（`buffer_get_data` 20 KB）仍是每 tick 最大的单项 GPU 等待，`avg 7878.9 / p50 3480`（均值被 20 ms 级离群值拉高）。要再降只能把场整体移出主 tick 的关键路径（阶段 4 GPU 主体化，或阶段 B 独立模拟线程）。
+- `metabolism 2254` 里 `metab_env ~1010` 与 `metab_base ~215` 仍全是纯 GDScript 逐细胞循环。
+
+---
+
+## 未发布 — 阶段 2 第一轮：真实窗口定位 + 采样序列化去逐元素化（2026-11-28）
+
+> 本轮的改动已随 v0.48.0 一并发布，未单独打 tag。保留此节以记录定位过程与「端到端无提速」的实测结论。
+
+**类型**：诊断 + 低风险热路径优化。未打 tag。
+
+### 真实窗口基准（`WindowPerfBenchmark`，Vulkan，1025 细胞，v0.47.0 碰撞已生效）
+
+| 相位 | work p50 | 对比 v0.42 |
+| --- | ---: | --- |
+| tick1 | **6282.0 µs** | v0.42 为 15.4–16.7 ms |
+| tick3 | 16557.0 µs | v0.42 为 45.5–48.8 ms |
+| cache | 8324.0 µs | — |
+
+tick1 链内分段：`advance_physics_tick` 5735.5 µs（PerfProbe total 4342.6：metabolism 2566.2 / behavior 948.2 / signal 417.2 / physics 299.1 / predation 111.9，外加 `tick_setup` 1471.9）+ `advance_field_tick` 684.2 µs。
+
+**关键发现：场采样是真实窗口的最大单项。** 每 tick 采样两次（behavior 前、physics 后），每次 GPU 往返 `dispatch+sync 422.2 + readback 284.9 + post 181.7 + upload 54.6 = 943.4 µs`，合计约 **2.4 ms，占 tick 37.5%**，超过 metab_env（1043）与 behavior（945）。此前判断的"metabolism 是主项"只在 headless CPU 场口径下成立。
+
+### 本轮改动（零语义变更）
+
+- `EnvironmentField._sample_cells_flat_gpu()`：上传改 `PackedFloat32Array.to_byte_array()`、回读改 `PackedByteArray.to_float32_array()`，替掉 1024 次 `encode_float` 与 5120 次 `decode_float` 的逐元素 GDScript 序列化。回读长度异常时仍退回逐元素解码。
+- `EnvironmentField._sample_cells_flat_cpu()`：`channels.size()` 提到循环外，5 个通道数组绑局部变量，替掉每细胞 5 次 `channels[ch][idx]` 的两层 Variant 装箱。
+- `EnvironmentManager._sample_index_by_cell`：改为惰性构建（`_sample_index_stale`）。热路径只消费扁平数组 + `get_field_sample_index_array()`（v0.45 起已不读该字典），唯一消费者是兼容接口 `sample_fields_for_cell()`。
+
+### 实测（同机两次真实窗口运行，非严格同会话 A/B）
+
+| 计数器 | 改前 | 改后 |
+| --- | ---: | ---: |
+| `GPUDIAG post`（逐细胞解码） | 181.7 µs | **2.9 µs** |
+| `GPUDIAG upload` | 54.6 µs | 46.2 µs |
+| `ENVIDIAG index_map` | 100.8 µs | **0.2 µs** |
+| `metabolism` 阶段 | 2566.2 µs | 2258.2 µs |
+| `tick1` p50 | 6282.0 µs | 6302.0 µs |
+
+逐元素序列化与索引建表确实消失（各自计数器为准，-357 µs 与 -201 µs / tick），但端到端 tick 未见变化：`dispatch` 422→567、`readback` 285→351 的 GPU 往返波动（±35%）把收益吃掉了。**不得表述为端到端提速。**
+
+闸门：双工程 SmokeTest `SCRIPTS=94 FAILURES=0`、NativeParityProbe `OK`、`WINDOW_BENCH_FLAT_PARITY values=5125 failures=0`（GPU 采样逐位一致）。
+
+### 阶段 2 决定
+
+真实窗口下最大单项是**场采样的两次 GPU 往返（约 1.84 ms/tick，dispatch+sync 与 readback 合计）**，不是 metabolism。下一步改为「整场回读一次 + C++ 批量查表」：把 32×32（或 64×64）×5 通道一次读回 CPU，两次采样都用 C++ 内核按同一 nearest 索引查表，消除两次 `submit()+sync()`。CPU 回退路径与 shader 的数值一致性已由 `WINDOW_BENCH_FLAT_PARITY` 证明（5125 值 0 差异），所以查表可做到逐位一致。
+
+---
+
 ## 未发布 — v0.47.0 阶段 1：碰撞内核重构为 Cell Lab 式单轮软弹力（2026-11-28）
 
 **类型**：架构级热路径重构 + 手感变更（state hash 基线重建）。未打 tag、未 push。

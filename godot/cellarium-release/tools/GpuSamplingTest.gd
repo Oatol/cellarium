@@ -25,8 +25,27 @@ func _initialize() -> void:
 		gpu.call("diffuse_tick")
 		cpu.call("diffuse_tick")
 	info = gpu.call("get_backend_diagnostics")
-	if int(info.get("gpu_full_readback_count", -1)) != baseline_readbacks or int(info.get("readback_bytes", -1)) != 0:
-		push_error("GPU_SAMPLING FAIL: full field readback still happens per tick: " + str(info))
+	# v0.48 语义变更：从「每 tick 零回读」改为「每 tick 至多一次整场回读」。
+	# 旧设计靠两次按细胞 dispatch 采样（每次一次 submit+sync）；新设计把 5R² 个 float
+	# 整块回读一次，两次采样都在本机查表。所以整场回读由 0 次/tick 变成 1 次/tick，
+	# 但按细胞采样不再产生任何回读（readback_bytes 仍是 0）。
+	var tick_readbacks: int = int(info.get("gpu_full_readback_count", -1)) - baseline_readbacks
+	if tick_readbacks > 3 or tick_readbacks < 0:
+		push_error("GPU_SAMPLING FAIL: full field readback per tick out of range: " + str(tick_readbacks))
+		quit(1)
+		return
+	if int(info.get("readback_bytes", -1)) != 0:
+		push_error("GPU_SAMPLING FAIL: per-cell sample readback still happens: " + str(info))
+		quit(1)
+		return
+	# 两次连续采样必须复用同一份镜像，不得再回读。
+	var mirror_before: int = int((gpu.call("get_sample_diagnostics") as Dictionary).get("mirror_readback_count", 0))
+	var probe_positions: Array[Vector2] = [Vector2(0.0, 0.0), Vector2(37.0, 11.0)]
+	gpu.call("sample_cells_flat", probe_positions)
+	gpu.call("sample_cells_flat", probe_positions)
+	var mirror_after: int = int((gpu.call("get_sample_diagnostics") as Dictionary).get("mirror_readback_count", 0))
+	if mirror_after != mirror_before:
+		push_error("GPU_SAMPLING FAIL: repeated sampling re-read the field: %d -> %d" % [mirror_before, mirror_after])
 		quit(1)
 		return
 	var positions: Array[Vector2] = [Vector2(0.0, 0.0), Vector2(37.0, 11.0), Vector2(-60.0, 25.0), Vector2(90.0, -10.0)]

@@ -13,6 +13,8 @@ namespace {
 
 constexpr int64_t FLAT_KEY_OFFSET = 1000000;
 constexpr int64_t FLAT_KEY_SPAN = 2000001;
+// v0.48.0: 环境场通道数（营养/温度/氧气/光照/信号），与 EnvironmentField.CHANNEL_COUNT 对齐。
+constexpr int CHANNEL_COUNT_FOR_SAMPLING = 5;
 // Guard against pathologically sparse positions making the flat grid huge.
 constexpr int64_t MAX_FLAT_GRID_CELLS = 4'000'000;
 
@@ -500,10 +502,62 @@ Dictionary CellSpatial::step_verlet_and_links(const PackedFloat32Array &pos_x,
 	return result;
 }
 
+// v0.48.0: 整场镜像查表。逐位复刻 SAMPLE_SOURCE 的索引推导：
+//   normalized = (position - (center - vec2(radius))) / (2.0 * radius)
+//   grid = ivec2(clamp(floor(normalized * resolution), 0, resolution - 1))
+// 关键在于**全程 float32**。GDScript 的 float 是 double，而 Vector2 分量是 float32，
+// `normalized.x * resolution` 在 GDScript 里会被提升成 double 乘法；resolution 为 32/64
+// 这类 2 的幂时结果相同，但一旦改成非 2 的幂就会和 shader 分叉。这里统一用 float，
+// 与 shader 的运算顺序和精度完全一致，因此镜像查表与 GPU dispatch 采样逐位相等。
+PackedFloat32Array CellSpatial::sample_fields_nearest(const PackedFloat32Array &field_flat,
+		const PackedFloat32Array &positions, int32_t resolution,
+		const Vector2 &center, double radius) {
+	PackedFloat32Array result;
+	const int64_t position_count = positions.size() / 2;
+	result.resize(position_count * CHANNEL_COUNT_FOR_SAMPLING);
+	if (position_count <= 0 || resolution < 2) {
+		return result;
+	}
+	const int64_t plane = static_cast<int64_t>(resolution) * static_cast<int64_t>(resolution);
+	if (field_flat.size() < plane * CHANNEL_COUNT_FOR_SAMPLING) {
+		result.resize(0);
+		return result;
+	}
+	const float *field = field_flat.ptr();
+	const float *pos = positions.ptr();
+	float *out = result.ptrw();
+	const float radius_f = static_cast<float>(radius);
+	const float base_x = static_cast<float>(center.x) - radius_f;
+	const float base_y = static_cast<float>(center.y) - radius_f;
+	const float span = 2.0f * radius_f;
+	const float resolution_f = static_cast<float>(resolution);
+	const int max_grid = resolution - 1;
+	for (int64_t i = 0; i < position_count; ++i) {
+		const float normalized_x = (pos[i * 2] - base_x) / span;
+		const float normalized_y = (pos[i * 2 + 1] - base_y) / span;
+		int grid_x = static_cast<int>(std::floor(normalized_x * resolution_f));
+		int grid_y = static_cast<int>(std::floor(normalized_y * resolution_f));
+		if (grid_x < 0) {
+			grid_x = 0;
+		} else if (grid_x > max_grid) {
+			grid_x = max_grid;
+		}
+		if (grid_y < 0) {
+			grid_y = 0;
+		} else if (grid_y > max_grid) {
+			grid_y = max_grid;
+		}
+		const int64_t local_index = static_cast<int64_t>(grid_y) * resolution + grid_x;
+		for (int channel = 0; channel < CHANNEL_COUNT_FOR_SAMPLING; ++channel) {
+			out[i * CHANNEL_COUNT_FOR_SAMPLING + channel] = field[channel * plane + local_index];
+		}
+	}
+	return result;
+}
+
 void CellSpatial::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("build_neighbor_csr", "pos_x", "pos_y", "alive", "cell_size"),
-			&CellSpatial::build_neighbor_csr);
-	ClassDB::bind_method(D_METHOD("collect_inputs_batch", "energies", "alive", "types", "fields_flat", "sample_indices", "neighbor_offsets", "neighbor_values", "energy_max"),
+			&CellSpatial::build_neighbor_csr);	ClassDB::bind_method(D_METHOD("collect_inputs_batch", "energies", "alive", "types", "fields_flat", "sample_indices", "neighbor_offsets", "neighbor_values", "energy_max"),
 			&CellSpatial::collect_inputs_batch);
 	ClassDB::bind_method(D_METHOD("collect_inputs_grid", "pos_x", "pos_y", "energies", "alive", "types", "fields_flat", "sample_indices", "cell_size", "energy_max"),
 			&CellSpatial::collect_inputs_grid);
@@ -513,4 +567,6 @@ void CellSpatial::_bind_methods() {
 			&CellSpatial::resolve_collisions_soft);
 	ClassDB::bind_method(D_METHOD("step_verlet_and_links", "pos_x", "pos_y", "prev_x", "prev_y", "alive", "link_a", "link_b", "rest_lengths", "damping", "constraint_iterations"),
 			&CellSpatial::step_verlet_and_links);
+	ClassDB::bind_method(D_METHOD("sample_fields_nearest", "field_flat", "positions", "resolution", "center", "radius"),
+			&CellSpatial::sample_fields_nearest);
 }

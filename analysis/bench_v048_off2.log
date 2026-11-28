@@ -1,0 +1,57 @@
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+Vulkan 1.4.312 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 3050 Laptop GPU
+
+[GameHUD] ready tools=14 modes=5 substrate=16 semantic=27
+[cellarium] boot ok basal_autonomy=0.57
+WINDOW_BENCH_SETUP cells=1025 native=true render_cache=true
+WINDOW_BENCH_MODE mirror=off
+WINDOW_BENCH_FLAT_PARITY values=5125 failures=0
+WINDOW_BENCH tick1 work_us avg=27416.0 p50=27426.0 p95=31641.0 max=33627 | frame_ms avg=16.66 p95=29.17
+WINDOW_BENCH tick3 work_us avg=47504.9 p50=47742.0 p95=52496.0 max=52977 | frame_ms avg=16.69 p95=30.79
+WINDOW_BENCH cache work_us avg=12844.6 p50=12846.0 p95=16304.0 max=17844 | frame_ms avg=16.53 p95=20.37
+WINDOW_BENCH tick1_cache work_us avg=38535.5 p50=37480.0 p95=46058.0 max=48553 | frame_ms avg=16.65 p95=27.78
+WINDOW_BENCH tick3_cache work_us avg=61091.5 p50=58959.0 p95=75604.0 max=80198 | frame_ms avg=16.66 p95=26.19
+WINDOW_BENCH_PART cmd avg=9.2us p50=9.0 p95=14.0 max=41
+WINDOW_BENCH_PART physics avg=17436.6us p50=14589.0 p95=29010.0 max=33631
+WINDOW_BENCH_PART dev avg=56.3us p50=51.0 p95=93.0 max=215
+WINDOW_BENCH_PART nutrient avg=41.9us p50=37.0 p95=70.0 max=199
+WINDOW_BENCH_PART food avg=12.9us p50=12.0 p95=23.0 max=82
+WINDOW_BENCH_PART field avg=1196.6us p50=1131.0 p95=1835.0 max=2354
+WINDOW_BENCH_STAGE behavior avg=1347.7us
+WINDOW_BENCH_STAGE physics avg=416.1us
+WINDOW_BENCH_STAGE metabolism avg=4080.3us
+WINDOW_BENCH_STAGE predation avg=155.0us
+WINDOW_BENCH_STAGE signal avg=584.1us
+WINDOW_BENCH_STAGE field avg=0.0us
+WINDOW_BENCH_STAGE commit avg=0.0us
+WINDOW_BENCH_STAGE total avg=6583.1us
+WINDOW_BENCH_SUBSTAGE beh_apply avg=253.7us
+WINDOW_BENCH_SUBSTAGE beh_collect avg=569.7us
+WINDOW_BENCH_SUBSTAGE beh_copy avg=52.8us
+WINDOW_BENCH_SUBSTAGE beh_eval avg=403.4us
+WINDOW_BENCH_SUBSTAGE beh_idxarr avg=34.7us
+WINDOW_BENCH_SUBSTAGE metab_base avg=290.5us
+WINDOW_BENCH_SUBSTAGE metab_env avg=1439.7us
+WINDOW_BENCH_SUBSTAGE metab_fields avg=2060.2us
+WINDOW_BENCH_SUBSTAGE metab_lifecycle avg=2.7us
+WINDOW_BENCH_SUBSTAGE metab_links avg=77.8us
+WINDOW_BENCH_SUBSTAGE metab_radius avg=114.7us
+WINDOW_BENCH_SUBSTAGE metab_rates avg=77.1us
+WINDOW_BENCH_SUBSTAGE phys_args avg=9.5us
+WINDOW_BENCH_SUBSTAGE phys_collision avg=175.6us
+WINDOW_BENCH_SUBSTAGE phys_collision_write avg=2.3us
+WINDOW_BENCH_SUBSTAGE phys_project avg=166.2us
+WINDOW_BENCH_SUBSTAGE phys_verlet avg=49.0us
+WINDOW_BENCH_SUBSTAGE phys_verlet_write avg=3.5us
+WINDOW_BENCH_SUBSTAGE setup_dispatch avg=9823.9us
+WINDOW_BENCH_SUBSTAGE setup_flow avg=18.8us
+WINDOW_BENCH_SUBSTAGE setup_positions avg=173.6us
+WINDOW_BENCH_SUBSTAGE sig_add avg=532.0us
+WINDOW_BENCH_SUBSTAGE sig_collect avg=40.7us
+WINDOW_BENCH_SUBSTAGE tick_setup avg=10028.2us
+WINDOW_BENCH_SUBSTAGE tick_stats avg=149.5us
+WINDOW_BENCH_ENVIDIAG calls=1946 duplicate=7.2us index_map=0.5us field_sample=6225.4us
+WINDOW_BENCH_GPUDIAG calls=1946 upload=68.9us dispatch=4787.4us readback=1342.2us post=6.5us
+WINDOW_BENCH_MIRROR readbacks=2 readback=922.0us lookups=2 lookup=5.0us cells=2 fresh=false
+WINDOW_BENCH_SIGSRC count=524
+WINDOW_BENCH_FILE C:/Users/瀹?AppData/Roaming/Godot/app_userdata/cellarium/window_perf_bench.txt

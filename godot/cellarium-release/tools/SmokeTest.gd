@@ -99,6 +99,8 @@ const SCRIPT_MANIFEST: Array[String] = [
 	"res://tools/HalfCircleProbe.gd",
 	"res://tools/TextureProbe.gd",
 	"res://tools/ViewDragCostProbe.gd",
+	# v0.48：整场镜像查表与 GPU dispatch 采样的逐位对照（需 Vulkan 窗口，headless 打印 SKIP）。
+	"res://tools/FieldMirrorParityProbe.gd",
 ]
 
 func _initialize() -> void:

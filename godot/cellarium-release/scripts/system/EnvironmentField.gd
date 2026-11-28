@@ -167,6 +167,23 @@ var diag_sample_upload_usec: int = 0
 var diag_sample_dispatch_usec: int = 0
 var diag_sample_readback_usec: int = 0
 var diag_sample_post_usec: int = 0
+## v0.48：整场镜像查表。GPU 后端每 tick 只回读一次全场（5R² floats），两次按细胞采样
+## 都在本机查表，省掉两次 submit()+sync() 停顿（真实窗口实测 567µs/次）。
+var prefer_native_sampler: bool = true
+## v0.48：整场回读时机。true = 在 diffuse_tick 的 submit()+sync() 之后立刻回读
+## （此时 GPU 队列刚排空，回读几乎免费）；false = 延迟到首次采样时回读。
+## 两者数值完全一致，只影响回读落在哪个时间窗口。
+var eager_mirror_readback: bool = true
+var _cpu_field_fresh: bool = false
+var _field_flat_mirror: PackedFloat32Array = PackedFloat32Array()
+var _native_sampler: RefCounted = null
+var _native_sampler_checked: bool = false
+## v0.48 诊断：镜像查表与整场回读耗时，只观测。
+var diag_mirror_readback_usec: int = 0
+var diag_mirror_lookup_usec: int = 0
+var diag_mirror_readback_count: int = 0
+var diag_mirror_lookup_count: int = 0
+var diag_mirror_lookup_cells: int = 0
 
 func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, defaults: PackedFloat32Array, prefer_compute: bool = true) -> bool:
 	if grid_resolution < 2 or dish_radius <= 0.0 or defaults.size() != CHANNEL_COUNT:
@@ -185,6 +202,13 @@ func configure(grid_resolution: int, dish_center: Vector2, dish_radius: float, d
 	_sample_cache.clear()
 	_pending_deltas.clear()
 	_cpu_field_dirty = false
+	_cpu_field_fresh = false
+	_field_flat_mirror = PackedFloat32Array()
+	diag_mirror_readback_usec = 0
+	diag_mirror_lookup_usec = 0
+	diag_mirror_readback_count = 0
+	diag_mirror_lookup_count = 0
+	diag_mirror_lookup_cells = 0
 	resolution = grid_resolution
 	center = dish_center
 	radius = dish_radius
@@ -354,6 +378,9 @@ func sample(position: Vector2) -> PackedFloat32Array:
 	zero_result.resize(CHANNEL_COUNT)
 	if channels.size() != CHANNEL_COUNT or not _is_inside(position):
 		return zero_result
+	# v0.48：镜像新鲜时直接本机查表，省掉单元素 dispatch + sync（consume 的兼容路径）。
+	if _cpu_field_fresh:
+		return _sample_cpu(position)
 	if backend_name == "gpu_compute" and _sample_pipeline.is_valid():
 		if _sample_cache.has(position):
 			return (_sample_cache[position] as PackedFloat32Array).duplicate()
@@ -430,38 +457,114 @@ func sample_cells(positions: Array[Vector2]) -> Array[PackedFloat32Array]:
 
 ## v0.30.0：零逐细胞分配版。CPU 回退直接写扁平 PackedFloat32Array；GPU 路径复用
 ## sample_cells() 的 dispatch/缓存语义后拷贝到扁平缓冲，数值与旧路径逐位一致。
+## v0.48：优先走「整场镜像查表」。一个 tick 里两次采样用的是同一份场状态（场扩散
+## 在 physics tick 之后才推进），旧路径却为此付了两次 submit()+sync()。现在每 tick
+## 只把 5R² 个 float 整块回读一次，两次采样都在本机按最近格查表。
 func sample_cells_flat(positions: Array[Vector2]) -> PackedFloat32Array:
 	var result: PackedFloat32Array = PackedFloat32Array()
 	result.resize(positions.size() * CHANNEL_COUNT)
 	if positions.is_empty():
 		return result
-	if backend_name != "gpu_compute" or positions.size() > MAX_GPU_SAMPLE_CELLS or not _sample_pipeline.is_valid():
+	if backend_name != "gpu_compute":
+		return _sample_cells_flat_cpu(positions, result)
+	var sampler: RefCounted = _get_native_sampler()
+	if sampler != null:
+		if _cpu_field_fresh or _refresh_cpu_mirror():
+			return _sample_cells_flat_mirror(sampler, positions, result)
+	if positions.size() > MAX_GPU_SAMPLE_CELLS or not _sample_pipeline.is_valid():
+		# 走 CPU 回退前必须同步镜像，否则读到的是上一 tick 的旧场值。
+		_refresh_cpu_mirror()
 		return _sample_cells_flat_cpu(positions, result)
 	# v0.42：专用 GPU 路径直接写扁平缓冲，不再经 sample_cells() 的逐细胞临时数组 / 字典缓存。
 	return _sample_cells_flat_gpu(positions, result)
 
-## v0.42：从 sample_cells_flat 抽出的 CPU 回退，数值公式与原内联循环逐位一致。
-func _sample_cells_flat_cpu(positions: Array[Vector2], result: PackedFloat32Array) -> PackedFloat32Array:
+## v0.48：C++ 查表内核（CellSpatial.sample_fields_nearest）。缺失时返回 null，
+## 采样退回 GPU dispatch 路径，行为与 v0.47 完全一致。
+func _get_native_sampler() -> RefCounted:
+	if not prefer_native_sampler:
+		return null
+	if not _native_sampler_checked:
+		_native_sampler_checked = true
+		if ClassDB.class_exists("CellSpatial"):
+			var candidate: RefCounted = ClassDB.instantiate("CellSpatial") as RefCounted
+			if candidate != null and candidate.has_method("sample_fields_nearest"):
+				_native_sampler = candidate
+	return _native_sampler
+
+## v0.48：把 GPU 驻留的整场状态一次性同步到 CPU 镜像（含 pending delta 结算）。
+## 返回镜像是否可用于查表。
+func _refresh_cpu_mirror() -> bool:
+	if backend_name != "gpu_compute" or _rendering_device == null or _buffers.size() != 2:
+		return false
+	var begin: int = Time.get_ticks_usec()
+	_read_gpu_state()
+	diag_mirror_readback_usec += maxi(0, Time.get_ticks_usec() - begin)
+	if _cpu_field_fresh:
+		diag_mirror_readback_count += 1
+	return _cpu_field_fresh
+
+## v0.48：整场镜像查表。与 GPU dispatch 路径逐位等价（同一 nearest 索引规则，
+## 由 FieldMirrorParityProbe 与真实窗口 MIRROR_PARITY 双重保证）。
+func _sample_cells_flat_mirror(sampler: RefCounted, positions: Array[Vector2],
+		result: PackedFloat32Array) -> PackedFloat32Array:
+	var flat_positions: PackedFloat32Array = PackedFloat32Array()
+	flat_positions.resize(positions.size() * 2)
 	for index in range(positions.size()):
 		var position: Vector2 = positions[index]
-		if channels.size() != CHANNEL_COUNT or not _is_inside(position):
+		flat_positions[index * 2] = position.x
+		flat_positions[index * 2 + 1] = position.y
+	var begin: int = Time.get_ticks_usec()
+	var samples: PackedFloat32Array = sampler.call("sample_fields_nearest",
+		_field_flat_mirror, flat_positions, resolution, center, radius) as PackedFloat32Array
+	diag_mirror_lookup_usec += maxi(0, Time.get_ticks_usec() - begin)
+	_sample_cache.clear()
+	if samples.size() == result.size():
+		diag_mirror_lookup_count += 1
+		diag_mirror_lookup_cells += positions.size()
+		return samples
+	# 内核不可用或长度异常时退回逐细胞 CPU 查表，保证不改变数值语义。
+	return _sample_cells_flat_cpu(positions, result)
+
+## v0.42：从 sample_cells_flat 抽出的 CPU 回退，数值公式与原内联循环逐位一致。
+## v0.47.0：把 channels.size() 的逐细胞属性访问提到循环外，并把 5 个通道数组绑到局部
+## 变量 —— 原来每细胞 5 次 `channels[ch]` 是 Variant 数组取元素再取下标，两层装箱。
+func _sample_cells_flat_cpu(positions: Array[Vector2], result: PackedFloat32Array) -> PackedFloat32Array:
+	if channels.size() != CHANNEL_COUNT:
+		return result
+	var channel_0: PackedFloat32Array = channels[0]
+	var channel_1: PackedFloat32Array = channels[1]
+	var channel_2: PackedFloat32Array = channels[2]
+	var channel_3: PackedFloat32Array = channels[3]
+	var channel_4: PackedFloat32Array = channels[4]
+	for index in range(positions.size()):
+		var position: Vector2 = positions[index]
+		if not _is_inside(position):
 			continue
 		var cell_index: int = _cell_index(position)
 		var offset: int = index * CHANNEL_COUNT
-		for channel_index in range(CHANNEL_COUNT):
-			result[offset + channel_index] = channels[channel_index][cell_index]
+		result[offset] = channel_0[cell_index]
+		result[offset + 1] = channel_1[cell_index]
+		result[offset + 2] = channel_2[cell_index]
+		result[offset + 3] = channel_3[cell_index]
+		result[offset + 4] = channel_4[cell_index]
 	return result
 
 ## v0.42：与 sample_cells() 同一 shader / 同一上传与同步顺序，只是把回读字节直接解码进扁平缓冲。
 ## 语义差异仅限兼容接口 sample() 的缓存填充：这里清空缓存而不填充，sample() 会走单元素
 ## dispatch（同一 shader，数值逐位一致），不会再拿到上一批的旧场值。
+## v0.47.0：上传与回读都改成整块数组转换。原来 1024 次 encode_float + 5120 次 decode_float
+## 是纯 GDScript 逐元素序列化（真实窗口实测 upload 54.6µs + post 181.7µs = 236µs/次，
+## 每 tick 两次即 472µs）。to_byte_array() / to_float32_array() 都是 memcpy 级整块转换，
+## 与逐元素 encode/decode 同一字节序（均为本机端序 float32），数值逐位一致。
 func _sample_cells_flat_gpu(positions: Array[Vector2], result: PackedFloat32Array) -> PackedFloat32Array:
 	var t0: int = Time.get_ticks_usec()
-	var position_bytes: PackedByteArray = PackedByteArray()
-	position_bytes.resize(positions.size() * 8)
+	var flat_positions: PackedFloat32Array = PackedFloat32Array()
+	flat_positions.resize(positions.size() * 2)
 	for index in range(positions.size()):
-		position_bytes.encode_float(index * 8, positions[index].x)
-		position_bytes.encode_float(index * 8 + 4, positions[index].y)
+		var position: Vector2 = positions[index]
+		flat_positions[index * 2] = position.x
+		flat_positions[index * 2 + 1] = position.y
+	var position_bytes: PackedByteArray = flat_positions.to_byte_array()
 	var params: PackedFloat32Array = PackedFloat32Array([float(resolution), float(positions.size()), center.x, center.y, radius])
 	if _rendering_device.buffer_update(_position_buffer, 0, position_bytes.size(), position_bytes) != OK:
 		return _sample_cells_flat_cpu(positions, result)
@@ -484,11 +587,16 @@ func _sample_cells_flat_gpu(positions: Array[Vector2], result: PackedFloat32Arra
 		return _sample_cells_flat_cpu(positions, result)
 	var t3: int = Time.get_ticks_usec()
 	_sample_cache.clear()
-	for index in range(positions.size()):
-		var base: int = index * CHANNEL_COUNT * 4
-		var offset: int = index * CHANNEL_COUNT
-		for channel_index in range(CHANNEL_COUNT):
-			result[offset + channel_index] = bytes.decode_float(base + channel_index * 4)
+	var floats: PackedFloat32Array = bytes.to_float32_array()
+	if floats.size() == result.size():
+		result = floats
+	else:
+		# 回读长度异常时退回逐元素解码，保证不改变数值语义。
+		for index in range(positions.size()):
+			var base: int = index * CHANNEL_COUNT * 4
+			var offset: int = index * CHANNEL_COUNT
+			for channel_index in range(CHANNEL_COUNT):
+				result[offset + channel_index] = bytes.decode_float(base + channel_index * 4)
 	var t4: int = Time.get_ticks_usec()
 	_gpu_sample_count += 1
 	_gpu_sample_cells += positions.size()
@@ -512,6 +620,8 @@ func clear_runtime_caches() -> void:
 	_sample_cache.clear()
 	_pending_deltas.clear()
 	_gpu_last_sample_bytes = 0
+	_cpu_field_fresh = false
+	_field_flat_mirror = PackedFloat32Array()
 
 func _read_gpu_state() -> void:
 	if backend_name == "gpu_compute" and _rendering_device != null and _buffers.size() == 2:
@@ -587,6 +697,8 @@ func _flush_pending_deltas() -> bool:
 	_rendering_device.sync()
 	_gpu_delta_count += count
 	_pending_deltas.clear()
+	# v0.48：delta 已写进 GPU 场缓冲，CPU 镜像作废。
+	_cpu_field_fresh = false
 	return true
 
 func get_total_nutrient() -> float:
@@ -658,6 +770,16 @@ func diffuse_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 			_gpu_tick_count += 1
 			_active_buffer = 1 - _active_buffer
 			_sample_cache.clear()
+			# v0.48：新场值只存在于 GPU。默认在刚排空队列的窗口内立刻整场回读一次
+			# ——真实窗口实测同一份 20KB 回读，紧跟 sync 时约 80µs，隔一段时间再读
+			# 会等渲染队列排空，涨到 700µs 级。eager=false 时延迟到首次采样。
+			_cpu_field_fresh = false
+			if eager_mirror_readback:
+				var mirror_begin: int = Time.get_ticks_usec()
+				_read_active_buffer(_active_buffer)
+				diag_mirror_readback_usec += maxi(0, Time.get_ticks_usec() - mirror_begin)
+				if _cpu_field_fresh:
+					diag_mirror_readback_count += 1
 	else:
 		_apply_pending_deltas_cpu()
 		_apply_cpu_diffusion(_pending_sources)
@@ -666,14 +788,23 @@ func diffuse_tick(source_additions: Array[PackedFloat32Array] = []) -> bool:
 	return true
 
 ## v0.42 诊断：每次批量 GPU 采样的四段平均耗时（微秒），只读。
+## v0.48：新增镜像查表计数与平均耗时，用于确认「每 tick 一次整场回读」是否成立。
 func get_sample_diagnostics() -> Dictionary:
 	var divisor: float = float(maxi(1, diag_sample_count))
+	var readback_divisor: float = float(maxi(1, diag_mirror_readback_count))
+	var lookup_divisor: float = float(maxi(1, diag_mirror_lookup_count))
 	return {
 		"calls": diag_sample_count,
 		"upload_usec": float(diag_sample_upload_usec) / divisor,
 		"dispatch_usec": float(diag_sample_dispatch_usec) / divisor,
 		"readback_usec": float(diag_sample_readback_usec) / divisor,
 		"post_usec": float(diag_sample_post_usec) / divisor,
+		"mirror_readback_count": diag_mirror_readback_count,
+		"mirror_readback_usec": float(diag_mirror_readback_usec) / readback_divisor,
+		"mirror_lookup_count": diag_mirror_lookup_count,
+		"mirror_lookup_usec": float(diag_mirror_lookup_usec) / lookup_divisor,
+		"mirror_lookup_cells": diag_mirror_lookup_cells,
+		"mirror_fresh": _cpu_field_fresh,
 	}
 
 func get_backend_diagnostics() -> Dictionary:
@@ -926,16 +1057,33 @@ func _upload_active_buffer() -> bool:
 	if _rendering_device == null or _buffers.size() != 2:
 		return false
 	var bytes: PackedByteArray = _pack_channels()
+	# v0.48：GPU 侧已被改写，镜像不再新鲜，下次采样会重新整场回读。
+	_cpu_field_fresh = false
 	return _rendering_device.buffer_update(_buffers[_active_buffer], 0, bytes.size(), bytes) == OK
 
+## v0.48：整场回读改为整块数组转换。原来逐元素 `decode_float` 是 5120 次纯 GDScript
+## 调用；`to_float32_array()` 是 memcpy 级整块转换，同一端序 float32，数值逐位一致。
+## 回读结果同时成为 `_field_flat_mirror`（扁平 5R²，通道优先）与 5 个通道数组的来源，
+## 因此镜像查表可以零拷贝地把扁平缓冲交给 C++ 内核。
 func _read_active_buffer(buffer_index: int) -> void:
 	_gpu_full_readback_count += 1
 	var bytes: PackedByteArray = _rendering_device.buffer_get_data(_buffers[buffer_index])
-	var cursor: int = 0
+	var plane: int = resolution * resolution
+	if bytes.size() != plane * CHANNEL_COUNT * 4:
+		# 长度异常时退回逐元素解码，保持旧行为并禁用镜像查表。
+		var cursor: int = 0
+		for channel_index in range(CHANNEL_COUNT):
+			for index in range(plane):
+				channels[channel_index][index] = bytes.decode_float(cursor)
+				cursor += 4
+		_cpu_field_fresh = false
+		_field_flat_mirror = PackedFloat32Array()
+		return
+	var floats: PackedFloat32Array = bytes.to_float32_array()
+	_field_flat_mirror = floats
 	for channel_index in range(CHANNEL_COUNT):
-		for index in range(channels[channel_index].size()):
-			channels[channel_index][index] = bytes.decode_float(cursor)
-			cursor += 4
+		channels[channel_index] = floats.slice(channel_index * plane, (channel_index + 1) * plane)
+	_cpu_field_fresh = true
 
 func _pack_channels(source_channels: Array[PackedFloat32Array] = []) -> PackedByteArray:
 	var values: Array[PackedFloat32Array] = source_channels if source_channels.size() == CHANNEL_COUNT else channels

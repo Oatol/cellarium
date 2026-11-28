@@ -46,6 +46,8 @@ var food_store: RefCounted = FOOD_STORE_SCRIPT.new() as RefCounted
 var _sample_positions: Array[Vector2] = []
 var _sample_cell_indices: Array[int] = []
 var _sample_index_by_cell: Dictionary = {}
+## v0.47.0：索引字典惰性构建标记。每次采样开始时置脏，只有兼容接口真的用到才重建。
+var _sample_index_stale: bool = true
 var _field_samples: Array[PackedFloat32Array] = []
 var _field_samples_flat: PackedFloat32Array = PackedFloat32Array()
 ## v0.42 诊断：批量采样准备分段累计耗时，只观测；不进 state hash / 存档。
@@ -219,11 +221,15 @@ func begin_field_sampling(positions: Array[Vector2]) -> void:
 	_sample_positions = positions.duplicate()
 	_sample_cell_indices.clear()
 	_sample_index_by_cell.clear()
+	_sample_index_stale = true
 	_field_samples = field.call("sample_cells", positions)
 	_field_samples_flat = PackedFloat32Array()
 
 ## v0.30.0：按 cell_index 建一次索引，消除 sample_fields() 的 O(n) 线性查找。
 ## cell_indices 与 positions 一一对应（由 OrganismManager 按活细胞升序生成）。
+## v0.47.0：索引字典改为惰性构建。真实窗口实测建表 100.8µs/次、每 tick 两次即 200µs，
+## 但热路径只消费扁平数组 + get_field_sample_index_array()（v0.45 起已不再读该字典），
+## 唯一消费者是兼容接口 sample_fields_for_cell()。改为首次调用时才建，语义不变。
 func begin_field_sampling_indexed(positions: Array[Vector2], cell_indices: Array[int]) -> void:
 	# v0.42：分段计时仅用于定位 dispatch 内部热点，不改变任何采样数值与顺序。
 	var t0: int = Time.get_ticks_usec()
@@ -231,8 +237,7 @@ func begin_field_sampling_indexed(positions: Array[Vector2], cell_indices: Array
 	_sample_cell_indices = cell_indices.duplicate()
 	var t1: int = Time.get_ticks_usec()
 	_sample_index_by_cell.clear()
-	for sample_index in range(_sample_cell_indices.size()):
-		_sample_index_by_cell[_sample_cell_indices[sample_index]] = sample_index
+	_sample_index_stale = true
 	var t2: int = Time.get_ticks_usec()
 	_field_samples_flat = field.call("sample_cells_flat", positions)
 	var t3: int = Time.get_ticks_usec()
@@ -251,6 +256,8 @@ func sample_fields(position: Vector2) -> PackedFloat32Array:
 func sample_fields_for_cell(cell_index: int) -> PackedFloat32Array:
 	var result: PackedFloat32Array = PackedFloat32Array()
 	result.resize(FIELD_CHANNEL_COUNT)
+	if _sample_index_stale:
+		_rebuild_sample_index_by_cell()
 	var sample_index: int = int(_sample_index_by_cell.get(cell_index, -1))
 	if sample_index < 0:
 		return result
@@ -259,6 +266,13 @@ func sample_fields_for_cell(cell_index: int) -> PackedFloat32Array:
 		if offset + channel_index < _field_samples_flat.size():
 			result[channel_index] = _field_samples_flat[offset + channel_index]
 	return result
+
+## v0.47.0：惰性建表（唯一消费者是 sample_fields_for_cell）。内容与逐 tick 重建完全一致。
+func _rebuild_sample_index_by_cell() -> void:
+	_sample_index_by_cell.clear()
+	for sample_index in range(_sample_cell_indices.size()):
+		_sample_index_by_cell[_sample_cell_indices[sample_index]] = sample_index
+	_sample_index_stale = false
 
 func get_field_samples_flat() -> PackedFloat32Array:
 	return _field_samples_flat

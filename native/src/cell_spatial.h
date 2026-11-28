@@ -5,6 +5,7 @@
 #include "godot_cpp/variant/packed_float32_array.hpp"
 #include "godot_cpp/variant/packed_int32_array.hpp"
 #include "godot_cpp/variant/packed_byte_array.hpp"
+#include "godot_cpp/variant/vector2.hpp"
 
 using namespace godot;
 
@@ -64,4 +65,14 @@ public:
 			const PackedInt32Array &link_a, const PackedInt32Array &link_b,
 			const PackedFloat32Array &rest_lengths, double damping,
 			int constraint_iterations);
+
+	// v0.48.0: 整场镜像查表。field_flat 是 5×R² 的扁平通道布局（通道优先，与 GPU
+	// storage buffer 同序），positions 是 N×2 的扁平世界坐标。返回 N×5 扁平样本。
+	// 逐位复刻 SAMPLE_SOURCE：全程 float32 运算、先减半径基准再归一化、乘法后 floor、
+	// 再 clamp 到 [0, R-1]，越界位置按最近格 clamp（不做皿内判定，与 shader 一致）。
+	// 用途：GPU 后端每 tick 只回读一次全场，两次按细胞采样都走本内核，省掉两次
+	// submit()+sync() 停顿。
+	PackedFloat32Array sample_fields_nearest(const PackedFloat32Array &field_flat,
+			const PackedFloat32Array &positions, int32_t resolution,
+			const Vector2 &center, double radius);
 };
